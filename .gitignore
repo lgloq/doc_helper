@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Data and runtime artifacts
+backend/data/
+*.log
+
+# Environment
+.env
+backend/.env
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

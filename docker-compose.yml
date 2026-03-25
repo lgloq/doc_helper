@@ -1,0 +1,73 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: eka-postgres
+    environment:
+      POSTGRES_DB: enterprise_knowledge_assistant
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d enterprise_knowledge_assistant"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7
+    container_name: eka-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: eka-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      APP_NAME: Enterprise Knowledge Assistant
+      ENVIRONMENT: development
+      DEBUG: "true"
+      LOG_LEVEL: INFO
+      API_V1_PREFIX: /api/v1
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/enterprise_knowledge_assistant
+      REDIS_URL: redis://redis:6379/0
+      CORS_ORIGINS: http://localhost:5173
+      SEED_MOCK_DATA: "true"
+      SEED_DEMO_EVAL_CASES: "true"
+      DATA_DIR: /app/backend/data
+      EMBEDDING_PROVIDER: deterministic
+      ANSWER_PROVIDER: deterministic
+      DIFF_SUMMARY_PROVIDER: deterministic
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app/backend
+      - ./scripts:/app/scripts
+    command: python scripts/start_backend.py
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: eka-frontend
+    depends_on:
+      - backend
+    ports:
+      - "5173:5173"
+
+volumes:
+  postgres_data:
