@@ -5,9 +5,9 @@ import { ErrorNotice } from "../components/ErrorNotice";
 import { useAppContext } from "../context/AppContext";
 
 const demoAccounts = [
-  { label: "Viewer", email: "viewer@local.test", password: "viewer123" },
-  { label: "Manager", email: "manager@local.test", password: "manager123" },
-  { label: "Admin", email: "admin@local.test", password: "admin123" },
+  { label: "普通员工", email: "viewer@local.test", password: "viewer123" },
+  { label: "组长", email: "manager@local.test", password: "manager123" },
+  { label: "管理员", email: "admin@local.test", password: "admin123" },
 ];
 
 export function LoginPage() {
@@ -32,7 +32,7 @@ export function LoginPage() {
       const nextPath = (location.state as { from?: { pathname?: string } } | null)?.from?.pathname ?? "/documents";
       navigate(nextPath, { replace: true });
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "Login failed.");
+      setError(nextError instanceof Error ? nextError.message : "登录失败，请检查账号或密码。");
     } finally {
       setSubmitting(false);
     }
@@ -42,25 +42,34 @@ export function LoginPage() {
     <div className="login-page">
       <div className="login-card">
         <div className="login-copy">
-          <span className="eyebrow">Phase 9 Frontend</span>
-          <h1>Enterprise Knowledge Assistant</h1>
-          <p>
-            A minimal operator console for permission-aware retrieval, grounded QA, workflow artifacts, document
-            version diff, and eval visibility.
-          </p>
+          <span className="eyebrow">前端演示版</span>
+          <h1>企业知识助手</h1>
+          <p>一个面向企业内部知识库的最小可用控制台，支持权限感知检索、引用式问答、派生结果、版本对比与评测追踪。</p>
         </div>
         <form className="stack" onSubmit={handleSubmit}>
           <label>
-            <span>Email</span>
-            <input value={email} onChange={(event) => setEmail(event.target.value)} type="email" required />
+            <span>邮箱</span>
+            <input
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              type="email"
+              placeholder="请输入登录邮箱"
+              required
+            />
           </label>
           <label>
-            <span>Password</span>
-            <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" required />
+            <span>密码</span>
+            <input
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              type="password"
+              placeholder="请输入密码"
+              required
+            />
           </label>
           <ErrorNotice message={error} />
           <button className="primary-button" disabled={submitting} type="submit">
-            {submitting ? "Signing in..." : "Sign in"}
+            {submitting ? "登录中..." : "登录"}
           </button>
         </form>
         <div className="demo-account-grid">
@@ -74,7 +83,7 @@ export function LoginPage() {
               }}
               type="button"
             >
-              Use {account.label}
+              使用{account.label}账号
             </button>
           ))}
         </div>
@@ -82,3 +91,4 @@ export function LoginPage() {
     </div>
   );
 }
+

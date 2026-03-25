@@ -1,6 +1,6 @@
 """add eval and observability tables
 
-Revision ID: 0005_add_eval_and_observability
+Revision ID: 0005_eval_observability
 Revises: 0004_add_workflow_artifacts
 Create Date: 2026-03-25 02:00:00.000000
 """
@@ -10,7 +10,7 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-revision = "0005_add_eval_and_observability"
+revision = "0005_eval_observability"    # 0005_add_eval_and_observability
 down_revision = "0004_add_workflow_artifacts"
 branch_labels = None
 depends_on = None

@@ -104,6 +104,7 @@ class OpenAIDiffSummaryGenerator:
                     ensure_ascii=False,
                 )
             )
+        joined_change_lines = "\n".join(change_lines)
         prompt = (
             "You summarize version diffs for enterprise documents.\n"
             "Use only the diff data below. Do not infer from the full document.\n"
@@ -111,7 +112,7 @@ class OpenAIDiffSummaryGenerator:
             "Return JSON only with keys: summary, additions, deletions, modifications.\n"
             "Each additions/deletions/modifications field must be an array of short strings.\n\n"
             "Structured changes:\n"
-            f"{'\n'.join(change_lines)}\n\n"
+            f"{joined_change_lines}\n\n"
             "Unified diff excerpt:\n"
             f"{unified_diff[:6000]}"
         )

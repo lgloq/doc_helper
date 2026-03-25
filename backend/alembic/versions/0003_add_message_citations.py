@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision = "0003_add_message_citations"
-down_revision = "0002_add_chunks_and_ingestion_metadata"
+down_revision = "0002_add_chunks"
 branch_labels = None
 depends_on = None
 

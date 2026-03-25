@@ -5,6 +5,7 @@ import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 import { useAppContext } from "../context/AppContext";
 import { api } from "../lib/api";
+import { formatDiffChangeType, formatIngestStatus, formatSummaryProvider } from "../lib/display";
 import { truncate } from "../lib/format";
 import type { DocumentDiffRead, DocumentDiffSummaryRead, DocumentRead, DocumentVersionRead } from "../types/api";
 
@@ -31,7 +32,7 @@ export function VersionsPage() {
         const firstDocumentId = items[0]?.id ?? "";
         setDocumentId(firstDocumentId);
       })
-      .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "Failed to load documents."));
+      .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "加载文档列表失败。"));
   }, [token]);
 
   useEffect(() => {
@@ -46,42 +47,42 @@ export function VersionsPage() {
         setFromVersionId(items[1]?.id ?? items[0]?.id ?? "");
         setToVersionId(items[0]?.id ?? "");
       })
-      .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "Failed to load versions."));
+      .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "加载版本列表失败。"));
   }, [documentId, token]);
 
   async function handleLoadDiff() {
     if (!token || !documentId || !fromVersionId || !toVersionId) {
-      setStatusMessage("Select a document and two versions first.");
+      setStatusMessage("请先选择文档和两个版本。");
       return;
     }
     try {
       const nextDiff = await api.getDocumentDiff(token, documentId, fromVersionId, toVersionId);
       setDiff(nextDiff);
-      setStatusMessage("Loaded raw diff.");
+      setStatusMessage("已加载原始差异。");
     } catch (nextError) {
-      setStatusMessage(nextError instanceof Error ? nextError.message : "Failed to generate diff.");
+      setStatusMessage(nextError instanceof Error ? nextError.message : "生成差异失败。");
     }
   }
 
   async function handleLoadSummary() {
     if (!token || !documentId || !fromVersionId || !toVersionId) {
-      setStatusMessage("Select a document and two versions first.");
+      setStatusMessage("请先选择文档和两个版本。");
       return;
     }
     try {
       const nextSummary = await api.summarizeDocumentDiff(token, documentId, fromVersionId, toVersionId);
       setSummary(nextSummary);
-      setStatusMessage("Generated summary and impact hints.");
+      setStatusMessage("已生成差异摘要与影响提示。");
     } catch (nextError) {
-      setStatusMessage(nextError instanceof Error ? nextError.message : "Failed to summarize diff.");
+      setStatusMessage(nextError instanceof Error ? nextError.message : "生成差异摘要失败。");
     }
   }
 
   return (
     <div className="page-stack">
       <PageHeader
-        title="Version Compare"
-        description="Inspect raw text diff between versions, then summarize only from the diff output so change review stays grounded and explainable."
+        title="版本对比"
+        description="查看两个版本之间的原始文本差异，并基于差异结果生成可解释的中文摘要。"
       />
       <ErrorNotice message={error} />
       {statusMessage ? <div className="info-block">{statusMessage}</div> : null}
@@ -89,7 +90,7 @@ export function VersionsPage() {
       <section className="panel stack">
         <div className="page-grid version-selector-grid">
           <label>
-            <span>Document</span>
+            <span>文档</span>
             <select value={documentId} onChange={(event) => setDocumentId(event.target.value)}>
               {documents.map((document) => (
                 <option key={document.id} value={document.id}>
@@ -99,21 +100,21 @@ export function VersionsPage() {
             </select>
           </label>
           <label>
-            <span>From version</span>
+            <span>起始版本</span>
             <select value={fromVersionId} onChange={(event) => setFromVersionId(event.target.value)}>
               {versions.map((version) => (
                 <option key={version.id} value={version.id}>
-                  v{version.version_number} · {version.ingest_status}
+                  v{version.version_number} · {formatIngestStatus(version.ingest_status)}
                 </option>
               ))}
             </select>
           </label>
           <label>
-            <span>To version</span>
+            <span>目标版本</span>
             <select value={toVersionId} onChange={(event) => setToVersionId(event.target.value)}>
               {versions.map((version) => (
                 <option key={version.id} value={version.id}>
-                  v{version.version_number} · {version.ingest_status}
+                  v{version.version_number} · {formatIngestStatus(version.ingest_status)}
                 </option>
               ))}
             </select>
@@ -121,10 +122,10 @@ export function VersionsPage() {
         </div>
         <div className="inline-actions">
           <button className="secondary-button" onClick={handleLoadDiff} type="button">
-            Load raw diff
+            加载原始差异
           </button>
           <button className="primary-button" onClick={handleLoadSummary} type="button">
-            Summarize diff
+            生成差异摘要
           </button>
         </div>
       </section>
@@ -132,7 +133,7 @@ export function VersionsPage() {
       <div className="page-grid versions-layout">
         <section className="panel stack">
           <div className="panel-header">
-            <h3>Raw diff</h3>
+            <h3>原始差异</h3>
             {diff ? (
               <StatusBadge tone="warning">
                 +{diff.added_count} / -{diff.deleted_count} / ~{diff.modified_count}
@@ -142,75 +143,84 @@ export function VersionsPage() {
           {diff ? (
             <>
               <div className="metadata-grid">
-                <span>from v{diff.from_version_number}</span>
-                <span>to v{diff.to_version_number}</span>
+                <span>起始版本 v{diff.from_version_number}</span>
+                <span>目标版本 v{diff.to_version_number}</span>
               </div>
               <pre className="diff-block">{diff.unified_diff}</pre>
               <div className="stack dense-stack">
                 {diff.changes.slice(0, 8).map((change, index) => (
                   <div className="list-card" key={`${change.change_type}-${index}`}>
                     <div className="list-card-topline">
-                      <strong>{change.change_type}</strong>
+                      <strong>{formatDiffChangeType(change.change_type)}</strong>
                       <span>
                         {change.from_paragraph_start ?? "-"} → {change.to_paragraph_start ?? "-"}
                       </span>
                     </div>
-                    <p>{truncate(change.new_text ?? change.old_text ?? "No text", 240)}</p>
+                    <p>{truncate(change.new_text ?? change.old_text ?? "暂无文本", 240)}</p>
                   </div>
                 ))}
               </div>
             </>
           ) : (
-            <p className="muted">Pick two versions to view paragraph-level diff.</p>
+            <p className="muted">请选择两个版本以查看段落级差异。</p>
           )}
         </section>
 
         <section className="panel stack">
           <div className="panel-header">
-            <h3>Grounded summary</h3>
-            {summary ? <StatusBadge tone="success">{summary.summary_provider}</StatusBadge> : null}
+            <h3>差异摘要</h3>
+            {summary ? <StatusBadge tone="success">{formatSummaryProvider(summary.summary_provider)}</StatusBadge> : null}
           </div>
           {summary ? (
             <>
               <p>{summary.summary}</p>
               <div className="subsection-header">
-                <h4>Additions</h4>
+                <h4>新增内容</h4>
               </div>
               <ul className="plain-list">
-                {summary.additions.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
+                {summary.additions.length ? (
+                  summary.additions.map((item) => <li key={item}>{item}</li>)
+                ) : (
+                  <li>暂无新增重点。</li>
+                )}
               </ul>
               <div className="subsection-header">
-                <h4>Deletions</h4>
+                <h4>删除内容</h4>
               </div>
               <ul className="plain-list">
-                {summary.deletions.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
+                {summary.deletions.length ? (
+                  summary.deletions.map((item) => <li key={item}>{item}</li>)
+                ) : (
+                  <li>暂无删除重点。</li>
+                )}
               </ul>
               <div className="subsection-header">
-                <h4>Modifications</h4>
+                <h4>修改内容</h4>
               </div>
               <ul className="plain-list">
-                {summary.modifications.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
+                {summary.modifications.length ? (
+                  summary.modifications.map((item) => <li key={item}>{item}</li>)
+                ) : (
+                  <li>暂无修改重点。</li>
+                )}
               </ul>
               <div className="subsection-header">
-                <h4>Impact hints</h4>
+                <h4>潜在影响</h4>
               </div>
               <ul className="plain-list">
-                {summary.impact_hints.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
+                {summary.impact_hints.length ? (
+                  summary.impact_hints.map((item) => <li key={item}>{item}</li>)
+                ) : (
+                  <li>暂无明显影响提示。</li>
+                )}
               </ul>
             </>
           ) : (
-            <p className="muted">Run diff summary to highlight additions, deletions, modifications, and impact hints.</p>
+            <p className="muted">生成差异摘要后，将在这里展示新增、删除、修改和潜在影响提示。</p>
           )}
         </section>
       </div>
     </div>
   );
 }
+

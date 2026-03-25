@@ -1,6 +1,6 @@
 """add chunks and ingestion metadata
 
-Revision ID: 0002_add_chunks_and_ingestion_metadata
+Revision ID: 0002_add_chunks
 Revises: 0001_initial_schema
 Create Date: 2026-03-24 00:30:00.000000
 """
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects import postgresql
 
-revision = "0002_add_chunks_and_ingestion_metadata"
+revision = "0002_add_chunks"    # 0002_add_chunks_and_ingestion_metadata
 down_revision = "0001_initial_schema"
 branch_labels = None
 depends_on = None

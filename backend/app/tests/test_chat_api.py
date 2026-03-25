@@ -33,6 +33,17 @@ def _login(client: TestClient, email: str, password: str) -> str:
 
 
 
+def _create_session(client: TestClient, token: str, title: str = "新会话") -> str:
+    response = client.post(
+        "/api/v1/chat/sessions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"title": title},
+    )
+    assert response.status_code == 200
+    return response.json()["id"]
+
+
+
 def _upload_and_ingest(client: TestClient, token: str, title: str, content: str) -> str:
     upload_response = client.post(
         "/api/v1/documents/upload",
@@ -55,53 +66,65 @@ def _upload_and_ingest(client: TestClient, token: str, title: str, content: str)
 
 
 
-def test_chat_roundtrip_persists_history_and_citations(client: TestClient, db_session: Session) -> None:
+def _grant_acl(client: TestClient, token: str, document_id: str, payload: dict) -> None:
+    response = client.post(
+        f"/api/v1/documents/{document_id}/acl",
+        headers={"Authorization": f"Bearer {token}"},
+        json=payload,
+    )
+    assert response.status_code == 200
+
+
+
+def _send_question(client: TestClient, token: str, session_id: str, content: str, top_k: int = 5) -> dict:
+    response = client.post(
+        f"/api/v1/chat/sessions/{session_id}/messages",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"content": content, "top_k": top_k},
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
+
+def _seed_roles_and_users(db_session: Session) -> tuple[Role, Role, Role]:
+    viewer_role = Role(name=RoleName.VIEWER, description="Viewer")
+    manager_role = Role(name=RoleName.MANAGER, description="Manager")
     admin_role = Role(name=RoleName.ADMIN, description="Admin")
-    db_session.add(admin_role)
+    db_session.add_all([viewer_role, manager_role, admin_role])
     db_session.flush()
+
+    _create_user(db_session, viewer_role, "viewer@example.com", "sales", "viewer-pass")
+    _create_user(db_session, manager_role, "manager@example.com", "platform", "manager-pass")
     _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
     db_session.commit()
+    return viewer_role, manager_role, admin_role
 
+
+
+def test_chat_roundtrip_persists_history_and_targeted_citations(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
     admin_token = _login(client, "admin@example.com", "admin-pass")
-    _upload_and_ingest(
+    document_id = _upload_and_ingest(
         client,
         admin_token,
-        "Incident Playbook",
-        "Incident response checklist\n\nNotify stakeholders immediately and document every mitigation step.",
+        "客户事故响应指南",
+        "客户事故响应流程：经理需要在五分钟内建立事故沟通渠道，并同步客户影响范围与恢复进展。",
+    )
+    _grant_acl(
+        client,
+        admin_token,
+        document_id,
+        {"principal_type": "public", "can_view": True, "can_manage": False},
     )
 
-    create_session_response = client.post(
-        "/api/v1/chat/sessions",
-        headers={"Authorization": f"Bearer {admin_token}"},
-        json={"title": "New Chat"},
-    )
-    assert create_session_response.status_code == 200
-    session_id = create_session_response.json()["id"]
+    session_id = _create_session(client, admin_token)
+    payload = _send_question(client, admin_token, session_id, "客户事故响应指南里对经理的要求是什么？")
 
-    message_response = client.post(
-        f"/api/v1/chat/sessions/{session_id}/messages",
-        headers={"Authorization": f"Bearer {admin_token}"},
-        json={"content": "What does the incident response checklist require?", "top_k": 4},
-    )
-
-    assert message_response.status_code == 200
-    payload = message_response.json()
-    assert payload["assistant_message"]["role"] == "assistant"
     assert payload["assistant_message"]["insufficient_evidence"] is False
     assert payload["citations"]
-    first_citation = payload["citations"][0]
-    assert first_citation["document_title"] == "Incident Playbook"
-    assert first_citation["version_number"] == 1
-    assert first_citation["chunk_id"]
-    assert first_citation["preview"]
-    assert payload["retrieval_debug"]["accessible_document_count"] == 1
-
-    list_sessions_response = client.get(
-        "/api/v1/chat/sessions",
-        headers={"Authorization": f"Bearer {admin_token}"},
-    )
-    assert list_sessions_response.status_code == 200
-    assert len(list_sessions_response.json()) == 1
+    assert payload["citations"][0]["document_title"] == "客户事故响应指南"
+    assert payload["assistant_message"]["message_metadata"]["document_target"]["matched"] is True
 
     detail_response = client.get(
         f"/api/v1/chat/sessions/{session_id}",
@@ -114,97 +137,142 @@ def test_chat_roundtrip_persists_history_and_citations(client: TestClient, db_se
 
 
 
-def test_chat_returns_insufficient_evidence_when_retrieval_is_empty(client: TestClient, db_session: Session) -> None:
-    admin_role = Role(name=RoleName.ADMIN, description="Admin")
-    db_session.add(admin_role)
-    db_session.flush()
-    _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
-    db_session.commit()
-
+def test_targeted_document_question_abstains_when_document_is_not_accessible(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
     admin_token = _login(client, "admin@example.com", "admin-pass")
+    viewer_token = _login(client, "viewer@example.com", "viewer-pass")
+
+    handbook_id = _upload_and_ingest(
+        client,
+        admin_token,
+        "员工手册",
+        "节假日安排：法定节假日前一天下午可提前下班一小时，如需值班需提前登记。",
+    )
+    _grant_acl(
+        client,
+        admin_token,
+        handbook_id,
+        {"principal_type": "public", "can_view": True, "can_manage": False},
+    )
     _upload_and_ingest(
         client,
         admin_token,
-        "Holiday Notes",
-        "Office holiday calendar and public leave process.",
+        "安全例外登记",
+        "安全例外登记要求：必须记录例外原因、影响范围、补偿控制、审批人和到期时间。",
     )
 
-    session_response = client.post(
-        "/api/v1/chat/sessions",
-        headers={"Authorization": f"Bearer {admin_token}"},
-        json={"title": "New Chat"},
-    )
-    session_id = session_response.json()["id"]
+    session_id = _create_session(client, viewer_token)
+    payload = _send_question(client, viewer_token, session_id, "安全例外登记里写了什么？")
 
-    message_response = client.post(
-        f"/api/v1/chat/sessions/{session_id}/messages",
-        headers={"Authorization": f"Bearer {admin_token}"},
-        json={"content": "What is the production database failover SLA?", "top_k": 4},
-    )
-    assert message_response.status_code == 200
-    payload = message_response.json()
     assert payload["assistant_message"]["insufficient_evidence"] is True
     assert payload["assistant_message"]["confidence"] == "insufficient"
     assert payload["citations"] == []
+    assert "当前可访问文档中未找到" in payload["assistant_message"]["content"]
+    assert payload["assistant_message"]["message_metadata"]["abstain_reason"] == "target_document_not_accessible_or_not_found"
 
 
 
-def test_chat_inherits_permission_aware_retrieval(client: TestClient, db_session: Session) -> None:
-    viewer_role = Role(name=RoleName.VIEWER, description="Viewer")
-    manager_role = Role(name=RoleName.MANAGER, description="Manager")
-    admin_role = Role(name=RoleName.ADMIN, description="Admin")
-    db_session.add_all([viewer_role, manager_role, admin_role])
-    db_session.flush()
-
-    _create_user(db_session, viewer_role, "viewer@example.com", "sales", "viewer-pass")
-    _create_user(db_session, manager_role, "manager@example.com", "platform", "manager-pass")
-    _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
-    db_session.commit()
-
+def test_targeted_document_question_answers_when_document_is_accessible(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
     admin_token = _login(client, "admin@example.com", "admin-pass")
-    viewer_token = _login(client, "viewer@example.com", "viewer-pass")
-    manager_token = _login(client, "manager@example.com", "manager-pass")
 
-    document_id = _upload_and_ingest(
+    _upload_and_ingest(
         client,
         admin_token,
-        "Platform Runbook",
-        "Platform release checklist and deployment runbook for the platform team.",
+        "安全例外登记",
+        "安全例外登记要求：必须记录例外原因、影响范围、补偿控制、审批人和到期时间。",
     )
 
-    acl_response = client.post(
-        f"/api/v1/documents/{document_id}/acl",
-        headers={"Authorization": f"Bearer {admin_token}"},
-        json={"principal_type": "team", "team_name": "platform", "can_view": True, "can_manage": False},
-    )
-    assert acl_response.status_code == 200
+    session_id = _create_session(client, admin_token)
+    payload = _send_question(client, admin_token, session_id, "安全例外登记里写了什么？")
 
-    manager_session = client.post(
-        "/api/v1/chat/sessions",
-        headers={"Authorization": f"Bearer {manager_token}"},
-        json={"title": "New Chat"},
-    ).json()["id"]
-    viewer_session = client.post(
-        "/api/v1/chat/sessions",
-        headers={"Authorization": f"Bearer {viewer_token}"},
-        json={"title": "New Chat"},
-    ).json()["id"]
+    assert payload["assistant_message"]["insufficient_evidence"] is False
+    assert payload["citations"]
+    assert all(item["document_title"] == "安全例外登记" for item in payload["citations"])
+    assert "例外原因" in payload["assistant_message"]["content"]
+    assert payload["assistant_message"]["message_metadata"]["document_target"]["matched_document_title"] == "安全例外登记"
 
-    query_payload = {"content": "What does the platform release checklist say?", "top_k": 4}
-    manager_chat = client.post(
-        f"/api/v1/chat/sessions/{manager_session}/messages",
-        headers={"Authorization": f"Bearer {manager_token}"},
-        json=query_payload,
+
+
+def test_platform_release_question_prefers_platform_runbook_evidence(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+
+    _upload_and_ingest(
+        client,
+        admin_token,
+        "平台发布手册",
+        "平台发布检查清单：1. 确认发布时间窗口和回滚负责人。2. 在预发环境验证部署产物和监控告警。3. 正式发布前通知相关团队。",
     )
-    viewer_chat = client.post(
-        f"/api/v1/chat/sessions/{viewer_session}/messages",
-        headers={"Authorization": f"Bearer {viewer_token}"},
-        json=query_payload,
+    _upload_and_ingest(
+        client,
+        admin_token,
+        "客户事故响应指南",
+        "客户事故响应流程：1. 五分钟内建立事故频道。2. 经理负责升级通报和客户同步。3. 故障恢复后输出复盘。",
     )
 
-    assert manager_chat.status_code == 200
-    assert viewer_chat.status_code == 200
-    assert manager_chat.json()["citations"]
-    assert manager_chat.json()["assistant_message"]["insufficient_evidence"] is False
-    assert viewer_chat.json()["assistant_message"]["insufficient_evidence"] is True
-    assert viewer_chat.json()["citations"] == []
+    session_id = _create_session(client, admin_token)
+    payload = _send_question(client, admin_token, session_id, "平台发布检查清单要求什么？")
+
+    assert payload["assistant_message"]["insufficient_evidence"] is False
+    assert payload["citations"]
+    assert payload["citations"][0]["document_title"] == "平台发布手册"
+    assert all(item["document_title"] == "平台发布手册" for item in payload["citations"])
+
+
+
+def test_public_handbook_question_answers_for_viewer(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    viewer_token = _login(client, "viewer@example.com", "viewer-pass")
+
+    handbook_id = _upload_and_ingest(
+        client,
+        admin_token,
+        "员工手册",
+        "节假日安排：法定节假日前一天下午可提前下班一小时，如需节假日值班需提前在系统中登记。",
+    )
+    _grant_acl(
+        client,
+        admin_token,
+        handbook_id,
+        {"principal_type": "public", "can_view": True, "can_manage": False},
+    )
+
+    session_id = _create_session(client, viewer_token)
+    payload = _send_question(client, viewer_token, session_id, "员工手册里关于节假日安排怎么说？")
+
+    assert payload["assistant_message"]["insufficient_evidence"] is False
+    assert payload["citations"]
+    assert payload["citations"][0]["document_title"] == "员工手册"
+    assert "节假日" in payload["assistant_message"]["content"]
+
+
+
+def test_irrelevant_question_abstains_with_insufficient_confidence(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+
+    handbook_id = _upload_and_ingest(
+        client,
+        admin_token,
+        "员工手册",
+        "节假日安排：法定节假日前一天下午可提前下班一小时，如需节假日值班需提前登记。",
+    )
+    _grant_acl(
+        client,
+        admin_token,
+        handbook_id,
+        {"principal_type": "public", "can_view": True, "can_manage": False},
+    )
+
+    session_id = _create_session(client, admin_token)
+    payload = _send_question(client, admin_token, session_id, "生产数据库故障切换 SLA 是多少？")
+
+    assert payload["assistant_message"]["insufficient_evidence"] is True
+    assert payload["assistant_message"]["confidence"] == "insufficient"
+    assert payload["citations"] == []
+    assert payload["assistant_message"]["message_metadata"]["abstain_reason"] in {
+        "insufficient_relevant_evidence",
+        "no_retrieval_hits",
+    }

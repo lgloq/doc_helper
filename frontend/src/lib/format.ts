@@ -35,15 +35,15 @@ export function locationLabel(input: {
   chunk_index?: number | null;
 }): string {
   if (input.page_number_start != null) {
-    return `p.${input.page_number_start}`;
+    return `第 ${input.page_number_start} 页`;
   }
   if (input.paragraph_start != null) {
-    return `para.${input.paragraph_start}`;
+    return `第 ${input.paragraph_start} 段`;
   }
   if (input.chunk_index != null) {
-    return `chunk ${input.chunk_index}`;
+    return `分块 ${input.chunk_index}`;
   }
-  return "source";
+  return "来源";
 }
 
 export function asArray<T>(value: unknown): T[] {

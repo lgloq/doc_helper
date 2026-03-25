@@ -1,4 +1,5 @@
 import type { ChatCitationRead, SourceCitationRead } from "../types/api";
+import { formatSourceCount } from "../lib/display";
 import { locationLabel } from "../lib/format";
 import { StatusBadge } from "./StatusBadge";
 
@@ -11,14 +12,14 @@ interface CitationListProps {
   title?: string;
 }
 
-export function CitationList({ citations, selectedCitationId, onSelect, title = "Citations" }: CitationListProps) {
+export function CitationList({ citations, selectedCitationId, onSelect, title = "引用来源" }: CitationListProps) {
   if (!citations.length) {
     return (
       <section className="panel">
         <div className="panel-header">
           <h3>{title}</h3>
         </div>
-        <p className="muted">No citations attached.</p>
+        <p className="muted">暂无引用来源。</p>
       </section>
     );
   }
@@ -27,7 +28,7 @@ export function CitationList({ citations, selectedCitationId, onSelect, title = 
     <section className="panel citation-panel">
       <div className="panel-header">
         <h3>{title}</h3>
-        <StatusBadge tone="info">{citations.length} sources</StatusBadge>
+        <StatusBadge tone="info">{formatSourceCount(citations.length)}</StatusBadge>
       </div>
       <div className="citation-list">
         {citations.map((citation, index) => {
@@ -54,3 +55,4 @@ export function CitationList({ citations, selectedCitationId, onSelect, title = 
     </section>
   );
 }
+

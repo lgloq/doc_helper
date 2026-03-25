@@ -5,6 +5,7 @@ import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 import { useAppContext } from "../context/AppContext";
 import { api } from "../lib/api";
+import { formatTraceType, formatWorkflowStatus } from "../lib/display";
 import { asArray, formatDateTime, truncate } from "../lib/format";
 import type { EvalRunDetailRead, EvalRunRead, TraceLogRead } from "../types/api";
 
@@ -28,7 +29,7 @@ export function InsightsPage() {
         setTraces(items);
         setSelectedTrace(items[0] ?? null);
       })
-      .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "Failed to load traces."));
+      .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "加载追踪列表失败。"));
   }, [token]);
 
   useEffect(() => {
@@ -49,7 +50,7 @@ export function InsightsPage() {
           setSelectedRun(detail);
         }
       })
-      .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "Failed to load eval runs."));
+      .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "加载评测记录失败。"));
   }, [isAdmin, token]);
 
   async function handleRunEval() {
@@ -61,9 +62,9 @@ export function InsightsPage() {
       const run = await api.runEval(token, { dataset_name: "demo_permission_eval", top_k: 5, seed_demo_cases: true });
       setSelectedRun(run);
       setRuns(await api.listEvalRuns(token));
-      setStatusMessage(`Eval run completed with ${run.results.length} cases.`);
+      setStatusMessage(`评测完成，共运行 ${run.results.length} 条用例。`);
     } catch (nextError) {
-      setStatusMessage(nextError instanceof Error ? nextError.message : "Eval run failed.");
+      setStatusMessage(nextError instanceof Error ? nextError.message : "评测运行失败。");
     }
   }
 
@@ -75,7 +76,7 @@ export function InsightsPage() {
       const detail = await api.getEvalRun(token, runId);
       setSelectedRun(detail);
     } catch (nextError) {
-      setStatusMessage(nextError instanceof Error ? nextError.message : "Failed to load eval run.");
+      setStatusMessage(nextError instanceof Error ? nextError.message : "加载评测详情失败。");
     }
   }
 
@@ -87,7 +88,7 @@ export function InsightsPage() {
       const detail = await api.getTrace(token, traceId);
       setSelectedTrace(detail);
     } catch (nextError) {
-      setStatusMessage(nextError instanceof Error ? nextError.message : "Failed to load trace.");
+      setStatusMessage(nextError instanceof Error ? nextError.message : "加载追踪详情失败。");
     }
   }
 
@@ -100,12 +101,12 @@ export function InsightsPage() {
   return (
     <div className="page-stack">
       <PageHeader
-        title="Eval & Observability"
-        description="Run a small permission-focused benchmark, inspect metric summaries, and review one grounded QA trace end to end."
+        title="评测与追踪"
+        description="运行一组权限隔离导向的演示评测，并查看一次引用式问答的完整追踪信息。"
         actions={
           isAdmin ? (
             <button className="primary-button" onClick={handleRunEval} type="button">
-              Run demo eval
+              运行演示评测
             </button>
           ) : null
         }
@@ -116,42 +117,48 @@ export function InsightsPage() {
       <div className="page-grid insights-layout">
         <section className="panel stack">
           <div className="panel-header">
-            <h3>Eval runs</h3>
-            <StatusBadge tone={isAdmin ? "warning" : "neutral"}>{isAdmin ? runs.length : "admin only"}</StatusBadge>
+            <h3>评测记录</h3>
+            <StatusBadge tone={isAdmin ? "warning" : "neutral"}>{isAdmin ? runs.length : "仅管理员"}</StatusBadge>
           </div>
           {isAdmin ? (
             <>
               <div className="stack dense-stack">
-                {runs.map((run) => (
-                  <button className="list-card text-left" key={run.id} onClick={() => handleSelectRun(run.id)} type="button">
-                    <div className="list-card-topline">
-                      <strong>{run.dataset_name}</strong>
-                      <StatusBadge tone={run.status === "completed" ? "success" : "warning"}>{run.status}</StatusBadge>
-                    </div>
-                    <p>{formatDateTime(run.created_at)}</p>
-                  </button>
-                ))}
+                {runs.length ? (
+                  runs.map((run) => (
+                    <button className="list-card text-left" key={run.id} onClick={() => handleSelectRun(run.id)} type="button">
+                      <div className="list-card-topline">
+                        <strong>{run.dataset_name}</strong>
+                        <StatusBadge tone={run.status === "completed" ? "success" : "warning"}>
+                          {formatWorkflowStatus(run.status)}
+                        </StatusBadge>
+                      </div>
+                      <p>{formatDateTime(run.created_at)}</p>
+                    </button>
+                  ))
+                ) : (
+                  <p className="muted">暂无评测记录。</p>
+                )}
               </div>
               {selectedRun ? (
                 <div className="stack">
                   <div className="subsection-header">
-                    <h4>Selected run summary</h4>
+                    <h4>当前运行摘要</h4>
                   </div>
                   <div className="metrics-grid">
                     <div className="metric-card">
-                      <span>Total cases</span>
+                      <span>总用例数</span>
                       <strong>{totalCases}</strong>
                     </div>
                     <div className="metric-card">
-                      <span>Retrieval hit avg</span>
+                      <span>检索命中均值</span>
                       <strong>{summaryValue("retrieval_hit_rate_avg")}</strong>
                     </div>
                     <div className="metric-card">
-                      <span>Citation acc avg</span>
+                      <span>引用准确率均值</span>
                       <strong>{summaryValue("citation_accuracy_avg")}</strong>
                     </div>
                     <div className="metric-card">
-                      <span>Permission isolation</span>
+                      <span>权限隔离通过率</span>
                       <strong>{summaryValue("permission_isolation_pass_rate")}</strong>
                     </div>
                   </div>
@@ -163,12 +170,11 @@ export function InsightsPage() {
                           <div className="list-card-topline">
                             <strong>{String(details.case_name ?? result.case_id)}</strong>
                             <StatusBadge tone={result.overall_pass ? "success" : "warning"}>
-                              {result.overall_pass ? "pass" : "review"}
+                              {result.overall_pass ? "通过" : "需复核"}
                             </StatusBadge>
                           </div>
                           <p>
-                            retrieval {result.retrieval_hit_rate.toFixed(2)} · citation {result.citation_accuracy.toFixed(2)} ·
-                            faithfulness {result.answer_faithfulness.toFixed(2)}
+                            检索 {result.retrieval_hit_rate.toFixed(2)} · 引用 {result.citation_accuracy.toFixed(2)} · 忠实性 {result.answer_faithfulness.toFixed(2)}
                           </p>
                           <p className="muted">{truncate(String(details.answer_excerpt ?? ""), 160)}</p>
                         </div>
@@ -176,81 +182,92 @@ export function InsightsPage() {
                     })}
                   </div>
                 </div>
-              ) : (
-                <p className="muted">No eval runs yet.</p>
-              )}
+              ) : null}
             </>
           ) : (
-            <p className="muted">Eval endpoints are restricted to admin users. Log in as admin to run the demo benchmark.</p>
+            <p className="muted">评测接口仅管理员可用，请使用管理员账号运行演示评测。</p>
           )}
         </section>
 
         <section className="panel stack">
           <div className="panel-header">
-            <h3>Trace list</h3>
+            <h3>追踪列表</h3>
             <StatusBadge tone="info">{traces.length}</StatusBadge>
           </div>
           <div className="stack dense-stack">
-            {traces.map((trace) => (
-              <button className="list-card text-left" key={trace.id} onClick={() => handleSelectTrace(trace.id)} type="button">
-                <div className="list-card-topline">
-                  <strong>{trace.trace_type}</strong>
-                  <span>{formatDateTime(trace.created_at)}</span>
-                </div>
-                <p>{truncate(trace.query_text ?? "No query text", 120)}</p>
-              </button>
-            ))}
+            {traces.length ? (
+              traces.map((trace) => (
+                <button className="list-card text-left" key={trace.id} onClick={() => handleSelectTrace(trace.id)} type="button">
+                  <div className="list-card-topline">
+                    <strong>{formatTraceType(trace.trace_type)}</strong>
+                    <span>{formatDateTime(trace.created_at)}</span>
+                  </div>
+                  <p>{truncate(trace.query_text ?? "暂无查询内容", 120)}</p>
+                </button>
+              ))
+            ) : (
+              <p className="muted">暂无追踪记录，先去问答页发起一次提问。</p>
+            )}
           </div>
         </section>
 
         <section className="panel stack">
           <div className="panel-header">
-            <h3>Trace detail</h3>
-            {selectedTrace ? <StatusBadge tone="warning">trace</StatusBadge> : null}
+            <h3>追踪详情</h3>
+            {selectedTrace ? <StatusBadge tone="warning">已选中</StatusBadge> : null}
           </div>
           {selectedTrace ? (
             <>
               <p>{selectedTrace.query_text}</p>
               <div className="metadata-grid">
-                <span>model: {selectedTrace.model_name ?? "-"}</span>
-                <span>latency: {selectedTrace.latency_ms ?? "-"} ms</span>
-                <span>prompt tokens: {selectedTrace.prompt_tokens ?? "-"}</span>
-                <span>completion tokens: {selectedTrace.completion_tokens ?? "-"}</span>
+                <span>模型：{selectedTrace.model_name ?? "-"}</span>
+                <span>耗时：{selectedTrace.latency_ms ?? "-"} ms</span>
+                <span>输入 Token：{selectedTrace.prompt_tokens ?? "-"}</span>
+                <span>输出 Token：{selectedTrace.completion_tokens ?? "-"}</span>
               </div>
               <div className="subsection-header">
-                <h4>Retrieved chunks</h4>
+                <h4>召回分块</h4>
               </div>
               <div className="stack dense-stack">
-                {retrievedChunks.map((chunk, index) => (
-                  <div className="list-card" key={`${String(chunk.chunk_id)}-${index}`}>
-                    <div className="list-card-topline">
-                      <strong>{String(chunk.document_title ?? "document")}</strong>
-                      <span>chunk {String(chunk.chunk_index ?? "-")}</span>
+                {retrievedChunks.length ? (
+                  retrievedChunks.map((chunk, index) => (
+                    <div className="list-card" key={`${String(chunk.chunk_id)}-${index}`}>
+                      <div className="list-card-topline">
+                        <strong>{String(chunk.document_title ?? "文档")}</strong>
+                        <span>分块 {String(chunk.chunk_index ?? "-")}</span>
+                      </div>
+                      <p>{truncate(String(chunk.preview ?? ""), 180)}</p>
                     </div>
-                    <p>{truncate(String(chunk.preview ?? ""), 180)}</p>
-                  </div>
-                ))}
+                  ))
+                ) : (
+                  <p className="muted">暂无召回分块记录。</p>
+                )}
               </div>
               <div className="subsection-header">
-                <h4>Selected citations</h4>
+                <h4>选中引用</h4>
               </div>
               <div className="stack dense-stack">
-                {selectedCitations.map((chunk, index) => (
-                  <div className="list-card" key={`${String(chunk.chunk_id)}-selected-${index}`}>
-                    <div className="list-card-topline">
-                      <strong>{String(chunk.document_title ?? "document")}</strong>
-                      <span>v{String(chunk.version_number ?? "-")}</span>
+                {selectedCitations.length ? (
+                  selectedCitations.map((chunk, index) => (
+                    <div className="list-card" key={`${String(chunk.chunk_id)}-selected-${index}`}>
+                      <div className="list-card-topline">
+                        <strong>{String(chunk.document_title ?? "文档")}</strong>
+                        <span>v{String(chunk.version_number ?? "-")}</span>
+                      </div>
+                      <p>{truncate(String(chunk.preview ?? ""), 180)}</p>
                     </div>
-                    <p>{truncate(String(chunk.preview ?? ""), 180)}</p>
-                  </div>
-                ))}
+                  ))
+                ) : (
+                  <p className="muted">暂无引用记录。</p>
+                )}
               </div>
             </>
           ) : (
-            <p className="muted">Pick a trace to inspect query, retrieved chunks, citations, latency, and token usage.</p>
+            <p className="muted">请选择一条追踪，查看查询、召回分块、引用、延迟和 token 使用情况。</p>
           )}
         </section>
       </div>
     </div>
   );
 }
+

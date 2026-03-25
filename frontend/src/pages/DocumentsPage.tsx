@@ -5,6 +5,13 @@ import { ErrorNotice } from "../components/ErrorNotice";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 import { useAppContext } from "../context/AppContext";
+import {
+  formatBooleanFlag,
+  formatDocumentStatus,
+  formatIngestStatus,
+  formatPrincipalType,
+  formatRoleName,
+} from "../lib/display";
 import { api } from "../lib/api";
 import { formatBytes, formatDateTime, truncate } from "../lib/format";
 import type {
@@ -64,7 +71,7 @@ export function DocumentsPage() {
         setDocuments(items);
         setSelectedDocumentId((current) => current ?? items[0]?.id ?? null);
       })
-      .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "Failed to load documents."))
+      .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "加载文档列表失败。"))
       .finally(() => setLoading(false));
   }, [token]);
 
@@ -96,7 +103,7 @@ export function DocumentsPage() {
       })
       .catch((nextError) => {
         if (isMounted) {
-          setError(nextError instanceof Error ? nextError.message : "Failed to load document details.");
+          setError(nextError instanceof Error ? nextError.message : "加载文档详情失败。");
         }
       });
 
@@ -129,7 +136,7 @@ export function DocumentsPage() {
     const form = new FormData(event.currentTarget);
     const file = form.get("file");
     if (!(file instanceof File) || !file.name) {
-      setUploadError("Please choose a file to upload.");
+      setUploadError("请选择要上传的文件。");
       return;
     }
 
@@ -150,9 +157,9 @@ export function DocumentsPage() {
       setSelectedDocumentId(response.document.id);
       await refreshSelectedDocument(response.document.id);
       event.currentTarget.reset();
-      setActionMessage(`Uploaded and ingested ${response.document.title}.`);
+      setActionMessage(`已完成上传并入库：${response.document.title}`);
     } catch (nextError) {
-      setUploadError(nextError instanceof Error ? nextError.message : "Upload failed.");
+      setUploadError(nextError instanceof Error ? nextError.message : "上传失败，请稍后重试。");
     } finally {
       setUploading(false);
     }
@@ -166,7 +173,7 @@ export function DocumentsPage() {
     const form = new FormData(event.currentTarget);
     const file = form.get("file");
     if (!(file instanceof File) || !file.name) {
-      setActionMessage("Please choose a new version file.");
+      setActionMessage("请选择新的版本文件。");
       return;
     }
 
@@ -178,9 +185,9 @@ export function DocumentsPage() {
       setLatestIngestion(ingestion);
       await refreshSelectedDocument(selectedDocument.id);
       event.currentTarget.reset();
-      setActionMessage(`Uploaded version v${response.version.version_number} and rebuilt chunks.`);
+      setActionMessage(`已上传新版本 v${response.version.version_number}，并完成重新入库。`);
     } catch (nextError) {
-      setActionMessage(nextError instanceof Error ? nextError.message : "Version upload failed.");
+      setActionMessage(nextError instanceof Error ? nextError.message : "上传新版本失败。");
     } finally {
       setVersionUploading(false);
     }
@@ -203,9 +210,9 @@ export function DocumentsPage() {
       });
       setAclForm(defaultAclForm);
       await refreshSelectedDocument(selectedDocument.id);
-      setActionMessage("ACL updated.");
+      setActionMessage("文档访问控制已更新。");
     } catch (nextError) {
-      setActionMessage(nextError instanceof Error ? nextError.message : "ACL update failed.");
+      setActionMessage(nextError instanceof Error ? nextError.message : "更新权限失败。");
     }
   }
 
@@ -217,56 +224,53 @@ export function DocumentsPage() {
       const ingestion = await api.ingestDocument(token, selectedDocument.id, versionId);
       setLatestIngestion(ingestion);
       await refreshSelectedDocument(selectedDocument.id);
-      setActionMessage(`Ingestion finished with ${ingestion.chunk_count} chunks.`);
+      setActionMessage(`入库完成，共生成 ${ingestion.chunk_count} 个分块。`);
     } catch (nextError) {
-      setActionMessage(nextError instanceof Error ? nextError.message : "Ingestion failed.");
+      setActionMessage(nextError instanceof Error ? nextError.message : "重新入库失败。");
     }
   }
 
   return (
     <div className="page-stack">
-      <PageHeader
-        title="Document Management"
-        description="Upload knowledge sources, inspect versions, preview chunks, and manage document-level ACL before retrieval."
-      />
+      <PageHeader title="文档管理" description="上传知识文档、查看版本与分块，并在进入检索前维护文档级访问控制。" />
       <ErrorNotice message={error} />
       <div className="page-grid documents-layout">
         <section className="panel stack">
           <div className="panel-header">
-            <h3>Upload document</h3>
-            <StatusBadge tone="info">Phase 3-7 backend wired</StatusBadge>
+            <h3>上传文档</h3>
+            <StatusBadge tone="info">后端链路已接通</StatusBadge>
           </div>
           <form className="stack" onSubmit={handleUpload}>
             <label>
-              <span>Title</span>
-              <input name="title" placeholder="Optional title override" />
+              <span>文档标题</span>
+              <input name="title" placeholder="可选，留空则使用文件名" />
             </label>
             <label>
-              <span>Description</span>
-              <textarea name="description" placeholder="Brief document summary" rows={3} />
+              <span>文档说明</span>
+              <textarea name="description" placeholder="简要说明文档内容与用途" rows={3} />
             </label>
             <label>
-              <span>Status</span>
+              <span>状态</span>
               <select name="status" defaultValue="active">
-                <option value="draft">draft</option>
-                <option value="active">active</option>
-                <option value="archived">archived</option>
+                <option value="draft">草稿</option>
+                <option value="active">启用中</option>
+                <option value="archived">已归档</option>
               </select>
             </label>
             <label>
-              <span>File</span>
+              <span>文件</span>
               <input accept=".txt,.md,.markdown,.html,.htm,.pdf,.docx" name="file" type="file" required />
             </label>
             <ErrorNotice message={uploadError} />
             <button className="primary-button" disabled={uploading} type="submit">
-              {uploading ? "Uploading..." : "Upload and ingest"}
+              {uploading ? "上传中..." : "上传并入库"}
             </button>
           </form>
           {latestIngestion ? (
             <div className="info-block">
-              <strong>Last ingestion</strong>
+              <strong>最近一次入库</strong>
               <p>
-                status: {latestIngestion.ingest_status}, chunks: {latestIngestion.chunk_count}, pages:{" "}
+                状态：{formatIngestStatus(latestIngestion.ingest_status)}，分块数：{latestIngestion.chunk_count}，页数：
                 {latestIngestion.page_count ?? "-"}
               </p>
             </div>
@@ -275,27 +279,31 @@ export function DocumentsPage() {
 
         <section className="panel stack">
           <div className="panel-header">
-            <h3>Visible documents</h3>
+            <h3>可见文档</h3>
             <StatusBadge tone="neutral">{documents.length}</StatusBadge>
           </div>
-          {loading ? <p className="muted">Loading documents...</p> : null}
+          {loading ? <p className="muted">正在加载文档列表...</p> : null}
           <div className="document-list">
-            {documents.map((document) => (
-              <button
-                key={document.id}
-                className={`list-card ${selectedDocumentId === document.id ? "is-selected" : ""}`}
-                onClick={() => setSelectedDocumentId(document.id)}
-                type="button"
-              >
-                <div className="list-card-topline">
-                  <strong>{document.title}</strong>
-                  <StatusBadge tone={document.current_user_can_manage ? "warning" : "neutral"}>
-                    {document.status}
-                  </StatusBadge>
-                </div>
-                <p>{truncate(document.description ?? "No description yet.", 120)}</p>
-              </button>
-            ))}
+            {documents.length ? (
+              documents.map((document) => (
+                <button
+                  key={document.id}
+                  className={`list-card ${selectedDocumentId === document.id ? "is-selected" : ""}`}
+                  onClick={() => setSelectedDocumentId(document.id)}
+                  type="button"
+                >
+                  <div className="list-card-topline">
+                    <strong>{document.title}</strong>
+                    <StatusBadge tone={document.current_user_can_manage ? "warning" : "neutral"}>
+                      {formatDocumentStatus(document.status)}
+                    </StatusBadge>
+                  </div>
+                  <p>{truncate(document.description ?? "暂无描述。", 120)}</p>
+                </button>
+              ))
+            ) : (
+              !loading ? <p className="muted">暂无可见文档，可先上传一个文档开始体验。</p> : null
+            )}
           </div>
         </section>
       </div>
@@ -306,48 +314,52 @@ export function DocumentsPage() {
             <div className="panel-header">
               <div>
                 <h3>{selectedDocument.title}</h3>
-                <p className="muted">Owner {selectedDocument.owner_user_id}</p>
+                <p className="muted">所有者 ID：{selectedDocument.owner_user_id}</p>
               </div>
               <Link className="secondary-button link-button" to="/versions">
-                Open diff page
+                查看差异页
               </Link>
             </div>
-            <p>{selectedDocument.description ?? "No description provided."}</p>
-            {actionMessage ? <div className="info-block">{actionMessage}</div> : null}
+            <p>{selectedDocument.description ?? "暂无文档说明。"}</p>
+            {actionMessage ? <div className="info-block">{actionMessage.trim()}</div> : null}
 
             <div className="subsection-header">
-              <h4>Versions</h4>
+              <h4>版本列表</h4>
             </div>
             <div className="stack dense-stack">
-              {versions.map((version) => (
-                <div className="version-card" key={version.id}>
-                  <div className="list-card-topline">
-                    <strong>v{version.version_number}</strong>
-                    <StatusBadge tone={version.is_current ? "success" : "neutral"}>
-                      {version.ingest_status}
-                    </StatusBadge>
+              {versions.length ? (
+                versions.map((version) => (
+                  <div className="version-card" key={version.id}>
+                    <div className="list-card-topline">
+                      <strong>v{version.version_number}</strong>
+                      <StatusBadge tone={version.is_current ? "success" : "neutral"}>
+                        {formatIngestStatus(version.ingest_status)}
+                      </StatusBadge>
+                    </div>
+                    <p>
+                      {version.original_filename} · {formatBytes(version.file_size)} · {formatDateTime(version.created_at)}
+                    </p>
+                    <p className="muted">{version.storage_path}</p>
+                    <div className="inline-actions">
+                      <button className="secondary-button" onClick={() => handleIngest(version.id)} type="button">
+                        重新入库
+                      </button>
+                    </div>
                   </div>
-                  <p>
-                    {version.original_filename} · {formatBytes(version.file_size)} · {formatDateTime(version.created_at)}
-                  </p>
-                  <p className="muted">{version.storage_path}</p>
-                  <div className="inline-actions">
-                    <button className="secondary-button" onClick={() => handleIngest(version.id)} type="button">
-                      Re-ingest
-                    </button>
-                  </div>
-                </div>
-              ))}
+                ))
+              ) : (
+                <p className="muted">当前文档还没有可用版本。</p>
+              )}
             </div>
 
             {selectedDocument.current_user_can_manage ? (
               <form className="stack" onSubmit={handleVersionUpload}>
                 <div className="subsection-header">
-                  <h4>Upload new version</h4>
+                  <h4>上传新版本</h4>
                 </div>
                 <input accept=".txt,.md,.markdown,.html,.htm,.pdf,.docx" name="file" type="file" required />
                 <button className="primary-button" disabled={versionUploading} type="submit">
-                  {versionUploading ? "Uploading..." : "Upload version"}
+                  {versionUploading ? "上传中..." : "上传版本"}
                 </button>
               </form>
             ) : null}
@@ -355,48 +367,48 @@ export function DocumentsPage() {
 
           <section className="panel stack">
             <div className="panel-header">
-              <h3>Permissions</h3>
-              <StatusBadge tone="info">Document ACL</StatusBadge>
+              <h3>权限信息</h3>
+              <StatusBadge tone="info">文档访问控制</StatusBadge>
             </div>
             <div className="stack dense-stack">
               {aclEntries.length ? (
                 aclEntries.map((entry) => (
                   <div className="list-card" key={entry.id}>
                     <div className="list-card-topline">
-                      <strong>{entry.principal_type}</strong>
+                      <strong>{formatPrincipalType(entry.principal_type)}</strong>
                       <span>
-                        {entry.user_email ?? entry.role_name ?? entry.team_name ?? "all users"}
+                        {entry.user_email ?? (entry.role_name ? formatRoleName(entry.role_name) : entry.team_name ?? "全部用户")}
                       </span>
                     </div>
                     <p>
-                      view: {String(entry.can_view)} · manage: {String(entry.can_manage)}
+                      可查看：{formatBooleanFlag(entry.can_view)} · 可管理：{formatBooleanFlag(entry.can_manage)}
                     </p>
                   </div>
                 ))
               ) : (
-                <p className="muted">No ACL entries yet. Owner/admin still retain access.</p>
+                <p className="muted">暂未配置显式 ACL。文档所有者和管理员仍然保留访问权限。</p>
               )}
             </div>
 
             {selectedDocument.current_user_can_manage ? (
               <form className="stack" onSubmit={handleAclSubmit}>
                 <label>
-                  <span>Principal type</span>
+                  <span>授权主体</span>
                   <select
                     value={aclForm.principal_type}
                     onChange={(event) =>
                       setAclForm((current) => ({ ...current, principal_type: event.target.value as PrincipalType }))
                     }
                   >
-                    <option value="public">public</option>
-                    <option value="team">team</option>
-                    <option value="role">role</option>
-                    <option value="user">user</option>
+                    <option value="public">公开</option>
+                    <option value="team">团队</option>
+                    <option value="role">角色</option>
+                    <option value="user">指定用户</option>
                   </select>
                 </label>
                 {aclForm.principal_type === "team" ? (
                   <label>
-                    <span>Team name</span>
+                    <span>团队名称</span>
                     <input
                       value={aclForm.team_name}
                       onChange={(event) => setAclForm((current) => ({ ...current, team_name: event.target.value }))}
@@ -405,24 +417,24 @@ export function DocumentsPage() {
                 ) : null}
                 {aclForm.principal_type === "role" ? (
                   <label>
-                    <span>Role</span>
+                    <span>角色</span>
                     <select
                       value={aclForm.role_name}
                       onChange={(event) =>
                         setAclForm((current) => ({ ...current, role_name: event.target.value as RoleName }))
                       }
                     >
-                      <option value="viewer">viewer</option>
-                      <option value="manager">manager</option>
-                      <option value="admin">admin</option>
+                      <option value="viewer">普通员工</option>
+                      <option value="manager">组长</option>
+                      <option value="admin">管理员</option>
                     </select>
                   </label>
                 ) : null}
                 {aclForm.principal_type === "user" ? (
                   <label>
-                    <span>User ID</span>
+                    <span>用户 ID</span>
                     <input
-                      placeholder="Paste a user UUID"
+                      placeholder="粘贴用户 UUID"
                       value={aclForm.user_id}
                       onChange={(event) => setAclForm((current) => ({ ...current, user_id: event.target.value }))}
                     />
@@ -434,7 +446,7 @@ export function DocumentsPage() {
                     onChange={(event) => setAclForm((current) => ({ ...current, can_view: event.target.checked }))}
                     type="checkbox"
                   />
-                  <span>can view</span>
+                  <span>可查看</span>
                 </label>
                 <label className="inline-checkbox">
                   <input
@@ -442,10 +454,10 @@ export function DocumentsPage() {
                     onChange={(event) => setAclForm((current) => ({ ...current, can_manage: event.target.checked }))}
                     type="checkbox"
                   />
-                  <span>can manage</span>
+                  <span>可管理</span>
                 </label>
                 <button className="primary-button" type="submit">
-                  Save ACL
+                  保存权限
                 </button>
               </form>
             ) : null}
@@ -453,24 +465,24 @@ export function DocumentsPage() {
 
           <section className="panel stack">
             <div className="panel-header">
-              <h3>Chunk preview</h3>
-              <StatusBadge tone="success">{chunks.length} chunks</StatusBadge>
+              <h3>分块预览</h3>
+              <StatusBadge tone="success">{chunks.length} 个分块</StatusBadge>
             </div>
             <div className="chunk-list">
               {chunks.length ? (
                 chunks.slice(0, 8).map((chunk) => (
                   <div className="chunk-card" key={chunk.id}>
                     <div className="list-card-topline">
-                      <strong>{chunk.section_title ?? `Chunk ${chunk.chunk_index}`}</strong>
+                      <strong>{chunk.section_title ?? `分块 ${chunk.chunk_index}`}</strong>
                       <span>
-                        p.{chunk.page_number_start ?? "-"} · para.{chunk.paragraph_start ?? "-"}
+                        {chunk.page_number_start != null ? `第 ${chunk.page_number_start} 页` : "页码未知"} · {chunk.paragraph_start != null ? `第 ${chunk.paragraph_start} 段` : "段落未知"}
                       </span>
                     </div>
                     <p>{truncate(chunk.preview, 220)}</p>
                   </div>
                 ))
               ) : (
-                <p className="muted">No chunks yet. Ingest a version to populate citation-ready chunk metadata.</p>
+                <p className="muted">当前还没有分块数据，请先对版本执行入库处理。</p>
               )}
             </div>
           </section>
@@ -479,3 +491,4 @@ export function DocumentsPage() {
     </div>
   );
 }
+

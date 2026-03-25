@@ -6,6 +6,7 @@ import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 import { useAppContext } from "../context/AppContext";
 import { api } from "../lib/api";
+import { formatConfidence, formatPriority, formatWorkflowStatus } from "../lib/display";
 import { formatDateTime } from "../lib/format";
 import type { FAQEntryRead, SourceCitationRead, TaskItemRead, WeeklyReportDraftRead } from "../types/api";
 
@@ -33,7 +34,7 @@ export function ArtifactsPage() {
         setReports(nextReports);
         setFaqs(nextFaqs);
       })
-      .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "Failed to load artifacts."));
+      .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "加载派生结果失败。"));
   }, [token]);
 
   function bindFirstSources(citations: SourceCitationRead[] | null | undefined) {
@@ -42,7 +43,7 @@ export function ArtifactsPage() {
 
   async function handleGenerate(kind: "tasks" | "report" | "faq") {
     if (!token || !sourceSessionId.trim()) {
-      setStatusMessage("Provide a chat session id or pick one from the chat page first.");
+      setStatusMessage("请先提供会话 ID，或先在问答页选中一个会话。");
       return;
     }
     setStatusMessage(null);
@@ -51,50 +52,54 @@ export function ArtifactsPage() {
         const response = await api.extractTasks(token, sourceSessionId.trim());
         setTasks(await api.listTasks(token));
         bindFirstSources(response.items[0]?.source_citations ?? []);
-        setStatusMessage(`Generated ${response.items.length} tasks.`);
+        setStatusMessage(`已生成 ${response.items.length} 条待办。`);
       } else if (kind === "report") {
-        const response = await api.generateWeeklyReport(token, sourceSessionId.trim(), "Weekly Report Draft");
+        const response = await api.generateWeeklyReport(token, sourceSessionId.trim(), "周报草稿");
         setReports(await api.listReports(token));
         bindFirstSources(response.report.reference_sources);
-        setStatusMessage(`Generated report ${response.report.title}.`);
+        setStatusMessage(`已生成周报草稿：${response.report.title}`);
       } else {
         const response = await api.generateFaqs(token, sourceSessionId.trim());
         setFaqs(await api.listFaqs(token));
         bindFirstSources(response.entries[0]?.source_citations ?? []);
-        setStatusMessage(`Generated ${response.entries.length} FAQ entries.`);
+        setStatusMessage(`已生成 ${response.entries.length} 条 FAQ 草稿。`);
       }
     } catch (nextError) {
-      setStatusMessage(nextError instanceof Error ? nextError.message : "Generation failed.");
+      setStatusMessage(nextError instanceof Error ? nextError.message : "生成失败，请稍后重试。");
     }
   }
 
   return (
     <div className="page-stack">
       <PageHeader
-        title="Workflow Artifacts"
-        description="Turn one grounded chat session into task items, weekly report drafts, and FAQ entries with source traceability."
+        title="派生结果"
+        description="将一次有引用依据的问答会话转为待办、周报草稿和 FAQ 草稿，并保留来源追溯。"
       />
       <ErrorNotice message={error} />
       {statusMessage ? <div className="info-block">{statusMessage}</div> : null}
 
       <section className="panel stack">
         <div className="panel-header">
-          <h3>Generate from session</h3>
-          <StatusBadge tone="info">Structured outputs only</StatusBadge>
+          <h3>从会话生成</h3>
+          <StatusBadge tone="info">仅展示结构化结果</StatusBadge>
         </div>
         <label>
-          <span>Source session id</span>
-          <input value={sourceSessionId} onChange={(event) => setSourceSessionId(event.target.value)} />
+          <span>来源会话 ID</span>
+          <input
+            placeholder="请输入问答页中的会话 ID"
+            value={sourceSessionId}
+            onChange={(event) => setSourceSessionId(event.target.value)}
+          />
         </label>
         <div className="inline-actions">
           <button className="secondary-button" onClick={() => handleGenerate("tasks")} type="button">
-            Extract tasks
+            提取待办
           </button>
           <button className="secondary-button" onClick={() => handleGenerate("report")} type="button">
-            Generate weekly report
+            生成周报草稿
           </button>
           <button className="secondary-button" onClick={() => handleGenerate("faq")} type="button">
-            Generate FAQ draft
+            生成 FAQ 草稿
           </button>
         </div>
       </section>
@@ -102,67 +107,80 @@ export function ArtifactsPage() {
       <div className="page-grid artifacts-layout">
         <section className="panel stack">
           <div className="panel-header">
-            <h3>Task items</h3>
+            <h3>待办事项</h3>
             <StatusBadge tone="warning">{tasks.length}</StatusBadge>
           </div>
           <div className="stack dense-stack">
-            {tasks.map((task) => (
-              <button className="list-card text-left" key={task.id} onClick={() => bindFirstSources(task.source_citations)} type="button">
-                <div className="list-card-topline">
-                  <strong>{task.title}</strong>
-                  <StatusBadge tone="info">{task.priority}</StatusBadge>
-                </div>
-                <p>{task.description ?? "No description"}</p>
-                <p className="muted">{formatDateTime(task.created_at)}</p>
-              </button>
-            ))}
+            {tasks.length ? (
+              tasks.map((task) => (
+                <button className="list-card text-left" key={task.id} onClick={() => bindFirstSources(task.source_citations)} type="button">
+                  <div className="list-card-topline">
+                    <strong>{task.title}</strong>
+                    <StatusBadge tone="info">{formatPriority(task.priority)}</StatusBadge>
+                  </div>
+                  <p>{task.description ?? "暂无描述"}</p>
+                  <p className="muted">{formatDateTime(task.created_at)}</p>
+                </button>
+              ))
+            ) : (
+              <p className="muted">暂无待办，可从一条引用式问答中提取。</p>
+            )}
           </div>
         </section>
 
         <section className="panel stack">
           <div className="panel-header">
-            <h3>Weekly reports</h3>
+            <h3>周报草稿</h3>
             <StatusBadge tone="success">{reports.length}</StatusBadge>
           </div>
           <div className="stack dense-stack">
-            {reports.map((report) => (
-              <button className="list-card text-left" key={report.id} onClick={() => bindFirstSources(report.reference_sources)} type="button">
-                <div className="list-card-topline">
-                  <strong>{report.title}</strong>
-                  <StatusBadge tone="neutral">{report.status}</StatusBadge>
-                </div>
-                <p>{report.summary ?? "No summary"}</p>
-                <div className="report-list-grid">
-                  <span>Completed: {report.completed_this_week.length}</span>
-                  <span>Risks: {report.risks_blockers.length}</span>
-                  <span>Next week: {report.next_week_plan.length}</span>
-                </div>
-              </button>
-            ))}
+            {reports.length ? (
+              reports.map((report) => (
+                <button className="list-card text-left" key={report.id} onClick={() => bindFirstSources(report.reference_sources)} type="button">
+                  <div className="list-card-topline">
+                    <strong>{report.title}</strong>
+                    <StatusBadge tone="neutral">{formatWorkflowStatus(report.status)}</StatusBadge>
+                  </div>
+                  <p>{report.summary ?? "暂无摘要"}</p>
+                  <div className="report-list-grid">
+                    <span>本周完成：{report.completed_this_week.length}</span>
+                    <span>风险阻塞：{report.risks_blockers.length}</span>
+                    <span>下周计划：{report.next_week_plan.length}</span>
+                  </div>
+                </button>
+              ))
+            ) : (
+              <p className="muted">暂无周报草稿，可从最近一次会话生成。</p>
+            )}
           </div>
         </section>
 
         <section className="panel stack">
           <div className="panel-header">
-            <h3>FAQ entries</h3>
+            <h3>FAQ 草稿</h3>
             <StatusBadge tone="neutral">{faqs.length}</StatusBadge>
           </div>
           <div className="stack dense-stack">
-            {faqs.map((faq) => (
-              <button className="list-card text-left" key={faq.id} onClick={() => bindFirstSources(faq.source_citations)} type="button">
-                <div className="list-card-topline">
-                  <strong>{faq.question}</strong>
-                  <StatusBadge tone={faq.quality === "high" ? "success" : "warning"}>{faq.quality}</StatusBadge>
-                </div>
-                <p>{faq.answer}</p>
-                <p className="muted">status: {faq.status}</p>
-              </button>
-            ))}
+            {faqs.length ? (
+              faqs.map((faq) => (
+                <button className="list-card text-left" key={faq.id} onClick={() => bindFirstSources(faq.source_citations)} type="button">
+                  <div className="list-card-topline">
+                    <strong>{faq.question}</strong>
+                    <StatusBadge tone={faq.quality === "high" ? "success" : "warning"}>{formatConfidence(faq.quality)}</StatusBadge>
+                  </div>
+                  <p>{faq.answer}</p>
+                  <p className="muted">状态：{formatWorkflowStatus(faq.status)}</p>
+                </button>
+              ))
+            ) : (
+              <p className="muted">暂无 FAQ 草稿，可从高质量问答中沉淀。</p>
+            )}
           </div>
         </section>
       </div>
 
-      <CitationList citations={selectedSources} title="Artifact source citations" />
+      <CitationList citations={selectedSources} title="结果引用来源" />
     </div>
   );
 }
+

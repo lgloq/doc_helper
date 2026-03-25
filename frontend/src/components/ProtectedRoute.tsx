@@ -7,7 +7,7 @@ export function ProtectedRoute() {
   const location = useLocation();
 
   if (isBootstrapping) {
-    return <div className="page-loading">Loading workspace...</div>;
+    return <div className="page-loading">正在加载工作台...</div>;
   }
 
   if (!token) {

@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/enterprise_knowledge_assistant"
     redis_url: str = "redis://localhost:6379/0"
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
-    jwt_secret_key: str = "dev-secret-change-me"
+    jwt_secret_key: str = "dev-enterprise-knowledge-assistant-secret-key-2026"
     access_token_expire_minutes: int = 120
     seed_mock_data: bool = True
     seed_demo_eval_cases: bool = True
@@ -65,3 +65,4 @@ def get_settings() -> Settings:
     settings = Settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     return settings
+

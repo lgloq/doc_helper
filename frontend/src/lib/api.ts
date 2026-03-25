@@ -54,11 +54,16 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     body = JSON.stringify(body);
   }
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers,
-    body: body ?? undefined,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...options,
+      headers,
+      body: body ?? undefined,
+    });
+  } catch (error) {
+    throw new ApiError("网络请求失败，请确认前后端服务已启动。", 0, error);
+  }
 
   const contentType = response.headers.get("content-type") ?? "";
   const payload = contentType.includes("application/json") ? await response.json() : await response.text();
@@ -68,7 +73,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       typeof payload === "object" && payload && "detail" in payload
         ? String((payload as { detail?: unknown }).detail)
         : response.statusText;
-    throw new ApiError(detail || "Request failed", response.status, payload);
+    throw new ApiError(detail || "请求失败，请稍后重试。", response.status, payload);
   }
 
   return payload as T;

@@ -260,6 +260,12 @@ h4 {
   border-radius: 999px;
   padding: 0.8rem 1.1rem;
   font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .primary-button {
@@ -283,15 +289,30 @@ h4 {
   align-items: center;
 }
 
+.panel-header,
+.list-card-topline,
+.user-card {
+  flex-wrap: wrap;
+}
+
+.panel-header > :first-child,
+.list-card-topline > :first-child,
+.user-card > :first-child {
+  min-width: 0;
+}
+
 .status-badge {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   border-radius: 999px;
   padding: 0.3rem 0.7rem;
   font-size: 0.82rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.03em;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .status-neutral {
@@ -442,6 +463,12 @@ h4 {
   padding: 0.45rem 0.7rem;
   background: rgba(17, 77, 99, 0.1);
   color: var(--primary-strong);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .chat-composer {
@@ -548,3 +575,6 @@ h4 {
     grid-template-columns: 1fr;
   }
 }
+
+
+
