@@ -192,7 +192,7 @@ export function ChatPage() {
             ) : (
               <div className="empty-state">
                 <strong>暂无消息</strong>
-                <p>先新建一个会话，并在上传文档后开始提问。</p>
+                <p>先新建一个会话，再围绕你可访问的文档开始提问。</p>
               </div>
             )}
           </div>
@@ -289,4 +289,5 @@ function MessageBubble({ message, onSelectCitation }: MessageBubbleProps) {
     </article>
   );
 }
+
 

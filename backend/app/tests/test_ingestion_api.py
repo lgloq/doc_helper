@@ -11,6 +11,9 @@ from app.models.role import Role
 from app.models.user import User
 
 
+FORBIDDEN_DETAIL = "当前角色无权执行该操作。"
+
+
 def _create_user(db_session: Session, role: Role, email: str, team_name: str | None, password: str) -> User:
     user = User(
         email=email,
@@ -92,3 +95,72 @@ def test_upload_ingest_and_chunk_visibility(client: TestClient, db_session: Sess
     assert chunk_payload["document_version_id"] == version_id
     assert chunk_payload["paragraph_start"] == 1
     assert chunk_payload["preview"]
+
+
+def test_document_management_write_endpoints_require_admin_role(client: TestClient, db_session: Session) -> None:
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    manager_role = Role(name=RoleName.MANAGER, description="Manager")
+    viewer_role = Role(name=RoleName.VIEWER, description="Viewer")
+    db_session.add_all([admin_role, manager_role, viewer_role])
+    db_session.flush()
+
+    _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+    manager = _create_user(db_session, manager_role, "manager@example.com", "platform", "manager-pass")
+    _create_user(db_session, viewer_role, "viewer@example.com", "sales", "viewer-pass")
+    db_session.commit()
+
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    manager_token = _login(client, "manager@example.com", "manager-pass")
+    viewer_token = _login(client, "viewer@example.com", "viewer-pass")
+
+    viewer_upload_response = client.post(
+        "/api/v1/documents/upload",
+        headers={"Authorization": f"Bearer {viewer_token}"},
+        files={"file": ("viewer-notes.txt", BytesIO(b"Viewer upload should be forbidden."), "text/plain")},
+        data={"title": "Viewer Upload", "description": "forbidden", "status": "active"},
+    )
+    assert viewer_upload_response.status_code == 403
+    assert viewer_upload_response.json()["detail"] == FORBIDDEN_DETAIL
+
+    admin_upload_response = client.post(
+        "/api/v1/documents/upload",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        files={"file": ("admin-notes.txt", BytesIO(b"Admin upload succeeds."), "text/plain")},
+        data={"title": "Admin Managed Doc", "description": "allowed", "status": "active"},
+    )
+    assert admin_upload_response.status_code == 200
+    document_payload = admin_upload_response.json()
+    document_id = document_payload["document"]["id"]
+    version_id = document_payload["version"]["id"]
+
+    manager_acl_response = client.post(
+        f"/api/v1/documents/{document_id}/acl",
+        headers={"Authorization": f"Bearer {manager_token}"},
+        json={"principal_type": "user", "user_id": str(manager.id), "can_view": True, "can_manage": False},
+    )
+    assert manager_acl_response.status_code == 403
+    assert manager_acl_response.json()["detail"] == FORBIDDEN_DETAIL
+
+    manager_ingest_response = client.post(
+        f"/api/v1/documents/{document_id}/ingest",
+        headers={"Authorization": f"Bearer {manager_token}"},
+        json={"version_id": version_id},
+    )
+    assert manager_ingest_response.status_code == 403
+    assert manager_ingest_response.json()["detail"] == FORBIDDEN_DETAIL
+
+    manager_version_upload_response = client.post(
+        f"/api/v1/documents/{document_id}/versions/upload",
+        headers={"Authorization": f"Bearer {manager_token}"},
+        files={"file": ("manager-version.txt", BytesIO(b"Manager version upload should be forbidden."), "text/plain")},
+    )
+    assert manager_version_upload_response.status_code == 403
+    assert manager_version_upload_response.json()["detail"] == FORBIDDEN_DETAIL
+
+    admin_ingest_response = client.post(
+        f"/api/v1/documents/{document_id}/ingest",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"version_id": version_id},
+    )
+    assert admin_ingest_response.status_code == 200
+    assert admin_ingest_response.json()["chunk_count"] >= 1

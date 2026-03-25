@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from sqlalchemy.orm import Session
 
-from app.api.deps.auth import get_current_user
+from app.api.deps.auth import get_current_user, require_admin
 from app.db.session import get_db_session
 from app.models.enums import DocumentStatus
 from app.models.user import User
@@ -34,7 +34,7 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 @router.post("", response_model=DocumentRead)
 def create_document(
     payload: DocumentCreate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
     session: Session = Depends(get_db_session),
 ) -> DocumentRead:
     service = DocumentService(session)
@@ -47,7 +47,7 @@ def upload_document(
     title: str | None = Form(None),
     description: str | None = Form(None),
     status: DocumentStatus = Form(DocumentStatus.DRAFT),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
     session: Session = Depends(get_db_session),
 ) -> DocumentUploadResponse:
     service = DocumentIngestionService(session)
@@ -67,7 +67,7 @@ def list_documents(
 def upload_document_version(
     document_id: UUID,
     file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
     session: Session = Depends(get_db_session),
 ) -> DocumentUploadResponse:
     service = DocumentIngestionService(session)
@@ -132,7 +132,7 @@ def get_document(
 def ingest_document(
     document_id: UUID,
     payload: DocumentIngestRequest | None = None,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
     session: Session = Depends(get_db_session),
 ) -> IngestionResultRead:
     service = DocumentIngestionService(session)
@@ -154,7 +154,7 @@ def list_document_chunks(
 def upsert_document_acl(
     document_id: UUID,
     payload: DocumentACLCreate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
     session: Session = Depends(get_db_session),
 ) -> DocumentACLRead:
     service = DocumentService(session)

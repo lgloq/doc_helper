@@ -14,6 +14,7 @@ import {
 } from "../lib/display";
 import { api } from "../lib/api";
 import { formatBytes, formatDateTime, truncate } from "../lib/format";
+import { canManageDocumentLibrary } from "../lib/permissions";
 import type {
   ChunkRead,
   DocumentACLRead,
@@ -43,7 +44,7 @@ const defaultAclForm: AclFormState = {
 };
 
 export function DocumentsPage() {
-  const { token } = useAppContext();
+  const { token, user } = useAppContext();
   const [documents, setDocuments] = useState<DocumentRead[]>([]);
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [selectedDocument, setSelectedDocument] = useState<DocumentRead | null>(null);
@@ -58,6 +59,7 @@ export function DocumentsPage() {
   const [aclForm, setAclForm] = useState<AclFormState>(defaultAclForm);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [latestIngestion, setLatestIngestion] = useState<IngestionResultRead | null>(null);
+  const canManageLibrary = canManageDocumentLibrary(user);
 
   useEffect(() => {
     if (!token) {
@@ -237,44 +239,53 @@ export function DocumentsPage() {
       <div className="page-grid documents-layout">
         <section className="panel stack">
           <div className="panel-header">
-            <h3>上传文档</h3>
-            <StatusBadge tone="info">后端链路已接通</StatusBadge>
+            <h3>{canManageLibrary ? "上传文档" : "当前角色"}</h3>
+            <StatusBadge tone={canManageLibrary ? "info" : "neutral"}>{canManageLibrary ? "后端链路已接通" : "只读访问"}</StatusBadge>
           </div>
-          <form className="stack" onSubmit={handleUpload}>
-            <label>
-              <span>文档标题</span>
-              <input name="title" placeholder="可选，留空则使用文件名" />
-            </label>
-            <label>
-              <span>文档说明</span>
-              <textarea name="description" placeholder="简要说明文档内容与用途" rows={3} />
-            </label>
-            <label>
-              <span>状态</span>
-              <select name="status" defaultValue="active">
-                <option value="draft">草稿</option>
-                <option value="active">启用中</option>
-                <option value="archived">已归档</option>
-              </select>
-            </label>
-            <label>
-              <span>文件</span>
-              <input accept=".txt,.md,.markdown,.html,.htm,.pdf,.docx" name="file" type="file" required />
-            </label>
-            <ErrorNotice message={uploadError} />
-            <button className="primary-button" disabled={uploading} type="submit">
-              {uploading ? "上传中..." : "上传并入库"}
-            </button>
-          </form>
-          {latestIngestion ? (
+          {canManageLibrary ? (
+            <>
+              <form className="stack" onSubmit={handleUpload}>
+                <label>
+                  <span>文档标题</span>
+                  <input name="title" placeholder="可选，留空则使用文件名" />
+                </label>
+                <label>
+                  <span>文档说明</span>
+                  <textarea name="description" placeholder="简要说明文档内容与用途" rows={3} />
+                </label>
+                <label>
+                  <span>状态</span>
+                  <select name="status" defaultValue="active">
+                    <option value="draft">草稿</option>
+                    <option value="active">启用中</option>
+                    <option value="archived">已归档</option>
+                  </select>
+                </label>
+                <label>
+                  <span>文件</span>
+                  <input accept=".txt,.md,.markdown,.html,.htm,.pdf,.docx" name="file" type="file" required />
+                </label>
+                <ErrorNotice message={uploadError} />
+                <button className="primary-button" disabled={uploading} type="submit">
+                  {uploading ? "上传中..." : "上传并入库"}
+                </button>
+              </form>
+              {latestIngestion ? (
+                <div className="info-block">
+                  <strong>最近一次入库</strong>
+                  <p>
+                    状态：{formatIngestStatus(latestIngestion.ingest_status)}，分块数：{latestIngestion.chunk_count}，页数：
+                    {latestIngestion.page_count ?? "-"}
+                  </p>
+                </div>
+              ) : null}
+            </>
+          ) : (
             <div className="info-block">
-              <strong>最近一次入库</strong>
-              <p>
-                状态：{formatIngestStatus(latestIngestion.ingest_status)}，分块数：{latestIngestion.chunk_count}，页数：
-                {latestIngestion.page_count ?? "-"}
-              </p>
+              <strong>当前账号为只读角色</strong>
+              <p>你可以查看可访问文档、版本差异、分块预览并发起问答；文档上传、版本维护、权限修改和重新入库仅管理员可用。</p>
             </div>
-          ) : null}
+          )}
         </section>
 
         <section className="panel stack">
@@ -294,16 +305,16 @@ export function DocumentsPage() {
                 >
                   <div className="list-card-topline">
                     <strong>{document.title}</strong>
-                    <StatusBadge tone={document.current_user_can_manage ? "warning" : "neutral"}>
+                    <StatusBadge tone={canManageLibrary && document.current_user_can_manage ? "warning" : "neutral"}>
                       {formatDocumentStatus(document.status)}
                     </StatusBadge>
                   </div>
                   <p>{truncate(document.description ?? "暂无描述。", 120)}</p>
                 </button>
               ))
-            ) : (
-              !loading ? <p className="muted">暂无可见文档，可先上传一个文档开始体验。</p> : null
-            )}
+            ) : !loading ? (
+              <p className="muted">{canManageLibrary ? "暂无可见文档，可先上传一个文档开始体验。" : "暂无可见文档。"}</p>
+            ) : null}
           </div>
         </section>
       </div>
@@ -340,11 +351,13 @@ export function DocumentsPage() {
                       {version.original_filename} · {formatBytes(version.file_size)} · {formatDateTime(version.created_at)}
                     </p>
                     <p className="muted">{version.storage_path}</p>
-                    <div className="inline-actions">
-                      <button className="secondary-button" onClick={() => handleIngest(version.id)} type="button">
-                        重新入库
-                      </button>
-                    </div>
+                    {canManageLibrary && selectedDocument.current_user_can_manage ? (
+                      <div className="inline-actions">
+                        <button className="secondary-button" onClick={() => handleIngest(version.id)} type="button">
+                          重新入库
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
                 ))
               ) : (
@@ -352,7 +365,7 @@ export function DocumentsPage() {
               )}
             </div>
 
-            {selectedDocument.current_user_can_manage ? (
+            {canManageLibrary && selectedDocument.current_user_can_manage ? (
               <form className="stack" onSubmit={handleVersionUpload}>
                 <div className="subsection-header">
                   <h4>上传新版本</h4>
@@ -370,97 +383,106 @@ export function DocumentsPage() {
               <h3>权限信息</h3>
               <StatusBadge tone="info">文档访问控制</StatusBadge>
             </div>
-            <div className="stack dense-stack">
-              {aclEntries.length ? (
-                aclEntries.map((entry) => (
-                  <div className="list-card" key={entry.id}>
-                    <div className="list-card-topline">
-                      <strong>{formatPrincipalType(entry.principal_type)}</strong>
-                      <span>
-                        {entry.user_email ?? (entry.role_name ? formatRoleName(entry.role_name) : entry.team_name ?? "全部用户")}
-                      </span>
-                    </div>
-                    <p>
-                      可查看：{formatBooleanFlag(entry.can_view)} · 可管理：{formatBooleanFlag(entry.can_manage)}
-                    </p>
-                  </div>
-                ))
-              ) : (
-                <p className="muted">暂未配置显式 ACL。文档所有者和管理员仍然保留访问权限。</p>
-              )}
-            </div>
+            {canManageLibrary ? (
+              <>
+                <div className="stack dense-stack">
+                  {aclEntries.length ? (
+                    aclEntries.map((entry) => (
+                      <div className="list-card" key={entry.id}>
+                        <div className="list-card-topline">
+                          <strong>{formatPrincipalType(entry.principal_type)}</strong>
+                          <span>
+                            {entry.user_email ?? (entry.role_name ? formatRoleName(entry.role_name) : entry.team_name ?? "全部用户")}
+                          </span>
+                        </div>
+                        <p>
+                          可查看：{formatBooleanFlag(entry.can_view)} · 可管理：{formatBooleanFlag(entry.can_manage)}
+                        </p>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="muted">暂未配置显式 ACL。文档所有者和管理员仍然保留访问权限。</p>
+                  )}
+                </div>
 
-            {selectedDocument.current_user_can_manage ? (
-              <form className="stack" onSubmit={handleAclSubmit}>
-                <label>
-                  <span>授权主体</span>
-                  <select
-                    value={aclForm.principal_type}
-                    onChange={(event) =>
-                      setAclForm((current) => ({ ...current, principal_type: event.target.value as PrincipalType }))
-                    }
-                  >
-                    <option value="public">公开</option>
-                    <option value="team">团队</option>
-                    <option value="role">角色</option>
-                    <option value="user">指定用户</option>
-                  </select>
-                </label>
-                {aclForm.principal_type === "team" ? (
-                  <label>
-                    <span>团队名称</span>
-                    <input
-                      value={aclForm.team_name}
-                      onChange={(event) => setAclForm((current) => ({ ...current, team_name: event.target.value }))}
-                    />
-                  </label>
+                {selectedDocument.current_user_can_manage ? (
+                  <form className="stack" onSubmit={handleAclSubmit}>
+                    <label>
+                      <span>授权主体</span>
+                      <select
+                        value={aclForm.principal_type}
+                        onChange={(event) =>
+                          setAclForm((current) => ({ ...current, principal_type: event.target.value as PrincipalType }))
+                        }
+                      >
+                        <option value="public">公开</option>
+                        <option value="team">团队</option>
+                        <option value="role">角色</option>
+                        <option value="user">指定用户</option>
+                      </select>
+                    </label>
+                    {aclForm.principal_type === "team" ? (
+                      <label>
+                        <span>团队名称</span>
+                        <input
+                          value={aclForm.team_name}
+                          onChange={(event) => setAclForm((current) => ({ ...current, team_name: event.target.value }))}
+                        />
+                      </label>
+                    ) : null}
+                    {aclForm.principal_type === "role" ? (
+                      <label>
+                        <span>角色</span>
+                        <select
+                          value={aclForm.role_name}
+                          onChange={(event) =>
+                            setAclForm((current) => ({ ...current, role_name: event.target.value as RoleName }))
+                          }
+                        >
+                          <option value="viewer">普通员工</option>
+                          <option value="manager">组长</option>
+                          <option value="admin">管理员</option>
+                        </select>
+                      </label>
+                    ) : null}
+                    {aclForm.principal_type === "user" ? (
+                      <label>
+                        <span>用户 ID</span>
+                        <input
+                          placeholder="粘贴用户 UUID"
+                          value={aclForm.user_id}
+                          onChange={(event) => setAclForm((current) => ({ ...current, user_id: event.target.value }))}
+                        />
+                      </label>
+                    ) : null}
+                    <label className="inline-checkbox">
+                      <input
+                        checked={aclForm.can_view}
+                        onChange={(event) => setAclForm((current) => ({ ...current, can_view: event.target.checked }))}
+                        type="checkbox"
+                      />
+                      <span>可查看</span>
+                    </label>
+                    <label className="inline-checkbox">
+                      <input
+                        checked={aclForm.can_manage}
+                        onChange={(event) => setAclForm((current) => ({ ...current, can_manage: event.target.checked }))}
+                        type="checkbox"
+                      />
+                      <span>可管理</span>
+                    </label>
+                    <button className="primary-button" type="submit">
+                      保存权限
+                    </button>
+                  </form>
                 ) : null}
-                {aclForm.principal_type === "role" ? (
-                  <label>
-                    <span>角色</span>
-                    <select
-                      value={aclForm.role_name}
-                      onChange={(event) =>
-                        setAclForm((current) => ({ ...current, role_name: event.target.value as RoleName }))
-                      }
-                    >
-                      <option value="viewer">普通员工</option>
-                      <option value="manager">组长</option>
-                      <option value="admin">管理员</option>
-                    </select>
-                  </label>
-                ) : null}
-                {aclForm.principal_type === "user" ? (
-                  <label>
-                    <span>用户 ID</span>
-                    <input
-                      placeholder="粘贴用户 UUID"
-                      value={aclForm.user_id}
-                      onChange={(event) => setAclForm((current) => ({ ...current, user_id: event.target.value }))}
-                    />
-                  </label>
-                ) : null}
-                <label className="inline-checkbox">
-                  <input
-                    checked={aclForm.can_view}
-                    onChange={(event) => setAclForm((current) => ({ ...current, can_view: event.target.checked }))}
-                    type="checkbox"
-                  />
-                  <span>可查看</span>
-                </label>
-                <label className="inline-checkbox">
-                  <input
-                    checked={aclForm.can_manage}
-                    onChange={(event) => setAclForm((current) => ({ ...current, can_manage: event.target.checked }))}
-                    type="checkbox"
-                  />
-                  <span>可管理</span>
-                </label>
-                <button className="primary-button" type="submit">
-                  保存权限
-                </button>
-              </form>
-            ) : null}
+              </>
+            ) : (
+              <div className="info-block">
+                <strong>当前账号不提供权限维护入口</strong>
+                <p>文档访问控制仅管理员可查看和维护。如需新增授权或调整访问范围，请联系管理员处理。</p>
+              </div>
+            )}
           </section>
 
           <section className="panel stack">
@@ -482,7 +504,9 @@ export function DocumentsPage() {
                   </div>
                 ))
               ) : (
-                <p className="muted">当前还没有分块数据，请先对版本执行入库处理。</p>
+                <p className="muted">
+                  {canManageLibrary ? "当前还没有分块数据，请先对版本执行入库处理。" : "当前还没有可显示的分块数据，如需补充入库请联系管理员。"}
+                </p>
               )}
             </div>
           </section>
@@ -491,4 +515,3 @@ export function DocumentsPage() {
     </div>
   );
 }
-
