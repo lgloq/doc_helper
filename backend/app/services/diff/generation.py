@@ -3,9 +3,17 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+import logging
 from typing import Any, Protocol
 
 from app.core.config import get_settings
+from app.services.llm.openai_compatible import (
+    create_openai_compatible_client,
+    has_openai_compatible_credentials,
+    uses_openai_compatible_provider,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -72,14 +80,13 @@ class DeterministicDiffSummaryGenerator:
 
 
 class OpenAIDiffSummaryGenerator:
-    provider_name = "openai"
+    provider_name = "openai-compatible"
 
     def __init__(self) -> None:
-        from openai import OpenAI
-
         self.settings = get_settings()
-        self.model_name = self.settings.openai_diff_model
-        self.client = OpenAI(api_key=self.settings.openai_api_key)
+        self.model_name = self.settings.effective_llm_reasoning_model
+        self.client = create_openai_compatible_client(self.settings)
+        self.fallback = DeterministicDiffSummaryGenerator()
 
     def generate(
         self,
@@ -116,32 +123,56 @@ class OpenAIDiffSummaryGenerator:
             "Unified diff excerpt:\n"
             f"{unified_diff[:6000]}"
         )
-        response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=[
-                {"role": "system", "content": "Return valid JSON only."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.1,
-            response_format={"type": "json_object"},
-        )
-        content = response.choices[0].message.content or "{}"
-        payload = _parse_json_payload(content)
-        return DiffSummaryResult(
-            summary=str(payload.get("summary") or "").strip() or f"Compared version {from_version_number} to version {to_version_number}.",
-            additions=[str(item).strip() for item in payload.get("additions", []) if str(item).strip()][:5],
-            deletions=[str(item).strip() for item in payload.get("deletions", []) if str(item).strip()][:5],
-            modifications=[str(item).strip() for item in payload.get("modifications", []) if str(item).strip()][:5],
-            provider_name=self.provider_name,
-            model_name=self.model_name,
-        )
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": "Return valid JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                response_format={"type": "json_object"},
+                timeout=20.0,
+            )
+            content = response.choices[0].message.content or "{}"
+            payload = _parse_json_payload(content)
+            summary = str(payload.get("summary") or "").strip()
+            additions = [str(item).strip() for item in payload.get("additions", []) if str(item).strip()][:5]
+            deletions = [str(item).strip() for item in payload.get("deletions", []) if str(item).strip()][:5]
+            modifications = [str(item).strip() for item in payload.get("modifications", []) if str(item).strip()][:5]
+            if not summary and not additions and not deletions and not modifications:
+                raise ValueError("Empty diff summary payload from OpenAI-compatible provider.")
+            return DiffSummaryResult(
+                summary=summary or f"Compared version {from_version_number} to version {to_version_number}.",
+                additions=additions,
+                deletions=deletions,
+                modifications=modifications,
+                provider_name=self.provider_name,
+                model_name=self.model_name,
+            )
+        except Exception as error:
+            logger.warning("OpenAI-compatible diff summary failed; falling back to deterministic summary.", exc_info=error)
+            fallback_result = self.fallback.generate(
+                from_version_number=from_version_number,
+                to_version_number=to_version_number,
+                diff_changes=diff_changes,
+                unified_diff=unified_diff,
+            )
+            return DiffSummaryResult(
+                summary=fallback_result.summary,
+                additions=fallback_result.additions,
+                deletions=fallback_result.deletions,
+                modifications=fallback_result.modifications,
+                provider_name="deterministic_fallback",
+                model_name=fallback_result.model_name,
+            )
 
 
 class DiffSummaryGeneratorFactory:
     @staticmethod
     def create() -> DiffSummaryGenerator:
         settings = get_settings()
-        if settings.diff_summary_provider.lower() == "openai" and settings.openai_api_key:
+        if uses_openai_compatible_provider(settings.diff_summary_provider) and has_openai_compatible_credentials(settings):
             return OpenAIDiffSummaryGenerator()
         return DeterministicDiffSummaryGenerator()
 
@@ -167,3 +198,4 @@ def _compact(value: str | None, limit: int = 220) -> str:
     if len(compact) <= limit:
         return compact
     return compact[: limit - 3].rstrip() + "..."
+

@@ -26,6 +26,16 @@ from app.schemas.document import (
 )
 from app.schemas.eval import EvalCaseRead, EvalResultRowRead, EvalRunDetailRead, EvalRunRead, EvalRunRequest
 from app.schemas.health import HealthDependencyStatus, HealthResponse
+from app.schemas.llm import (
+    CopilotExecutionMetadata,
+    QAAnswerResult,
+    RouterAccessibleDocument,
+    RouterDecision,
+    RouterDecisionResult,
+    ToolCitation,
+    VersionCompareResult,
+    WorkflowGenerationResult,
+)
 from app.schemas.observability import TraceLogRead
 from app.schemas.role import RoleRead
 from app.schemas.search import SearchDebugInfo, SearchRequest, SearchResponse, SearchResultChunk, SearchScoreBreakdown
@@ -92,6 +102,14 @@ __all__ = [
     "EvalRunDetailRead",
     "EvalResultRowRead",
     "TraceLogRead",
+    "RouterAccessibleDocument",
+    "RouterDecision",
+    "RouterDecisionResult",
+    "ToolCitation",
+    "QAAnswerResult",
+    "VersionCompareResult",
+    "WorkflowGenerationResult",
+    "CopilotExecutionMetadata",
     "HealthDependencyStatus",
     "HealthResponse",
 ]

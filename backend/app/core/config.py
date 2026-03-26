@@ -32,10 +32,17 @@ class Settings(BaseSettings):
     data_dir: Path = BASE_DIR / "data"
     embedding_provider: str = "deterministic"
     answer_provider: str = "deterministic"
+    router_provider: str = "openai_compatible"
     diff_summary_provider: str = "deterministic"
+    llm_api_key: str | None = None
+    llm_base_url: str | None = None
+    llm_router_model: str | None = None
+    llm_chat_model: str | None = None
+    llm_reasoning_model: str | None = None
     openai_api_key: str | None = None
     openai_embedding_model: str = "text-embedding-3-small"
     openai_chat_model: str = "gpt-4.1-mini"
+    openai_router_model: str = "gpt-4.1-mini"
     openai_diff_model: str = "gpt-4.1-mini"
     embedding_dimensions: int = 1536
     chunk_target_chars: int = 900
@@ -59,10 +66,32 @@ class Settings(BaseSettings):
             return BASE_DIR / "data"
         return Path(value)
 
+    @property
+    def effective_llm_api_key(self) -> str | None:
+        return self.llm_api_key or self.openai_api_key
+
+    @property
+    def effective_llm_base_url(self) -> str | None:
+        if not self.llm_base_url:
+            return None
+        cleaned = self.llm_base_url.strip()
+        return cleaned or None
+
+    @property
+    def effective_llm_router_model(self) -> str:
+        return self.llm_router_model or self.openai_router_model
+
+    @property
+    def effective_llm_chat_model(self) -> str:
+        return self.llm_chat_model or self.openai_chat_model
+
+    @property
+    def effective_llm_reasoning_model(self) -> str:
+        return self.llm_reasoning_model or self.openai_diff_model or self.effective_llm_chat_model
+
 
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     return settings
-

@@ -14,6 +14,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-enterprise-knowledge-assistant-sec
 os.environ.setdefault("DATA_DIR", str(TEST_DATA_DIR))
 os.environ.setdefault("EMBEDDING_PROVIDER", "deterministic")
 os.environ.setdefault("ANSWER_PROVIDER", "deterministic")
+os.environ.setdefault("ROUTER_PROVIDER", "deterministic")
 os.environ.setdefault("EMBEDDING_DIMENSIONS", "32")
 
 import pytest
@@ -53,4 +54,3 @@ def client(db_session: Session) -> Generator[TestClient, None, None]:
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
-

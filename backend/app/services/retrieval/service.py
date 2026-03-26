@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Iterable
+from uuid import UUID
 
 from sqlalchemy.orm import Session
 
@@ -33,8 +34,11 @@ class RetrievalService:
         self.retrieval_repository = RetrievalRepository(session)
         self.embedding_provider = EmbeddingProviderFactory.create()
 
-    def search(self, actor: User, payload: SearchRequest) -> SearchResponse:
+    def search(self, actor: User, payload: SearchRequest, scoped_document_ids: list[UUID] | None = None) -> SearchResponse:
         accessible_document_ids = self.permission_builder.resolve_accessible_document_ids(self.session, actor, require_manage=False)
+        if scoped_document_ids is not None:
+            scoped_set = {item for item in scoped_document_ids}
+            accessible_document_ids = [item for item in accessible_document_ids if item in scoped_set]
         if not accessible_document_ids:
             return SearchResponse(
                 query=payload.query,

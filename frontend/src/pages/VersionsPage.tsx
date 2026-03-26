@@ -18,6 +18,9 @@ export function VersionsPage() {
   const [toVersionId, setToVersionId] = useState<string>("");
   const [diff, setDiff] = useState<DocumentDiffRead | null>(null);
   const [summary, setSummary] = useState<DocumentDiffSummaryRead | null>(null);
+  const [isRawDiffCollapsed, setIsRawDiffCollapsed] = useState(false);
+  const [isLoadingDiff, setIsLoadingDiff] = useState(false);
+  const [isLoadingSummary, setIsLoadingSummary] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
@@ -55,12 +58,17 @@ export function VersionsPage() {
       setStatusMessage("请先选择文档和两个版本。");
       return;
     }
+    setIsLoadingDiff(true);
+    setStatusMessage("正在加载原始差异...");
     try {
       const nextDiff = await api.getDocumentDiff(token, documentId, fromVersionId, toVersionId);
       setDiff(nextDiff);
+      setIsRawDiffCollapsed(false);
       setStatusMessage("已加载原始差异。");
     } catch (nextError) {
       setStatusMessage(nextError instanceof Error ? nextError.message : "生成差异失败。");
+    } finally {
+      setIsLoadingDiff(false);
     }
   }
 
@@ -69,12 +77,20 @@ export function VersionsPage() {
       setStatusMessage("请先选择文档和两个版本。");
       return;
     }
+    setIsLoadingSummary(true);
+    setStatusMessage("正在生成差异摘要...");
     try {
       const nextSummary = await api.summarizeDocumentDiff(token, documentId, fromVersionId, toVersionId);
       setSummary(nextSummary);
-      setStatusMessage("已生成差异摘要与影响提示。");
+      setStatusMessage(
+        nextSummary.summary_provider === "deterministic_fallback"
+          ? "大模型摘要不可用，已自动回退为规则摘要。"
+          : "已生成差异摘要与影响提示。",
+      );
     } catch (nextError) {
       setStatusMessage(nextError instanceof Error ? nextError.message : "生成差异摘要失败。");
+    } finally {
+      setIsLoadingSummary(false);
     }
   }
 
@@ -121,11 +137,11 @@ export function VersionsPage() {
           </label>
         </div>
         <div className="inline-actions">
-          <button className="secondary-button" onClick={handleLoadDiff} type="button">
-            加载原始差异
+          <button className="secondary-button" disabled={isLoadingDiff || isLoadingSummary} onClick={handleLoadDiff} type="button">
+            {isLoadingDiff ? "加载中..." : "加载原始差异"}
           </button>
-          <button className="primary-button" onClick={handleLoadSummary} type="button">
-            生成差异摘要
+          <button className="primary-button" disabled={isLoadingDiff || isLoadingSummary} onClick={handleLoadSummary} type="button">
+            {isLoadingSummary ? "生成中..." : "生成差异摘要"}
           </button>
         </div>
       </section>
@@ -134,11 +150,18 @@ export function VersionsPage() {
         <section className="panel stack">
           <div className="panel-header">
             <h3>原始差异</h3>
-            {diff ? (
-              <StatusBadge tone="warning">
-                +{diff.added_count} / -{diff.deleted_count} / ~{diff.modified_count}
-              </StatusBadge>
-            ) : null}
+            <div className="inline-actions">
+              {diff ? (
+                <StatusBadge tone="warning">
+                  +{diff.added_count} / -{diff.deleted_count} / ~{diff.modified_count}
+                </StatusBadge>
+              ) : null}
+              {diff ? (
+                <button className="secondary-button" onClick={() => setIsRawDiffCollapsed((current) => !current)} type="button">
+                  {isRawDiffCollapsed ? "展开原始差异" : "收起原始差异"}
+                </button>
+              ) : null}
+            </div>
           </div>
           {diff ? (
             <>
@@ -146,7 +169,7 @@ export function VersionsPage() {
                 <span>起始版本 v{diff.from_version_number}</span>
                 <span>目标版本 v{diff.to_version_number}</span>
               </div>
-              <pre className="diff-block">{diff.unified_diff}</pre>
+              {!isRawDiffCollapsed ? <pre className="diff-block">{diff.unified_diff}</pre> : null}
               <div className="stack dense-stack">
                 {diff.changes.slice(0, 8).map((change, index) => (
                   <div className="list-card" key={`${change.change_type}-${index}`}>
@@ -171,7 +194,9 @@ export function VersionsPage() {
             <h3>差异摘要</h3>
             {summary ? <StatusBadge tone="success">{formatSummaryProvider(summary.summary_provider)}</StatusBadge> : null}
           </div>
-          {summary ? (
+          {isLoadingSummary ? (
+            <p className="muted">正在生成差异摘要，请稍候...</p>
+          ) : summary ? (
             <>
               <p>{summary.summary}</p>
               <div className="subsection-header">

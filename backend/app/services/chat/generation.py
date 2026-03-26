@@ -9,6 +9,11 @@ from typing import Any, Protocol
 from app.core.config import get_settings
 from app.schemas.search import SearchResultChunk
 from app.services.chat.prompts import build_grounded_messages
+from app.services.llm.openai_compatible import (
+    create_openai_compatible_client,
+    has_openai_compatible_credentials,
+    uses_openai_compatible_provider,
+)
 
 
 @dataclass
@@ -39,7 +44,7 @@ class AnswerGenerator(Protocol):
 
 class DeterministicAnswerGenerator:
     provider_name = "deterministic"
-    model_name = "grounded-fallback-v1"
+    model_name = "grounded-fallback-v2"
 
     def generate(
         self,
@@ -99,22 +104,21 @@ class DeterministicAnswerGenerator:
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
 
-        synthesized_points = []
-        for chunk in selected_chunks[:2]:
-            location = _format_location(chunk)
-            preview = " ".join((chunk.preview or chunk.content).split())
-            synthesized_points.append(f"{chunk.document_title}（v{chunk.version_number}，{location}）提到：{preview}")
-
-        answer = "根据当前可访问文档中的证据，" + "；".join(synthesized_points)
+        summaries = [
+            summary
+            for summary in (_build_chunk_summary(chunk, question) for chunk in selected_chunks[:2])
+            if summary
+        ]
+        answer = _compose_grounded_answer(question, selected_chunks[:2], summaries)
         if evidence_conflict and not allow_low_score:
-            answer += " 不过，前两条高分证据来自不同文档，请结合引用来源谨慎判断。"
+            answer += " 但前两条高分证据来自不同文档，建议结合引用来源进一步确认。"
 
         return AnswerGenerationResult(
             answer=answer,
             insufficient_evidence=False,
             evidence_conflict=evidence_conflict,
             used_chunk_ids=[str(chunk.chunk_id) for chunk in selected_chunks[:2]],
-            answer_basis="extractive_summary",
+            answer_basis="grounded_summary",
             provider_name=self.provider_name,
             model_name=self.model_name,
             prompt_tokens=max((len(question) + sum(len(chunk.content) for chunk in selected_chunks)) // 4, 1),
@@ -125,11 +129,11 @@ class DeterministicAnswerGenerator:
 
 
 class OpenAIAnswerGenerator:
-    provider_name = "openai"
+    provider_name = "openai-compatible"
 
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.model_name = self.settings.openai_chat_model
+        self.model_name = self.settings.effective_llm_chat_model
 
     def generate(
         self,
@@ -139,10 +143,8 @@ class OpenAIAnswerGenerator:
         history_lines: list[str],
         allow_low_score: bool = False,
     ) -> AnswerGenerationResult:
-        from openai import OpenAI
-
         started = time.perf_counter()
-        client = OpenAI(api_key=self.settings.openai_api_key)
+        client = create_openai_compatible_client(self.settings)
         response = client.chat.completions.create(
             model=self.model_name,
             messages=build_grounded_messages(question, retrieved_chunks, history_lines),
@@ -174,7 +176,7 @@ class AnswerGeneratorFactory:
     @staticmethod
     def create() -> AnswerGenerator:
         settings = get_settings()
-        if settings.answer_provider.lower() == "openai" and settings.openai_api_key:
+        if uses_openai_compatible_provider(settings.answer_provider) and has_openai_compatible_credentials(settings):
             return OpenAIAnswerGenerator()
         return DeterministicAnswerGenerator()
 
@@ -221,6 +223,179 @@ def _select_grounded_chunks(retrieved_chunks: list[SearchResultChunk], *, allow_
         if fallback_chunks:
             return fallback_chunks[:2]
     return [chunk for chunk in retrieved_chunks[:2] if chunk.score.fused > 0.0 or chunk.score.lexical_raw > 0.0]
+
+
+
+def _build_chunk_summary(chunk: SearchResultChunk, question: str) -> str:
+    source_text = " ".join((chunk.preview or chunk.content).split())
+    if not source_text:
+        return ""
+    sentences = _split_sentences(source_text)
+    if not sentences:
+        return ""
+
+    query_terms = _extract_query_terms(question)
+    scored_sentences = []
+    for index, sentence in enumerate(sentences):
+        score = _sentence_match_score(sentence, query_terms)
+        scored_sentences.append((score, -index, sentence))
+    scored_sentences.sort(reverse=True)
+
+    selected: list[str] = []
+    total_length = 0
+    for score, _, sentence in scored_sentences:
+        cleaned = _clean_summary_sentence(sentence)
+        if not cleaned or cleaned in selected:
+            continue
+        if score <= 0 and selected:
+            continue
+        next_length = total_length + len(cleaned)
+        if selected and next_length > 150:
+            continue
+        selected.append(cleaned)
+        total_length = next_length
+        if len(selected) >= 2:
+            break
+
+    if not selected:
+        fallback_sentence = max(sentences, key=lambda item: len(item), default="")
+        fallback_cleaned = _clean_summary_sentence(fallback_sentence)
+        if fallback_cleaned:
+            selected = [fallback_cleaned]
+
+    return " ".join(item for item in selected if item)
+
+
+
+def _compose_grounded_answer(question: str, chunks: list[SearchResultChunk], summaries: list[str]) -> str:
+    if not chunks:
+        return "当前可访问证据不足，暂时无法给出可靠回答。"
+
+    if not summaries:
+        fallback = _compact_text(" ".join((chunks[0].preview or chunks[0].content).split()), 180)
+        summaries = [_ensure_sentence_ending(fallback)] if fallback else []
+
+    primary_title = chunks[0].document_title
+    unique_titles = {chunk.document_title for chunk in chunks}
+    clauses = [_to_clause(summary) for summary in summaries if _to_clause(summary)]
+
+    if len(unique_titles) == 1:
+        if len(clauses) >= 2:
+            return f"根据当前可访问文档中的证据，{primary_title}主要有两点：第一，{clauses[0]}；第二，{clauses[1]}。"
+        if len(clauses) == 1:
+            return f"根据当前可访问文档中的证据，{primary_title}主要说明：{clauses[0]}。"
+        return f"根据当前可访问文档中的证据，{primary_title}包含与该问题相关的说明，建议结合引用片段进一步确认。"
+
+    paired = []
+    for chunk, summary in zip(chunks, summaries, strict=False):
+        clause = _to_clause(summary)
+        if not clause:
+            continue
+        location = _format_location(chunk)
+        paired.append(f"{chunk.document_title}（{location}）提到：{clause}")
+    return _ensure_sentence_ending("根据当前可访问文档中的证据，" + "；".join(paired))
+
+
+
+def _split_sentences(text: str) -> list[str]:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not normalized:
+        return []
+
+    ends_cleanly = bool(re.search(r"[。！？!?；;]$", normalized))
+    parts = [part.strip(" ，；;。") for part in re.split(r"(?<=[。！？!?；;])\s*", normalized) if part.strip(" ，；;。")]
+    if len(parts) > 1 and not ends_cleanly:
+        parts = parts[:-1]
+    return [part for part in parts if _looks_like_complete_sentence(part)]
+
+
+
+def _extract_query_terms(question: str) -> list[str]:
+    normalized = question.casefold()
+    chinese_terms = re.findall(r"[\u4e00-\u9fff]{2,}", normalized)
+    english_terms = re.findall(r"[a-z0-9]{3,}", normalized)
+    stop_terms = {
+        "什么", "怎么", "如何", "多少", "哪些", "这个", "那个", "一下", "关于", "里面", "里", "中", "写了", "说了", "要求", "应该", "发生",
+        "什么样", "问题", "内容", "文档", "指南", "手册", "登记",
+        "what", "does", "document", "guide", "handbook", "runbook", "about", "from", "with", "should",
+    }
+    split_tokens = r"的|了|在|时|对|和|与|及|里|中|关于|什么|怎么|应该|是否"
+
+    terms: list[str] = []
+
+    for term in chinese_terms:
+        for part in re.split(split_tokens, term):
+            cleaned = part.strip()
+            if len(cleaned) < 2 or cleaned in stop_terms:
+                continue
+            if len(cleaned) > 6:
+                reduced = [cleaned[i:j] for i in range(len(cleaned)) for j in range(i + 2, min(len(cleaned), i + 5) + 1)]
+                for item in reduced:
+                    if item not in stop_terms and item not in terms:
+                        terms.append(item)
+            elif cleaned not in terms:
+                terms.append(cleaned)
+
+    for term in english_terms:
+        if term in stop_terms:
+            continue
+        if term not in terms:
+            terms.append(term)
+    return terms
+
+
+
+def _sentence_match_score(sentence: str, query_terms: list[str]) -> int:
+    normalized = sentence.casefold()
+    score = 0
+    for term in query_terms:
+        if term in normalized:
+            score += 2 if len(term) >= 4 else 1
+    if any(token in normalized for token in ("需要", "应", "必须", "负责", "安排", "流程", "步骤", "升级", "回滚", "沟通", "复盘")):
+        score += 1
+    return score
+
+
+
+def _clean_summary_sentence(sentence: str) -> str:
+    cleaned = re.sub(r"\s+", " ", sentence).strip(" ：:；;，,")
+    return _ensure_sentence_ending(_compact_text(cleaned, 120))
+
+
+def _looks_like_complete_sentence(sentence: str) -> bool:
+    cleaned = sentence.strip()
+    if len(cleaned) < 12:
+        return False
+    if cleaned.endswith(("例如", "比如", "另外", "还有", "只有这", "以及", "并", "和")):
+        return False
+    if re.search(r"[A-Za-z0-9\u4e00-\u9fff]$", cleaned) and len(cleaned) <= 16:
+        return False
+    return True
+
+
+
+def _compact_text(text: str, limit: int) -> str:
+    compact = " ".join(text.split()).strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1].rstrip() + "…"
+
+
+def _ensure_sentence_ending(text: str) -> str:
+    cleaned = text.strip()
+    if not cleaned:
+        return cleaned
+    if cleaned.endswith(("。", "！", "？", "…")):
+        return cleaned
+    if cleaned.endswith(("；", ";", "：", ":", "，", ",")):
+        return cleaned[:-1].rstrip() + "。"
+    return cleaned + "。"
+
+
+def _to_clause(text: str) -> str:
+    cleaned = text.strip()
+    cleaned = re.sub(r"[。！？!?；;，,：:]$", "", cleaned)
+    return cleaned.strip()
 
 
 

@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { CitationList } from "../components/CitationList";
@@ -7,7 +7,7 @@ import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 import { useAppContext } from "../context/AppContext";
 import { api } from "../lib/api";
-import { formatConfidence, formatMessageRole } from "../lib/display";
+import { formatArtifactType, formatConfidence, formatCopilotIntent, formatMessageRole, formatRefusalReason } from "../lib/display";
 import { formatDateTime, locationLabel } from "../lib/format";
 import type { ChatCitationRead, ChatMessageRead, ChatSessionDetailRead, ChatSessionRead } from "../types/api";
 
@@ -21,6 +21,8 @@ export function ChatPage() {
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [artifactMessage, setArtifactMessage] = useState<string | null>(null);
+  const threadRef = useRef<HTMLDivElement | null>(null);
+  const sessionButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
 
   useEffect(() => {
     if (!token) {
@@ -56,6 +58,30 @@ export function ChatPage() {
       })
       .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "加载会话详情失败。"));
   }, [selectedSessionId, token]);
+
+  useEffect(() => {
+    if (!selectedSessionId) {
+      return;
+    }
+    const nextFrame = window.requestAnimationFrame(() => {
+      sessionButtonRefs.current[selectedSessionId]?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    });
+    return () => window.cancelAnimationFrame(nextFrame);
+  }, [selectedSessionId, sessions]);
+
+  useEffect(() => {
+    if (!activeSession?.messages.length || !threadRef.current) {
+      return;
+    }
+    const nextFrame = window.requestAnimationFrame(() => {
+      const thread = threadRef.current;
+      if (!thread) {
+        return;
+      }
+      thread.scrollTo({ top: thread.scrollHeight, behavior: "smooth" });
+    });
+    return () => window.cancelAnimationFrame(nextFrame);
+  }, [activeSession?.id, activeSession?.messages.length]);
 
   async function handleCreateSession() {
     if (!token) {
@@ -145,7 +171,7 @@ export function ChatPage() {
       {artifactMessage ? <div className="info-block">{artifactMessage}</div> : null}
 
       <div className="page-grid chat-layout">
-        <section className="panel stack">
+        <section className="panel stack session-panel">
           <div className="panel-header">
             <h3>会话列表</h3>
             <StatusBadge tone="neutral">{sessions.length}</StatusBadge>
@@ -158,6 +184,9 @@ export function ChatPage() {
                   key={session.id}
                   className={`list-card ${selectedSessionId === session.id ? "is-selected" : ""}`}
                   onClick={() => setSelectedSessionId(session.id)}
+                  ref={(element) => {
+                    sessionButtonRefs.current[session.id] = element;
+                  }}
                   type="button"
                 >
                   <div className="list-card-topline">
@@ -180,7 +209,7 @@ export function ChatPage() {
             </div>
             {activeSession ? <StatusBadge tone="info">会话已关联</StatusBadge> : null}
           </div>
-          <div className="chat-thread">
+          <div className="chat-thread" ref={threadRef}>
             {activeSession?.messages.length ? (
               activeSession.messages.map((message) => (
                 <MessageBubble
@@ -232,7 +261,11 @@ export function ChatPage() {
           <section className="panel stack">
             <div className="panel-header">
               <h3>来源片段</h3>
-              {selectedCitation ? <StatusBadge tone="warning">可点击查看</StatusBadge> : null}
+              {selectedCitation ? (
+                <Link className="secondary-button link-button" to={buildCitationDocumentLink(selectedCitation)}>
+                  查看完整文档
+                </Link>
+              ) : null}
             </div>
             {selectedCitation ? (
               <>
@@ -258,6 +291,49 @@ export function ChatPage() {
   );
 }
 
+interface MessageDebugInfo {
+  intent: string | null;
+  targetDocument: string | null;
+  refusalReason: string | null;
+  artifactType: string | null;
+}
+
+function readMessageDebugInfo(message: ChatMessageRead): MessageDebugInfo | null {
+  const metadata = message.message_metadata;
+  if (!metadata || typeof metadata !== "object") {
+    return null;
+  }
+  const metadataRecord = metadata as Record<string, unknown>;
+  const routerDecision = metadataRecord.router_decision;
+  const structuredResult = metadataRecord.structured_result;
+  const routerRecord = routerDecision && typeof routerDecision === "object" ? (routerDecision as Record<string, unknown>) : null;
+  const structuredRecord = structuredResult && typeof structuredResult === "object" ? (structuredResult as Record<string, unknown>) : null;
+  if (!routerRecord && !structuredRecord) {
+    return null;
+  }
+  return {
+    intent: typeof routerRecord?.intent === "string" ? routerRecord.intent : null,
+    targetDocument:
+      typeof structuredRecord?.target_document === "string"
+        ? structuredRecord.target_document
+        : typeof routerRecord?.target_document_title === "string"
+          ? routerRecord.target_document_title
+          : null,
+    refusalReason: typeof structuredRecord?.refusal_reason === "string" ? structuredRecord.refusal_reason : null,
+    artifactType: typeof structuredRecord?.artifact_type === "string" ? structuredRecord.artifact_type : null,
+  };
+}
+function buildCitationDocumentLink(citation: ChatCitationRead): string {
+  const params = new URLSearchParams({
+    documentId: citation.document_id,
+    versionId: citation.document_version_id,
+  });
+  if (citation.chunk_id) {
+    params.set("chunkId", citation.chunk_id);
+  }
+  return `/documents?${params.toString()}`;
+}
+
 interface MessageBubbleProps {
   message: ChatMessageRead;
   onSelectCitation: (citation: ChatCitationRead) => void;
@@ -265,6 +341,7 @@ interface MessageBubbleProps {
 
 function MessageBubble({ message, onSelectCitation }: MessageBubbleProps) {
   const tone = message.role === "assistant" ? "assistant" : "user";
+  const debugInfo = message.role === "assistant" ? readMessageDebugInfo(message) : null;
   return (
     <article className={`message-bubble ${tone}`}>
       <div className="message-meta">
@@ -277,6 +354,14 @@ function MessageBubble({ message, onSelectCitation }: MessageBubbleProps) {
         ) : null}
       </div>
       <p>{message.content}</p>
+      {debugInfo ? (
+        <div className="metadata-grid muted">
+          <span>意图：{formatCopilotIntent(debugInfo.intent)}</span>
+          {debugInfo.targetDocument ? <span>目标文档：{debugInfo.targetDocument}</span> : null}
+          {debugInfo.artifactType ? <span>结果类型：{formatArtifactType(debugInfo.artifactType)}</span> : null}
+          {debugInfo.refusalReason ? <span>拒答原因：{formatRefusalReason(debugInfo.refusalReason)}</span> : null}
+        </div>
+      ) : null}
       {message.citations.length ? (
         <div className="message-citations">
           {message.citations.map((citation) => (
@@ -289,5 +374,3 @@ function MessageBubble({ message, onSelectCitation }: MessageBubbleProps) {
     </article>
   );
 }
-
-

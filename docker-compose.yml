@@ -51,8 +51,14 @@ services:
       SEED_DEMO_EVAL_CASES: "true"
       DATA_DIR: /app/backend/data
       EMBEDDING_PROVIDER: deterministic
-      ANSWER_PROVIDER: deterministic
-      DIFF_SUMMARY_PROVIDER: deterministic
+      ROUTER_PROVIDER: openai_compatible
+      ANSWER_PROVIDER: openai_compatible
+      DIFF_SUMMARY_PROVIDER: openai_compatible
+      LLM_API_KEY: ${LLM_API_KEY}
+      LLM_BASE_URL: ${LLM_BASE_URL}
+      LLM_ROUTER_MODEL: ${LLM_ROUTER_MODEL}
+      LLM_CHAT_MODEL: ${LLM_CHAT_MODEL}
+      LLM_REASONING_MODEL: ${LLM_REASONING_MODEL}
     ports:
       - "8000:8000"
     volumes:

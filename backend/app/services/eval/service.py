@@ -128,6 +128,9 @@ class EvalService:
                     "case_name": case.case_name,
                     "dataset_name": case.dataset_name,
                     "permission_isolation_correct": metrics["permission_isolation_correct"],
+                    "router_decision": prepared.router_result.decision.model_dump(mode="json"),
+                    "tool_execution": prepared.tool_metadata.model_dump(mode="json"),
+                    "structured_result": prepared.structured_result.model_dump(mode="json"),
                 },
                 model_name=prepared.answer_result.model_name,
                 latency_ms=prepared.answer_result.latency_ms,
@@ -157,6 +160,9 @@ class EvalService:
             "evidence_conflict": prepared.answer_result.evidence_conflict,
             "permission_checks": metrics["permission_checks"],
             "retrieval_debug": prepared.retrieval_response.debug.model_dump(),
+            "router_decision": prepared.router_result.decision.model_dump(mode="json"),
+            "tool_execution": prepared.tool_metadata.model_dump(mode="json"),
+            "structured_result": prepared.structured_result.model_dump(mode="json"),
             "trace_id": trace_id,
             "human_review": {
                 "recommended": metrics["human_review_recommended"],
@@ -344,3 +350,4 @@ class EvalService:
     def _ensure_admin(actor: User) -> None:
         if actor.role is None or actor.role.name != RoleName.ADMIN:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin permission required.")
+

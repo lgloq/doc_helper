@@ -1,5 +1,5 @@
-import { FormEvent, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { FormEvent, useEffect, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { ErrorNotice } from "../components/ErrorNotice";
 import { PageHeader } from "../components/PageHeader";
@@ -45,13 +45,17 @@ const defaultAclForm: AclFormState = {
 
 export function DocumentsPage() {
   const { token, user } = useAppContext();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [documents, setDocuments] = useState<DocumentRead[]>([]);
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [selectedDocument, setSelectedDocument] = useState<DocumentRead | null>(null);
   const [versions, setVersions] = useState<DocumentVersionRead[]>([]);
+  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
+  const [selectedVersionDetail, setSelectedVersionDetail] = useState<DocumentVersionRead | null>(null);
   const [aclEntries, setAclEntries] = useState<DocumentACLRead[]>([]);
   const [chunks, setChunks] = useState<ChunkRead[]>([]);
   const [loading, setLoading] = useState(false);
+  const [isDocumentListCollapsed, setIsDocumentListCollapsed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -60,6 +64,11 @@ export function DocumentsPage() {
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [latestIngestion, setLatestIngestion] = useState<IngestionResultRead | null>(null);
   const canManageLibrary = canManageDocumentLibrary(user);
+  const showPermissionsPanel = canManageLibrary;
+  const chunkRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const requestedDocumentId = searchParams.get("documentId");
+  const requestedVersionId = searchParams.get("versionId");
+  const requestedChunkId = searchParams.get("chunkId");
 
   useEffect(() => {
     if (!token) {
@@ -71,16 +80,26 @@ export function DocumentsPage() {
       .listDocuments(token)
       .then((items) => {
         setDocuments(items);
-        setSelectedDocumentId((current) => current ?? items[0]?.id ?? null);
+        setSelectedDocumentId((current) => {
+          if (requestedDocumentId && items.some((item) => item.id === requestedDocumentId)) {
+            return requestedDocumentId;
+          }
+          if (current && items.some((item) => item.id === current)) {
+            return current;
+          }
+          return items[0]?.id ?? null;
+        });
       })
       .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "加载文档列表失败。"))
       .finally(() => setLoading(false));
-  }, [token]);
+  }, [requestedDocumentId, token]);
 
   useEffect(() => {
     if (!token || !selectedDocumentId) {
       setSelectedDocument(null);
       setVersions([]);
+      setSelectedVersionId(null);
+      setSelectedVersionDetail(null);
       setAclEntries([]);
       setChunks([]);
       return;
@@ -92,16 +111,14 @@ export function DocumentsPage() {
       api.getDocument(token, selectedDocumentId),
       api.listDocumentVersions(token, selectedDocumentId),
       api.listDocumentAcl(token, selectedDocumentId).catch(() => []),
-      api.listChunks(token, selectedDocumentId).catch(() => []),
     ])
-      .then(([document, nextVersions, nextAclEntries, nextChunks]) => {
+      .then(([document, nextVersions, nextAclEntries]) => {
         if (!isMounted) {
           return;
         }
         setSelectedDocument(document);
         setVersions(nextVersions);
         setAclEntries(nextAclEntries);
-        setChunks(nextChunks);
       })
       .catch((nextError) => {
         if (isMounted) {
@@ -114,22 +131,133 @@ export function DocumentsPage() {
     };
   }, [selectedDocumentId, token]);
 
-  async function refreshSelectedDocument(documentId: string) {
+  useEffect(() => {
+    if (!selectedDocumentId || !versions.length) {
+      setSelectedVersionId(null);
+      setSelectedVersionDetail(null);
+      return;
+    }
+
+    const nextVersionId =
+      (requestedVersionId && versions.some((version) => version.id === requestedVersionId) ? requestedVersionId : null) ??
+      (selectedVersionId && versions.some((version) => version.id === selectedVersionId) ? selectedVersionId : null) ??
+      (selectedDocument?.current_version_id && versions.some((version) => version.id === selectedDocument.current_version_id)
+        ? selectedDocument.current_version_id
+        : null) ??
+      versions[0]?.id ??
+      null;
+
+    if (nextVersionId !== selectedVersionId) {
+      setSelectedVersionId(nextVersionId);
+    }
+  }, [requestedVersionId, selectedDocument?.current_version_id, selectedDocumentId, selectedVersionId, versions]);
+
+  useEffect(() => {
+    if (!token || !selectedDocumentId || !selectedVersionId) {
+      setSelectedVersionDetail(null);
+      return;
+    }
+
+    let isMounted = true;
+    api
+      .getDocumentVersion(token, selectedDocumentId, selectedVersionId)
+      .then((version) => {
+        if (isMounted) {
+          setSelectedVersionDetail(version);
+        }
+      })
+      .catch((nextError) => {
+        if (isMounted) {
+          setActionMessage(nextError instanceof Error ? nextError.message : "加载文档版本内容失败。");
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedDocumentId, selectedVersionId, token]);
+
+  useEffect(() => {
+    if (!token || !selectedDocumentId) {
+      setChunks([]);
+      return;
+    }
+
+    let isMounted = true;
+    api
+      .listChunks(token, selectedDocumentId, selectedVersionId ?? undefined)
+      .then((items) => {
+        if (isMounted) {
+          setChunks(items);
+        }
+      })
+      .catch((nextError) => {
+        if (isMounted) {
+          setError(nextError instanceof Error ? nextError.message : "加载文档分块失败。");
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedDocumentId, selectedVersionId, token]);
+
+  useEffect(() => {
+    if (!requestedChunkId) {
+      return;
+    }
+    const nextFrame = window.requestAnimationFrame(() => {
+      chunkRefs.current[requestedChunkId]?.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+    return () => window.cancelAnimationFrame(nextFrame);
+  }, [chunks, requestedChunkId, selectedDocumentId, selectedVersionId]);
+
+  async function refreshSelectedDocument(documentId: string, preferredVersionId?: string | null) {
     if (!token) {
       return;
     }
-    const [document, nextVersions, nextAclEntries, nextChunks] = await Promise.all([
+    const [document, nextVersions, nextAclEntries] = await Promise.all([
       api.getDocument(token, documentId),
       api.listDocumentVersions(token, documentId),
       api.listDocumentAcl(token, documentId).catch(() => []),
-      api.listChunks(token, documentId).catch(() => []),
     ]);
     setSelectedDocument(document);
     setVersions(nextVersions);
     setAclEntries(nextAclEntries);
-    setChunks(nextChunks);
+    setSelectedVersionId(preferredVersionId ?? document.current_version_id ?? nextVersions[0]?.id ?? null);
   }
 
+
+  function updateDocumentLocation(documentId: string, versionId?: string | null, chunkId?: string | null) {
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set("documentId", documentId);
+    if (versionId) {
+      nextParams.set("versionId", versionId);
+    } else {
+      nextParams.delete("versionId");
+    }
+    if (chunkId) {
+      nextParams.set("chunkId", chunkId);
+    } else {
+      nextParams.delete("chunkId");
+    }
+    setSearchParams(nextParams, { replace: true });
+  }
+
+  function handleSelectDocument(document: DocumentRead) {
+    setSelectedDocumentId(document.id);
+    setSelectedVersionId(document.current_version_id ?? null);
+    setSelectedVersionDetail(null);
+    updateDocumentLocation(document.id, document.current_version_id ?? null, null);
+  }
+
+  function handleSelectVersion(versionId: string) {
+    if (!selectedDocument) {
+      return;
+    }
+    setSelectedVersionId(versionId);
+    updateDocumentLocation(selectedDocument.id, versionId, null);
+  }
   async function handleUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!token) {
@@ -157,7 +285,8 @@ export function DocumentsPage() {
       const nextDocuments = await api.listDocuments(token);
       setDocuments(nextDocuments);
       setSelectedDocumentId(response.document.id);
-      await refreshSelectedDocument(response.document.id);
+      updateDocumentLocation(response.document.id, response.version.id, null);
+      await refreshSelectedDocument(response.document.id, response.version.id);
       event.currentTarget.reset();
       setActionMessage(`已完成上传并入库：${response.document.title}`);
     } catch (nextError) {
@@ -185,7 +314,8 @@ export function DocumentsPage() {
       const response = await api.uploadDocumentVersion(token, selectedDocument.id, file);
       const ingestion = await api.ingestDocument(token, selectedDocument.id, response.version.id);
       setLatestIngestion(ingestion);
-      await refreshSelectedDocument(selectedDocument.id);
+      updateDocumentLocation(selectedDocument.id, response.version.id, null);
+      await refreshSelectedDocument(selectedDocument.id, response.version.id);
       event.currentTarget.reset();
       setActionMessage(`已上传新版本 v${response.version.version_number}，并完成重新入库。`);
     } catch (nextError) {
@@ -225,7 +355,8 @@ export function DocumentsPage() {
     try {
       const ingestion = await api.ingestDocument(token, selectedDocument.id, versionId);
       setLatestIngestion(ingestion);
-      await refreshSelectedDocument(selectedDocument.id);
+      updateDocumentLocation(selectedDocument.id, versionId ?? selectedVersionId ?? selectedDocument.current_version_id ?? null, null);
+      await refreshSelectedDocument(selectedDocument.id, versionId ?? selectedVersionId ?? selectedDocument.current_version_id ?? null);
       setActionMessage(`入库完成，共生成 ${ingestion.chunk_count} 个分块。`);
     } catch (nextError) {
       setActionMessage(nextError instanceof Error ? nextError.message : "重新入库失败。");
@@ -288,39 +419,55 @@ export function DocumentsPage() {
           )}
         </section>
 
-        <section className="panel stack">
+        <section className={`panel stack document-library-panel ${isDocumentListCollapsed ? "is-collapsed" : ""}`.trim()}>
           <div className="panel-header">
             <h3>可见文档</h3>
-            <StatusBadge tone="neutral">{documents.length}</StatusBadge>
+            <div className="inline-actions">
+              <StatusBadge tone="neutral">{documents.length}</StatusBadge>
+              <button
+                className="secondary-button"
+                onClick={() => setIsDocumentListCollapsed((current) => !current)}
+                type="button"
+              >
+                {isDocumentListCollapsed ? "展开列表" : "收起列表"}
+              </button>
+            </div>
           </div>
           {loading ? <p className="muted">正在加载文档列表...</p> : null}
-          <div className="document-list">
-            {documents.length ? (
-              documents.map((document) => (
-                <button
-                  key={document.id}
-                  className={`list-card ${selectedDocumentId === document.id ? "is-selected" : ""}`}
-                  onClick={() => setSelectedDocumentId(document.id)}
-                  type="button"
-                >
-                  <div className="list-card-topline">
-                    <strong>{document.title}</strong>
-                    <StatusBadge tone={canManageLibrary && document.current_user_can_manage ? "warning" : "neutral"}>
-                      {formatDocumentStatus(document.status)}
-                    </StatusBadge>
-                  </div>
-                  <p>{truncate(document.description ?? "暂无描述。", 120)}</p>
-                </button>
-              ))
-            ) : !loading ? (
-              <p className="muted">{canManageLibrary ? "暂无可见文档，可先上传一个文档开始体验。" : "暂无可见文档。"}</p>
-            ) : null}
-          </div>
+          {!isDocumentListCollapsed ? (
+            <div className="document-list document-list-scrollable">
+              {documents.length ? (
+                documents.map((document) => (
+                  <button
+                    key={document.id}
+                    className={`list-card ${selectedDocumentId === document.id ? "is-selected" : ""}`}
+                    onClick={() => handleSelectDocument(document)}
+                    type="button"
+                  >
+                    <div className="list-card-topline">
+                      <strong>{document.title}</strong>
+                      <StatusBadge tone={canManageLibrary && document.current_user_can_manage ? "warning" : "neutral"}>
+                        {formatDocumentStatus(document.status)}
+                      </StatusBadge>
+                    </div>
+                    <p>{truncate(document.description ?? "暂无描述。", 120)}</p>
+                  </button>
+                ))
+              ) : !loading ? (
+                <p className="muted">{canManageLibrary ? "暂无可见文档，可先上传一个文档开始体验。" : "暂无可见文档。"}</p>
+              ) : null}
+            </div>
+          ) : (
+            <div className="info-block">
+              <strong>文档列表已收起</strong>
+              <p>当前共 {documents.length} 份可见文档；需要切换时可点击“展开列表”。</p>
+            </div>
+          )}
         </section>
       </div>
 
       {selectedDocument ? (
-        <div className="page-grid detail-layout">
+        <div className={`page-grid detail-layout ${showPermissionsPanel ? "" : "detail-layout-readonly"}`.trim()}>
           <section className="panel stack">
             <div className="panel-header">
               <div>
@@ -340,7 +487,7 @@ export function DocumentsPage() {
             <div className="stack dense-stack">
               {versions.length ? (
                 versions.map((version) => (
-                  <div className="version-card" key={version.id}>
+                  <div className={`version-card ${selectedVersionId === version.id ? "is-selected" : ""}`} key={version.id}>
                     <div className="list-card-topline">
                       <strong>v{version.version_number}</strong>
                       <StatusBadge tone={version.is_current ? "success" : "neutral"}>
@@ -351,19 +498,48 @@ export function DocumentsPage() {
                       {version.original_filename} · {formatBytes(version.file_size)} · {formatDateTime(version.created_at)}
                     </p>
                     <p className="muted">{version.storage_path}</p>
-                    {canManageLibrary && selectedDocument.current_user_can_manage ? (
-                      <div className="inline-actions">
+                    <div className="inline-actions">
+                      <button className="secondary-button" onClick={() => handleSelectVersion(version.id)} type="button">
+                        {selectedVersionId === version.id ? "正在查看" : "查看内容"}
+                      </button>
+                      {canManageLibrary && selectedDocument.current_user_can_manage ? (
                         <button className="secondary-button" onClick={() => handleIngest(version.id)} type="button">
                           重新入库
                         </button>
-                      </div>
-                    ) : null}
+                      ) : null}
+                    </div>
                   </div>
                 ))
               ) : (
                 <p className="muted">当前文档还没有可用版本。</p>
               )}
             </div>
+
+            <div className="subsection-header">
+              <h4>完整内容</h4>
+              <div className="inline-actions">
+                {selectedVersionDetail ? <StatusBadge tone="info">v{selectedVersionDetail.version_number}</StatusBadge> : null}
+                {requestedChunkId ? <StatusBadge tone="warning">已定位引用分块</StatusBadge> : null}
+              </div>
+            </div>
+            {requestedChunkId ? (
+              chunks.find((chunk) => chunk.id === requestedChunkId) ? (
+                <div className="info-block">
+                  <strong>当前命中的引用分块</strong>
+                  <p>{chunks.find((chunk) => chunk.id === requestedChunkId)?.content}</p>
+                </div>
+              ) : (
+                <div className="info-block">
+                  <strong>未在当前版本中找到该引用分块</strong>
+                  <p>这通常意味着引用来自其他版本；你仍可以在下方查看当前选中版本的完整提取文本。</p>
+                </div>
+              )
+            ) : null}
+            {selectedVersionDetail?.extracted_text ? (
+              <div className="document-text-viewer">{selectedVersionDetail.extracted_text}</div>
+            ) : (
+              <p className="muted">当前版本暂无可展示的完整提取文本。</p>
+            )}
 
             {canManageLibrary && selectedDocument.current_user_can_manage ? (
               <form className="stack" onSubmit={handleVersionUpload}>
@@ -378,12 +554,12 @@ export function DocumentsPage() {
             ) : null}
           </section>
 
-          <section className="panel stack">
-            <div className="panel-header">
-              <h3>权限信息</h3>
-              <StatusBadge tone="info">文档访问控制</StatusBadge>
-            </div>
-            {canManageLibrary ? (
+          {showPermissionsPanel ? (
+            <section className="panel stack">
+              <div className="panel-header">
+                <h3>权限信息</h3>
+                <StatusBadge tone="info">文档访问控制</StatusBadge>
+              </div>
               <>
                 <div className="stack dense-stack">
                   {aclEntries.length ? (
@@ -477,30 +653,34 @@ export function DocumentsPage() {
                   </form>
                 ) : null}
               </>
-            ) : (
-              <div className="info-block">
-                <strong>当前账号不提供权限维护入口</strong>
-                <p>文档访问控制仅管理员可查看和维护。如需新增授权或调整访问范围，请联系管理员处理。</p>
-              </div>
-            )}
-          </section>
+            </section>
+          ) : null}
 
           <section className="panel stack">
             <div className="panel-header">
               <h3>分块预览</h3>
-              <StatusBadge tone="success">{chunks.length} 个分块</StatusBadge>
+              <div className="inline-actions">
+                <StatusBadge tone="success">{chunks.length} 个分块</StatusBadge>
+                {selectedVersionDetail ? <StatusBadge tone="info">当前版本 v{selectedVersionDetail.version_number}</StatusBadge> : null}
+              </div>
             </div>
             <div className="chunk-list">
               {chunks.length ? (
-                chunks.slice(0, 8).map((chunk) => (
-                  <div className="chunk-card" key={chunk.id}>
+                chunks.map((chunk) => (
+                  <div
+                    className={`chunk-card ${requestedChunkId === chunk.id ? "is-selected" : ""}`}
+                    key={chunk.id}
+                    ref={(element) => {
+                      chunkRefs.current[chunk.id] = element;
+                    }}
+                  >
                     <div className="list-card-topline">
                       <strong>{chunk.section_title ?? `分块 ${chunk.chunk_index}`}</strong>
                       <span>
                         {chunk.page_number_start != null ? `第 ${chunk.page_number_start} 页` : "页码未知"} · {chunk.paragraph_start != null ? `第 ${chunk.paragraph_start} 段` : "段落未知"}
                       </span>
                     </div>
-                    <p>{truncate(chunk.preview, 220)}</p>
+                    <p>{truncate(requestedChunkId === chunk.id ? chunk.content : chunk.preview, requestedChunkId === chunk.id ? 420 : 220)}</p>
                   </div>
                 ))
               ) : (

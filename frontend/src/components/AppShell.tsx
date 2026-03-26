@@ -18,22 +18,24 @@ export function AppShell() {
   return (
     <div className="app-shell">
       <aside className="app-sidebar">
-        <div>
-          <div className="brand-mark">EKA</div>
-          <h2>企业知识助手</h2>
-          <p className="muted">权限感知问答、派生结果、版本差异、评测与追踪。</p>
+        <div className="sidebar-top">
+          <div>
+            <div className="brand-mark">EKA</div>
+            <h2>企业知识助手</h2>
+            <p className="muted">权限感知问答、派生结果、版本差异、评测与追踪。</p>
+          </div>
+          <nav className="sidebar-nav">
+            {navItems.map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                className={({ isActive }) => `nav-link ${isActive ? "is-active" : ""}`}
+              >
+                {item.label}
+              </NavLink>
+            ))}
+          </nav>
         </div>
-        <nav className="sidebar-nav">
-          {navItems.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              className={({ isActive }) => `nav-link ${isActive ? "is-active" : ""}`}
-            >
-              {item.label}
-            </NavLink>
-          ))}
-        </nav>
         <div className="sidebar-footer">
           <div className="user-card">
             <div>
@@ -55,4 +57,3 @@ export function AppShell() {
     </div>
   );
 }
-

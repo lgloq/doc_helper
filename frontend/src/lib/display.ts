@@ -63,7 +63,9 @@ const TRACE_TYPE_LABELS: Record<string, string> = {
 
 const SUMMARY_PROVIDER_LABELS: Record<string, string> = {
   deterministic: "规则摘要",
+  deterministic_fallback: "规则回退摘要",
   openai: "大模型摘要",
+  "openai-compatible": "大模型摘要",
   system: "系统摘要",
 };
 
@@ -159,4 +161,52 @@ export function formatSourceCount(count: number): string {
   return `${count} 条来源`;
 }
 
+
+
+const COPILOT_INTENT_LABELS: Record<string, string> = {
+  document_qa: "文档问答",
+  topic_qa: "主题问答",
+  version_compare: "版本对比",
+  workflow_generation: "派生生成",
+  unsupported_or_unclear: "暂不支持/意图不清",
+};
+
+const ARTIFACT_TYPE_LABELS: Record<string, string> = {
+  tasks: "待办事项",
+  weekly_report: "周报草稿",
+  faq: "FAQ 草稿",
+};
+
+const REFUSAL_REASON_LABELS: Record<string, string> = {
+  target_document_not_accessible_or_not_found: "目标文档不可访问或不存在",
+  no_relevant_evidence_in_target_document: "目标文档内缺少足够相关证据",
+  insufficient_relevant_evidence: "未找到足够相关的可访问证据",
+  invalid_or_missing_citations: "引用来源校验失败",
+  unsupported_or_unclear: "问题不明确或暂不支持",
+  unsupported_or_unclear_workflow_request: "无法判断要生成哪类结果",
+  missing_session_context: "缺少可用于生成结果的会话上下文",
+  insufficient_versions_for_compare: "可比较的版本数量不足",
+  unable_to_resolve_version_pair: "无法解析要比较的版本",
+};
+
+export function formatCopilotIntent(value: string | null | undefined): string {
+  if (!value) {
+    return "未知意图";
+  }
+  return COPILOT_INTENT_LABELS[value] ?? value;
+}
+
+export function formatArtifactType(value: string | null | undefined): string {
+  if (!value) {
+    return "未知类型";
+  }
+  return ARTIFACT_TYPE_LABELS[value] ?? value;
+}
+
+export function formatRefusalReason(value: string | null | undefined): string {
+  if (!value) {
+    return "-";
+  }
+  return REFUSAL_REASON_LABELS[value] ?? value;
+}
 

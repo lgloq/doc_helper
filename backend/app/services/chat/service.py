@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
@@ -8,12 +7,10 @@ from uuid import UUID
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
 from app.models.chat import ChatMessage, ChatSession, MessageCitation
 from app.models.enums import MessageRole
 from app.models.user import User
 from app.repositories.chat_repository import ChatRepository
-from app.repositories.document_repository import DocumentRepository
 from app.schemas.chat import (
     ChatCitationRead,
     ChatMessageCreate,
@@ -23,43 +20,29 @@ from app.schemas.chat import (
     ChatSessionDetailRead,
     ChatSessionRead,
 )
-from app.schemas.search import SearchRequest, SearchResponse, SearchResultChunk
-from app.services.chat.generation import AnswerGenerationResult, AnswerGeneratorFactory
-from app.services.chat.prompts import format_history_line, truncate_session_title, validate_used_chunk_ids
-from app.services.chat.reliability import (
-    AccessibleDocumentCandidate,
-    DocumentTargetMatch,
-    extract_document_target,
-    should_abstain_from_answer,
-)
+from app.services.llm.orchestrator import CopilotOrchestrator, CopilotRunResult
 from app.services.observability.service import ObservabilityService
-from app.services.permissions.service import PermissionFilterBuilder
-from app.services.retrieval.service import RetrievalService
 
 DEFAULT_CHAT_SESSION_TITLE = "New Chat"
 
 
 @dataclass
 class PreparedChatAnswer:
-    retrieval_response: SearchResponse
-    answer_result: AnswerGenerationResult
-    candidate_chunks: list[SearchResultChunk]
-    selected_chunks: list[SearchResultChunk]
+    router_result: object
+    tool_metadata: object
+    answer_result: object
+    retrieval_response: object
+    candidate_chunks: list
+    selected_chunks: list
     confidence: str
-    target_match: DocumentTargetMatch | None = None
-    abstain_reason: str | None = None
-    force_targeted_answer: bool = False
+    structured_result: object
 
 
 class ChatService:
     def __init__(self, session: Session):
         self.session = session
-        self.settings = get_settings()
         self.chat_repository = ChatRepository(session)
-        self.document_repository = DocumentRepository(session)
-        self.permission_builder = PermissionFilterBuilder()
-        self.retrieval_service = RetrievalService(session)
-        self.answer_generator = AnswerGeneratorFactory.create()
+        self.copilot_orchestrator = CopilotOrchestrator(session)
         self.observability_service = ObservabilityService(session)
 
     def create_session(self, actor: User, payload: ChatSessionCreate | None) -> ChatSessionRead:
@@ -84,7 +67,7 @@ class ChatService:
         )
 
     def preview_answer(self, actor: User, question: str, top_k: int = 5) -> PreparedChatAnswer:
-        return self._prepare_answer(actor, question, top_k, existing_messages=[])
+        return self._prepare_answer(actor, question, top_k, existing_messages=[], session_id=None)
 
     def create_message(self, actor: User, session_id: UUID, payload: ChatMessageCreate) -> ChatMessageCreateResponse:
         chat_session = self._get_session_or_404(actor, session_id, include_messages=True)
@@ -98,12 +81,12 @@ class ChatService:
             message_metadata={"top_k": payload.top_k},
         )
         if not existing_messages and chat_session.title == DEFAULT_CHAT_SESSION_TITLE:
-            chat_session.title = truncate_session_title(payload.content)
+            chat_session.title = self._truncate_session_title(payload.content)
         chat_session.updated_at = datetime.now(UTC)
         self.chat_repository.add_message(user_message)
         self.session.flush()
 
-        prepared = self._prepare_answer(actor, payload.content, payload.top_k, existing_messages)
+        prepared = self._prepare_answer(actor, payload.content, payload.top_k, existing_messages, session_id=chat_session.id)
         assistant_result = prepared.answer_result
         assistant_message = ChatMessage(
             session_id=chat_session.id,
@@ -124,10 +107,9 @@ class ChatService:
                 "used_chunk_ids": [str(item.chunk_id) for item in prepared.selected_chunks],
                 "candidate_chunk_ids": [str(item.chunk_id) for item in prepared.candidate_chunks],
                 "retrieved_chunk_ids": [str(item.chunk_id) for item in prepared.retrieval_response.matched_chunks],
-                "document_target": self._serialize_target_match(prepared.target_match),
-                "abstain_reason": prepared.abstain_reason,
-                "force_targeted_answer": prepared.force_targeted_answer,
-                "candidate_score_summary": self._summarize_candidate_chunks(prepared.candidate_chunks),
+                "router_decision": prepared.router_result.decision.model_dump(mode="json"),
+                "tool_execution": prepared.tool_metadata.model_dump(mode="json"),
+                "structured_result": prepared.structured_result.model_dump(mode="json"),
                 "raw_payload": assistant_result.raw_payload,
             },
         )
@@ -174,15 +156,14 @@ class ChatService:
                 query_text=payload.content,
                 retrieval_response=prepared.retrieval_response,
                 selected_chunks=prepared.selected_chunks,
-                error_text=self._extract_trace_error(prepared.answer_result),
+                error_text=self._extract_trace_error(prepared),
                 trace_type="chat_qa",
                 confidence=prepared.confidence,
                 insufficient_evidence=prepared.answer_result.insufficient_evidence,
                 extra_metadata={
-                    "answer_basis": prepared.answer_result.answer_basis,
-                    "abstain_reason": prepared.abstain_reason,
-                    "document_target": self._serialize_target_match(prepared.target_match),
-                    "force_targeted_answer": prepared.force_targeted_answer,
+                    "router_decision": prepared.router_result.decision.model_dump(mode="json"),
+                    "tool_execution": prepared.tool_metadata.model_dump(mode="json"),
+                    "structured_result": prepared.structured_result.model_dump(mode="json"),
                 },
             )
         except Exception:
@@ -203,52 +184,25 @@ class ChatService:
         question: str,
         top_k: int,
         existing_messages: list[ChatMessage],
+        session_id: UUID | None,
     ) -> PreparedChatAnswer:
-        accessible_documents = self._list_accessible_documents(actor)
-        target_match = extract_document_target(question, accessible_documents)
-        retrieval_response = self.retrieval_service.search(actor, SearchRequest(query=question, top_k=top_k))
-        abstain_decision = should_abstain_from_answer(question, retrieval_response.matched_chunks, target_match)
-        candidate_chunks = list(abstain_decision.filtered_chunks or [])
-        force_targeted_answer = bool(target_match and target_match.matched and candidate_chunks)
-
-        if abstain_decision.should_abstain:
-            answer_result = self._force_insufficient_result(
-                answer_basis=abstain_decision.reason or "insufficient_relevant_evidence",
-                user_message=abstain_decision.user_message,
-            )
-        else:
-            answer_result = self._generate_safe_answer(
-                question,
-                candidate_chunks,
-                existing_messages,
-                allow_low_score=force_targeted_answer,
-            )
-
-        validated_chunk_ids = validate_used_chunk_ids(
-            answer_result.used_chunk_ids,
-            {str(item.chunk_id) for item in candidate_chunks},
+        effective_session_id = session_id or UUID(int=0)
+        orchestrated: CopilotRunResult = self.copilot_orchestrator.run(
+            actor=actor,
+            question=question,
+            session_id=effective_session_id,
+            top_k=top_k,
+            existing_messages=existing_messages,
         )
-        selected_chunks = self._select_citation_chunks(candidate_chunks, validated_chunk_ids)
-        if not answer_result.insufficient_evidence and not selected_chunks:
-            answer_result = self._force_insufficient_result(
-                answer_basis="invalid_or_missing_citations",
-                original_answer=answer_result.answer,
-                provider_name=answer_result.provider_name,
-                model_name=answer_result.model_name,
-                prompt_tokens=answer_result.prompt_tokens,
-                completion_tokens=answer_result.completion_tokens,
-                latency_ms=answer_result.latency_ms,
-            )
-        confidence = self._compute_confidence(selected_chunks, answer_result)
         return PreparedChatAnswer(
-            retrieval_response=retrieval_response,
-            answer_result=answer_result,
-            candidate_chunks=candidate_chunks,
-            selected_chunks=selected_chunks,
-            confidence=confidence,
-            target_match=target_match,
-            abstain_reason=abstain_decision.reason,
-            force_targeted_answer=force_targeted_answer,
+            router_result=orchestrated.router_result,
+            tool_metadata=orchestrated.tool_metadata,
+            answer_result=orchestrated.answer_result,
+            retrieval_response=orchestrated.retrieval_response,
+            candidate_chunks=orchestrated.candidate_chunks,
+            selected_chunks=orchestrated.selected_chunks,
+            confidence=orchestrated.confidence,
+            structured_result=orchestrated.structured_result,
         )
 
     def _get_session_or_404(self, actor: User, session_id: UUID, include_messages: bool = False) -> ChatSession:
@@ -257,142 +211,20 @@ class ChatService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat session not found.")
         return chat_session
 
-    def _generate_safe_answer(
-        self,
-        question: str,
-        retrieved_chunks: list[SearchResultChunk],
-        existing_messages: list[ChatMessage],
-        *,
-        allow_low_score: bool = False,
-    ) -> AnswerGenerationResult:
-        history_limit = max(self.settings.chat_history_window, 0) * 2
-        history_window = existing_messages[-history_limit:] if history_limit else []
-        history_lines = [format_history_line(message.role.value, message.content) for message in history_window]
-        if not retrieved_chunks:
-            return self._force_insufficient_result(answer_basis="no_retrieval_hits")
-        try:
-            return self.answer_generator.generate(
-                question=question,
-                retrieved_chunks=retrieved_chunks,
-                history_lines=history_lines,
-                allow_low_score=allow_low_score,
-            )
-        except Exception as exc:
-            return self._force_insufficient_result(
-                answer_basis="model_failure",
-                error_text=str(exc),
-            )
-
-    def _list_accessible_documents(self, actor: User) -> list[AccessibleDocumentCandidate]:
-        visibility_query = self.permission_builder.build_accessible_document_ids_query(actor, require_manage=False)
-        documents = self.document_repository.list_visible(visibility_query)
-        return [
-            AccessibleDocumentCandidate(document_id=document.id, title=document.title)
-            for document in documents
-        ]
-
     @staticmethod
-    def _force_insufficient_result(
-        *,
-        answer_basis: str,
-        user_message: str | None = None,
-        original_answer: str | None = None,
-        provider_name: str = "system",
-        model_name: str | None = None,
-        prompt_tokens: int | None = None,
-        completion_tokens: int | None = None,
-        latency_ms: int | None = None,
-        error_text: str | None = None,
-    ) -> AnswerGenerationResult:
-        if user_message:
-            answer = user_message
-        elif answer_basis == "model_failure":
-            answer = "回答生成阶段出现异常，暂时无法完成一次可靠的引用式回答，请稍后重试。"
-        elif answer_basis == "invalid_or_missing_citations":
-            answer = "系统找到了相关材料，但无法稳定校验引用来源，因此这次不输出正式答案。"
-        else:
-            answer = "未找到足够相关的可访问证据来支持可靠回答。"
-        metadata_payload = {"error_text": error_text, "original_answer": original_answer, "reason": answer_basis}
-        return AnswerGenerationResult(
-            answer=answer,
-            insufficient_evidence=True,
-            evidence_conflict=False,
-            used_chunk_ids=[],
-            answer_basis=answer_basis,
-            provider_name=provider_name,
-            model_name=model_name,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens or max(len(answer) // 4, 1),
-            latency_ms=latency_ms,
-            raw_payload=metadata_payload,
-        )
-
-    @staticmethod
-    def _select_citation_chunks(
-        matched_chunks: list[SearchResultChunk],
-        validated_chunk_ids: list[UUID],
-    ) -> list[SearchResultChunk]:
-        if not validated_chunk_ids:
-            return []
-        position_map = {chunk_id: index for index, chunk_id in enumerate(validated_chunk_ids)}
-        selected = [item for item in matched_chunks if item.chunk_id in position_map]
-        selected.sort(key=lambda item: position_map[item.chunk_id])
-        return selected[:3]
-
-    @staticmethod
-    def _compute_confidence(selected_chunks: list[SearchResultChunk], answer_result: AnswerGenerationResult) -> str:
-        if answer_result.insufficient_evidence or not selected_chunks:
-            return "insufficient"
-        top_score = selected_chunks[0].score.fused
-        average_score = sum(item.score.fused for item in selected_chunks) / len(selected_chunks)
-        document_distribution = Counter(str(item.document_id) for item in selected_chunks)
-        dominant_share = max(document_distribution.values()) / len(selected_chunks)
-
-        if answer_result.evidence_conflict:
-            if top_score >= 0.6:
-                return "medium"
-            return "low"
-        if len(selected_chunks) >= 2 and top_score >= 0.7 and average_score >= 0.55 and dominant_share >= 0.5:
-            return "high"
-        if top_score >= 0.4:
-            return "medium"
-        return "low"
-
-    @staticmethod
-    def _extract_trace_error(answer_result: AnswerGenerationResult) -> str | None:
-        if not answer_result.raw_payload:
-            return None
-        error_text = answer_result.raw_payload.get("error_text")
+    def _extract_trace_error(prepared: PreparedChatAnswer) -> str | None:
+        raw_payload = prepared.answer_result.raw_payload or {}
+        error_text = raw_payload.get("error_text")
         if error_text:
             return str(error_text)
         return None
 
     @staticmethod
-    def _serialize_target_match(target_match: DocumentTargetMatch | None) -> dict[str, str | bool | float | None] | None:
-        if target_match is None:
-            return None
-        return {
-            "matched": target_match.matched,
-            "requested_document_name": target_match.requested_document_name,
-            "matched_document_id": str(target_match.matched_document_id) if target_match.matched_document_id else None,
-            "matched_document_title": target_match.matched_document_title,
-            "match_type": target_match.match_type,
-            "confidence": target_match.confidence,
-            "inaccessible_or_not_found": target_match.inaccessible_or_not_found,
-        }
-
-    @staticmethod
-    def _summarize_candidate_chunks(chunks: list[SearchResultChunk]) -> list[dict[str, str | float | int | None]]:
-        return [
-            {
-                "document_title": item.document_title,
-                "chunk_index": item.chunk_index,
-                "fused": item.score.fused,
-                "lexical": item.score.lexical_raw,
-                "vector": item.score.vector_raw,
-            }
-            for item in chunks[:3]
-        ]
+    def _truncate_session_title(question: str, limit: int = 80) -> str:
+        compact = " ".join(question.strip().split())
+        if len(compact) <= limit:
+            return compact or DEFAULT_CHAT_SESSION_TITLE
+        return compact[: limit - 3].rstrip() + "..."
 
     @staticmethod
     def _serialize_session(chat_session: ChatSession) -> ChatSessionRead:
