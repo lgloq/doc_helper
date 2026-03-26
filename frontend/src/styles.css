@@ -102,7 +102,7 @@ h4 {
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.92) 0%, rgba(238, 243, 242, 0.9) 100%);
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
+  gap: 1.1rem;
   position: sticky;
   top: 0;
   min-height: 100vh;
@@ -143,7 +143,7 @@ h4 {
 .sidebar-footer {
   margin-top: auto;
   display: grid;
-  gap: 1rem;
+  gap: 0.85rem;
 }
 
 .user-card {
@@ -162,12 +162,12 @@ h4 {
 }
 
 .app-main {
-  padding: 2rem;
+  padding: 2.45rem 1.5rem 1.75rem;
 }
 
 .page-stack {
   display: grid;
-  gap: 1.5rem;
+  gap: 1.15rem;
 }
 
 .page-grid {
@@ -203,8 +203,8 @@ h4 {
 .panel {
   background: var(--panel);
   border: 1px solid var(--panel-border);
-  border-radius: 24px;
-  padding: 1.25rem;
+  border-radius: 22px;
+  padding: 1rem 1.05rem;
   box-shadow: var(--shadow);
   backdrop-filter: blur(14px);
 }
@@ -237,12 +237,12 @@ h4 {
 }
 
 .page-header h1 {
-  font-size: 1.9rem;
+  font-size: 1.72rem;
   margin-bottom: 0.35rem;
 }
 
 .page-header p {
-  max-width: 72ch;
+  max-width: 66ch;
   color: var(--muted);
 }
 
@@ -348,7 +348,7 @@ h4 {
 .citation-card {
   border: 1px solid rgba(19, 33, 39, 0.08);
   border-radius: 18px;
-  padding: 0.95rem 1rem;
+  padding: 0.82rem 0.92rem;
   background: rgba(255, 255, 255, 0.65);
 }
 
@@ -697,4 +697,273 @@ h4 {
 .versions-layout {
   align-items: start;
   grid-template-columns: minmax(0, 1.45fr) minmax(340px, 0.85fr);
+}
+.documents-layout {
+  grid-template-columns: minmax(0, 1.08fr) minmax(340px, 0.92fr);
+}
+
+.detail-layout {
+  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.78fr) minmax(340px, 0.92fr);
+}
+
+.detail-layout-readonly {
+  grid-template-columns: minmax(0, 1.22fr) minmax(340px, 0.88fr);
+}
+
+.version-list-scrollable {
+  max-height: min(30rem, 46vh);
+  overflow: auto;
+  padding-right: 0.25rem;
+}
+
+.chunk-list-scrollable {
+  max-height: min(58rem, 78vh);
+  overflow: auto;
+  padding-right: 0.25rem;
+}
+
+.document-text-viewer {
+  max-height: min(54vh, 46rem);
+}
+
+.chat-layout {
+  grid-template-columns: 240px minmax(0, 1.55fr) minmax(320px, 0.95fr);
+}
+
+.chat-conversation-panel {
+  min-height: min(76vh, 64rem);
+}
+
+.chat-side-panel {
+  align-self: start;
+  position: sticky;
+  top: 2rem;
+}
+
+.message-bubble.is-pending {
+  border-style: dashed;
+  opacity: 0.92;
+}
+
+.versions-layout {
+  grid-template-columns: minmax(0, 1.7fr) minmax(360px, 0.8fr);
+}
+
+.versions-diff-panel,
+.versions-summary-panel {
+  align-self: start;
+}
+
+.versions-summary-panel {
+  position: sticky;
+  top: 2rem;
+}
+
+.diff-block {
+  max-height: min(42rem, 60vh);
+}
+
+@media (max-width: 1200px) {
+  .chat-side-panel,
+  .versions-summary-panel {
+    position: static;
+    top: auto;
+  }
+
+  .detail-layout,
+  .detail-layout-readonly,
+  .documents-layout,
+  .versions-layout,
+  .chat-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+
+.page-header > div:first-child {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.page-header h1 {
+  line-height: 1.15;
+}
+
+.page-header p {
+  font-size: 0.98rem;
+}
+
+.panel > .panel-header h3,
+.subsection-header h4 {
+  line-height: 1.2;
+}
+
+.documents-layout,
+.detail-layout,
+.versions-layout {
+  gap: 1.1rem;
+}
+
+.document-primary-panel,
+.document-library-panel,
+.document-detail-main-panel,
+.document-permissions-panel,
+.document-chunks-panel,
+.versions-controls-panel,
+.versions-diff-panel,
+.versions-summary-panel {
+  padding: 0.95rem 1rem;
+}
+
+.document-primary-panel form,
+.versions-controls-panel {
+  gap: 0.8rem;
+}
+
+.document-primary-panel textarea {
+  min-height: 6.25rem;
+}
+
+.document-detail-main-panel > p,
+.document-library-panel .list-card p,
+.versions-diff-panel .list-card p,
+.document-chunks-panel .chunk-card p {
+  line-height: 1.55;
+}
+
+.version-selector-grid {
+  align-items: end;
+  gap: 0.9rem;
+}
+
+.version-selector-grid label,
+.document-primary-panel label {
+  gap: 0.3rem;
+}
+
+.version-card,
+.chunk-card,
+.message-bubble,
+.metric-card,
+.citation-card,
+.list-card {
+  border-radius: 16px;
+}
+
+.version-card,
+.chunk-card,
+.message-bubble,
+.metric-card,
+.citation-card,
+.list-card,
+.info-block,
+.error-notice {
+  padding: 0.82rem 0.92rem;
+}
+
+.version-card p,
+.list-card p,
+.chunk-card p,
+.message-bubble p {
+  line-height: 1.5;
+}
+
+.document-library-panel .document-list-scrollable {
+  max-height: min(30rem, 52vh);
+}
+
+.version-list-scrollable {
+  max-height: min(26rem, 42vh);
+}
+
+.chunk-list-scrollable {
+  max-height: min(46rem, 68vh);
+}
+
+.document-text-viewer {
+  border-radius: 16px;
+  padding: 0.9rem 0.95rem;
+}
+
+.versions-controls-panel .inline-actions {
+  justify-content: flex-end;
+}
+
+.versions-summary-panel ul {
+  margin-top: -0.15rem;
+}
+
+.versions-summary-panel li {
+  line-height: 1.5;
+}
+
+
+.panel-header {
+  align-items: flex-start;
+}
+
+.panel-heading {
+  display: grid;
+  gap: 0.18rem;
+  min-width: 0;
+}
+
+.panel-heading h3 {
+  font-size: 1.06rem;
+  line-height: 1.2;
+}
+
+.panel-heading p {
+  margin: 0;
+  max-width: 52ch;
+  color: var(--muted);
+  font-size: 0.91rem;
+  line-height: 1.45;
+}
+
+.panel-header > .panel-heading,
+.panel-header > div:first-child,
+.subsection-header > .panel-heading {
+  min-width: 0;
+}
+
+.panel-header .inline-actions {
+  justify-content: flex-end;
+}
+
+.metadata-subline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.75rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
+.subsection-header {
+  margin-top: 0.1rem;
+}
+
+.status-badge {
+  font-size: 0.78rem;
+  padding: 0.28rem 0.65rem;
+}
+
+.documents-layout .panel-header,
+.chat-layout .panel-header,
+.versions-layout .panel-header,
+.versions-controls-panel .panel-header {
+  margin-bottom: 0.05rem;
+}
+
+.documents-layout .inline-actions,
+.chat-layout .inline-actions,
+.versions-layout .inline-actions {
+  row-gap: 0.45rem;
+}
+
+.document-detail-main-panel > p,
+.versions-summary-panel > p,
+.chat-conversation-panel .empty-state p {
+  color: var(--muted);
 }

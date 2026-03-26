@@ -81,6 +81,7 @@ class DocumentDiffSummaryRead(BaseModel):
     impact_hints: list[str] = Field(default_factory=list)
     summary_provider: str
     model_name: str | None = None
+    cache_hit: bool = False
 
 
 class DocumentACLCreate(BaseModel):

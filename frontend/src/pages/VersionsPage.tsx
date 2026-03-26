@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 
 import { ErrorNotice } from "../components/ErrorNotice";
 import { PageHeader } from "../components/PageHeader";
@@ -11,6 +12,7 @@ import type { DocumentDiffRead, DocumentDiffSummaryRead, DocumentRead, DocumentV
 
 export function VersionsPage() {
   const { token } = useAppContext();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [documents, setDocuments] = useState<DocumentRead[]>([]);
   const [documentId, setDocumentId] = useState<string>("");
   const [versions, setVersions] = useState<DocumentVersionRead[]>([]);
@@ -23,6 +25,33 @@ export function VersionsPage() {
   const [isLoadingSummary, setIsLoadingSummary] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const hasAutoLoadContext = useRef(false);
+  const summaryCacheRef = useRef<Record<string, DocumentDiffSummaryRead>>({});
+  const requestedDocumentId = searchParams.get("documentId");
+  const requestedFromVersionId = searchParams.get("fromVersionId");
+  const requestedToVersionId = searchParams.get("toVersionId");
+  const summaryKey = documentId && fromVersionId && toVersionId ? `${documentId}:${fromVersionId}:${toVersionId}` : "";
+
+  function syncLocation(nextDocumentId: string, nextFromVersionId?: string, nextToVersionId?: string) {
+    const params = new URLSearchParams(searchParams);
+    if (nextDocumentId) {
+      params.set("documentId", nextDocumentId);
+    } else {
+      params.delete("documentId");
+    }
+    if (nextFromVersionId) {
+      params.set("fromVersionId", nextFromVersionId);
+    } else {
+      params.delete("fromVersionId");
+    }
+    if (nextToVersionId) {
+      params.set("toVersionId", nextToVersionId);
+    } else {
+      params.delete("toVersionId");
+    }
+    setSearchParams(params, { replace: true });
+  }
+
 
   useEffect(() => {
     if (!token) {
@@ -33,10 +62,13 @@ export function VersionsPage() {
       .then((items) => {
         setDocuments(items);
         const firstDocumentId = items[0]?.id ?? "";
-        setDocumentId(firstDocumentId);
+        const nextDocumentId = requestedDocumentId && items.some((item) => item.id === requestedDocumentId)
+          ? requestedDocumentId
+          : firstDocumentId;
+        setDocumentId(nextDocumentId);
       })
       .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "加载文档列表失败。"));
-  }, [token]);
+  }, [requestedDocumentId, token]);
 
   useEffect(() => {
     if (!token || !documentId) {
@@ -47,11 +79,50 @@ export function VersionsPage() {
       .listDocumentVersions(token, documentId)
       .then((items) => {
         setVersions(items);
-        setFromVersionId(items[1]?.id ?? items[0]?.id ?? "");
-        setToVersionId(items[0]?.id ?? "");
+        const nextToVersionId = requestedToVersionId && items.some((version) => version.id === requestedToVersionId)
+          ? requestedToVersionId
+          : items[0]?.id ?? "";
+        const nextFromVersionId = requestedFromVersionId && items.some((version) => version.id === requestedFromVersionId)
+          ? requestedFromVersionId
+          : items.find((version) => version.id !== nextToVersionId)?.id ?? items[0]?.id ?? "";
+        setFromVersionId(nextFromVersionId);
+        setToVersionId(nextToVersionId);
       })
       .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "加载版本列表失败。"));
-  }, [documentId, token]);
+  }, [documentId, requestedFromVersionId, requestedToVersionId, token]);
+
+  useEffect(() => {
+    setDiff(null);
+    hasAutoLoadContext.current = false;
+    if (summaryKey && summaryCacheRef.current[summaryKey]) {
+      setSummary(summaryCacheRef.current[summaryKey]);
+      setStatusMessage("已恢复最近一次差异摘要。");
+      return;
+    }
+    setSummary(null);
+    setStatusMessage(null);
+  }, [documentId, fromVersionId, summaryKey, toVersionId]);
+
+  useEffect(() => {
+    if (!documentId) {
+      return;
+    }
+    syncLocation(documentId, fromVersionId || undefined, toVersionId || undefined);
+  }, [documentId, fromVersionId, toVersionId]);
+
+  useEffect(() => {
+    if (!token || !documentId || !fromVersionId || !toVersionId) {
+      return;
+    }
+    if (!(requestedDocumentId || requestedFromVersionId || requestedToVersionId)) {
+      return;
+    }
+    if (hasAutoLoadContext.current) {
+      return;
+    }
+    hasAutoLoadContext.current = true;
+    void handleLoadDiff();
+  }, [documentId, fromVersionId, requestedDocumentId, requestedFromVersionId, requestedToVersionId, toVersionId, token]);
 
   async function handleLoadDiff() {
     if (!token || !documentId || !fromVersionId || !toVersionId) {
@@ -77,15 +148,32 @@ export function VersionsPage() {
       setStatusMessage("请先选择文档和两个版本。");
       return;
     }
+    if (summaryKey && summaryCacheRef.current[summaryKey]) {
+      setSummary(summaryCacheRef.current[summaryKey]);
+      setStatusMessage("已恢复最近一次差异摘要。");
+      return;
+    }
     setIsLoadingSummary(true);
     setStatusMessage("正在生成差异摘要...");
     try {
+      const hasMatchingDiff =
+        diff && diff.document_id === documentId && diff.from_version_id === fromVersionId && diff.to_version_id === toVersionId;
+      if (!hasMatchingDiff) {
+        const nextDiff = await api.getDocumentDiff(token, documentId, fromVersionId, toVersionId);
+        setDiff(nextDiff);
+        setIsRawDiffCollapsed(false);
+      }
       const nextSummary = await api.summarizeDocumentDiff(token, documentId, fromVersionId, toVersionId);
+      if (summaryKey) {
+        summaryCacheRef.current[summaryKey] = nextSummary;
+      }
       setSummary(nextSummary);
       setStatusMessage(
-        nextSummary.summary_provider === "deterministic_fallback"
-          ? "大模型摘要不可用，已自动回退为规则摘要。"
-          : "已生成差异摘要与影响提示。",
+        nextSummary.cache_hit
+          ? "已加载缓存摘要。"
+          : nextSummary.summary_provider === "deterministic_fallback"
+            ? "大模型摘要不可用，已自动回退为规则摘要。"
+            : "已生成差异摘要与影响提示。",
       );
     } catch (nextError) {
       setStatusMessage(nextError instanceof Error ? nextError.message : "生成差异摘要失败。");
@@ -103,7 +191,14 @@ export function VersionsPage() {
       <ErrorNotice message={error} />
       {statusMessage ? <div className="info-block">{statusMessage}</div> : null}
 
-      <section className="panel stack">
+      <section className="panel stack versions-controls-panel">
+        <div className="panel-header">
+          <div className="panel-heading">
+            <h3>对比条件</h3>
+            <p>先选择文档和两个版本，再加载原始差异或生成结构化摘要。</p>
+          </div>
+          {(fromVersionId && toVersionId) ? <StatusBadge tone="info">v 对比模式</StatusBadge> : null}
+        </div>
         <div className="page-grid version-selector-grid">
           <label>
             <span>文档</span>
@@ -147,9 +242,12 @@ export function VersionsPage() {
       </section>
 
       <div className="page-grid versions-layout">
-        <section className="panel stack">
+        <section className="panel stack versions-diff-panel">
           <div className="panel-header">
-            <h3>原始差异</h3>
+            <div className="panel-heading">
+              <h3>原始差异</h3>
+              <p>展示段落级 diff 和代表性变更，适合快速定位修改位置与内容。</p>
+            </div>
             <div className="inline-actions">
               {diff ? (
                 <StatusBadge tone="warning">
@@ -189,9 +287,12 @@ export function VersionsPage() {
           )}
         </section>
 
-        <section className="panel stack">
+        <section className="panel stack versions-summary-panel">
           <div className="panel-header">
-            <h3>差异摘要</h3>
+            <div className="panel-heading">
+              <h3>差异摘要</h3>
+              <p>基于差异结果总结新增、删除、修改和潜在影响，适合先看重点再回查原文。</p>
+            </div>
             {summary ? <StatusBadge tone="success">{formatSummaryProvider(summary.summary_provider)}</StatusBadge> : null}
           </div>
           {isLoadingSummary ? (
@@ -239,6 +340,13 @@ export function VersionsPage() {
                   <li>暂无明显影响提示。</li>
                 )}
               </ul>
+            </>
+          ) : diff ? (
+            <>
+              <p className="muted">已加载原始差异，可以继续生成摘要与潜在影响提示。</p>
+              <button className="secondary-button" disabled={isLoadingDiff || isLoadingSummary} onClick={handleLoadSummary} type="button">
+                {isLoadingSummary ? "生成中..." : "生成差异摘要"}
+              </button>
             </>
           ) : (
             <p className="muted">生成差异摘要后，将在这里展示新增、删除、修改和潜在影响提示。</p>

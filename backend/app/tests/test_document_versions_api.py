@@ -68,7 +68,7 @@ def _ingest_version(client: TestClient, token: str, document_id: str, version_id
 
 
 
-def test_document_versions_and_diff_flow(client: TestClient, db_session: Session) -> None:
+def test_document_versions_and_diff_flow(client: TestClient, db_session: Session, monkeypatch) -> None:
     admin_role = Role(name=RoleName.ADMIN, description="Admin")
     db_session.add(admin_role)
     db_session.flush()
@@ -76,6 +76,17 @@ def test_document_versions_and_diff_flow(client: TestClient, db_session: Session
     db_session.commit()
 
     token = _login(client, "admin@example.com", "admin-pass")
+
+    cache_store: dict[str, str] = {}
+
+    class FakeRedis:
+        def get(self, key: str):
+            return cache_store.get(key)
+
+        def setex(self, key: str, ttl: int, value: str):
+            cache_store[key] = value
+
+    monkeypatch.setattr("app.services.diff.service.get_redis_client", lambda: FakeRedis())
 
     v1_content = (
         "Privileged access requests require manager approval.\n\n"
@@ -151,7 +162,18 @@ def test_document_versions_and_diff_flow(client: TestClient, db_session: Session
     summary_payload = summary_response.json()
     assert summary_payload["summary"]
     assert summary_payload["summary_provider"] == "deterministic"
+    assert summary_payload["cache_hit"] is False
     assert summary_payload["additions"]
     assert summary_payload["deletions"]
     assert summary_payload["modifications"]
     assert summary_payload["impact_hints"]
+
+    summary_response_cached = client.post(
+        f"/api/v1/documents/{document_id}/diff/summary",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"from_version_id": version1_id, "to_version_id": version2_id},
+    )
+    assert summary_response_cached.status_code == 200
+    cached_payload = summary_response_cached.json()
+    assert cached_payload["cache_hit"] is True
+    assert cached_payload["summary"] == summary_payload["summary"]

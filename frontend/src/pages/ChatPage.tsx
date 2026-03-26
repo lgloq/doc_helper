@@ -53,8 +53,10 @@ export function ChatPage() {
       .getChatSession(token, selectedSessionId)
       .then((session) => {
         setActiveSession(session);
-        const firstCitation = session.messages.flatMap((message) => message.citations)[0] ?? null;
-        setSelectedCitation(firstCitation);
+        const latestCitation = [...session.messages]
+          .reverse()
+          .flatMap((message) => message.citations)[0] ?? null;
+        setSelectedCitation(latestCitation);
       })
       .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "加载会话详情失败。"));
   }, [selectedSessionId, token]);
@@ -173,7 +175,10 @@ export function ChatPage() {
       <div className="page-grid chat-layout">
         <section className="panel stack session-panel">
           <div className="panel-header">
-            <h3>会话列表</h3>
+            <div className="panel-heading">
+              <h3>会话列表</h3>
+              <p>按最近更新时间展示会话，便于快速回到刚才的问答上下文。</p>
+            </div>
             <StatusBadge tone="neutral">{sessions.length}</StatusBadge>
           </div>
           {loading ? <p className="muted">正在加载会话...</p> : null}
@@ -203,21 +208,32 @@ export function ChatPage() {
 
         <section className="panel stack chat-conversation-panel">
           <div className="panel-header">
-            <div>
+            <div className="panel-heading">
               <h3>{activeSession?.title ?? "当前会话"}</h3>
-              <p className="muted">回答只基于已检索证据生成；如果证据不足，系统会明确提示。</p>
+              <p>回答只基于已检索证据生成；如果证据不足，系统会明确提示并保留引用来源。</p>
             </div>
             {activeSession ? <StatusBadge tone="info">会话已关联</StatusBadge> : null}
           </div>
           <div className="chat-thread" ref={threadRef}>
             {activeSession?.messages.length ? (
-              activeSession.messages.map((message) => (
-                <MessageBubble
-                  key={message.id}
-                  message={message}
-                  onSelectCitation={(citation) => setSelectedCitation(citation)}
-                />
-              ))
+              <>
+                {activeSession.messages.map((message) => (
+                  <MessageBubble
+                    key={message.id}
+                    message={message}
+                    onSelectCitation={(citation) => setSelectedCitation(citation)}
+                  />
+                ))}
+                {sending ? (
+                  <article className="message-bubble assistant is-pending">
+                    <div className="message-meta">
+                      <strong>助手</strong>
+                      <span>正在整理引用并生成回答...</span>
+                    </div>
+                    <p>系统正在检索可访问文档并组织答案，请稍候。</p>
+                  </article>
+                ) : null}
+              </>
             ) : (
               <div className="empty-state">
                 <strong>暂无消息</strong>
@@ -251,7 +267,7 @@ export function ChatPage() {
           </form>
         </section>
 
-        <div className="stack">
+        <div className="stack chat-side-panel">
           <CitationList
             citations={flattenedCitations}
             onSelect={(citation) => setSelectedCitation(citation as ChatCitationRead)}
@@ -260,7 +276,10 @@ export function ChatPage() {
           />
           <section className="panel stack">
             <div className="panel-header">
-              <h3>来源片段</h3>
+              <div className="panel-heading">
+                <h3>来源片段</h3>
+                <p>展示当前选中引用的片段摘要，并支持跳转到文档页查看完整内容。</p>
+              </div>
               {selectedCitation ? (
                 <Link className="secondary-button link-button" to={buildCitationDocumentLink(selectedCitation)}>
                   查看完整文档

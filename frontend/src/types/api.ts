@@ -142,6 +142,7 @@ export interface DocumentDiffSummaryRead {
   impact_hints: string[];
   summary_provider: string;
   model_name: string | null;
+  cache_hit: boolean;
 }
 
 export interface SearchDebugInfo {

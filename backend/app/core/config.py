@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     answer_provider: str = "deterministic"
     router_provider: str = "openai_compatible"
     diff_summary_provider: str = "deterministic"
+    diff_summary_cache_ttl_seconds: int = 86400
     llm_api_key: str | None = None
     llm_base_url: str | None = None
     llm_router_model: str | None = None

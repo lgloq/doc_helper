@@ -362,16 +362,36 @@ export function DocumentsPage() {
       setActionMessage(nextError instanceof Error ? nextError.message : "重新入库失败。");
     }
   }
+  function buildVersionCompareLink() {
+    if (!selectedDocument || versions.length < 2) {
+      return "/versions";
+    }
+    const sortedVersions = [...versions].sort((left, right) => right.version_number - left.version_number);
+    const selectedVersion = selectedVersionId ? sortedVersions.find((version) => version.id === selectedVersionId) : null;
+    const targetVersion = selectedVersion ?? sortedVersions[0];
+    const fallbackBaseVersion = sortedVersions.find((version) => version.id !== targetVersion.id) ?? sortedVersions[1];
+
+    const params = new URLSearchParams({
+      documentId: selectedDocument.id,
+      fromVersionId: fallbackBaseVersion.id,
+      toVersionId: targetVersion.id,
+    });
+    return `/versions?${params.toString()}`;
+  }
+
 
   return (
     <div className="page-stack">
       <PageHeader title="文档管理" description="上传知识文档、查看版本与分块，并在进入检索前维护文档级访问控制。" />
       <ErrorNotice message={error} />
       <div className="page-grid documents-layout">
-        <section className="panel stack">
+        <section className="panel stack document-primary-panel">
           <div className="panel-header">
-            <h3>{canManageLibrary ? "上传文档" : "当前角色"}</h3>
-            <StatusBadge tone={canManageLibrary ? "info" : "neutral"}>{canManageLibrary ? "后端链路已接通" : "只读访问"}</StatusBadge>
+            <div className="panel-heading">
+              <h3>{canManageLibrary ? "上传文档" : "当前角色"}</h3>
+              <p>{canManageLibrary ? "上传知识文档并立即入库，便于后续检索、引用和版本管理。" : "当前账号仅支持查看可访问文档、分块、版本差异和引用问答。"}</p>
+            </div>
+            <StatusBadge tone={canManageLibrary ? "info" : "neutral"}>{canManageLibrary ? "文档维护" : "只读访问"}</StatusBadge>
           </div>
           {canManageLibrary ? (
             <>
@@ -421,7 +441,10 @@ export function DocumentsPage() {
 
         <section className={`panel stack document-library-panel ${isDocumentListCollapsed ? "is-collapsed" : ""}`.trim()}>
           <div className="panel-header">
-            <h3>可见文档</h3>
+            <div className="panel-heading">
+              <h3>可见文档</h3>
+              <p>展示当前账号可访问的文档，可在这里快速切换查看目标文档。</p>
+            </div>
             <div className="inline-actions">
               <StatusBadge tone="neutral">{documents.length}</StatusBadge>
               <button
@@ -468,15 +491,23 @@ export function DocumentsPage() {
 
       {selectedDocument ? (
         <div className={`page-grid detail-layout ${showPermissionsPanel ? "" : "detail-layout-readonly"}`.trim()}>
-          <section className="panel stack">
+          <section className="panel stack document-detail-main-panel">
             <div className="panel-header">
-              <div>
+              <div className="panel-heading">
                 <h3>{selectedDocument.title}</h3>
-                <p className="muted">所有者 ID：{selectedDocument.owner_user_id}</p>
+                <div className="metadata-subline">
+                  <span>所有者 ID：{selectedDocument.owner_user_id}</span>
+                  {selectedVersionDetail ? <span>当前查看版本：v{selectedVersionDetail.version_number}</span> : null}
+                  <span>状态：{formatDocumentStatus(selectedDocument.status)}</span>
+                </div>
               </div>
-              <Link className="secondary-button link-button" to="/versions">
-                查看差异页
-              </Link>
+              {versions.length >= 2 ? (
+                <Link className="secondary-button link-button" to={buildVersionCompareLink()}>
+                  查看差异页
+                </Link>
+              ) : (
+                <StatusBadge tone="neutral">仅有一个版本</StatusBadge>
+              )}
             </div>
             <p>{selectedDocument.description ?? "暂无文档说明。"}</p>
             {actionMessage ? <div className="info-block">{actionMessage.trim()}</div> : null}
@@ -484,7 +515,7 @@ export function DocumentsPage() {
             <div className="subsection-header">
               <h4>版本列表</h4>
             </div>
-            <div className="stack dense-stack">
+            <div className="stack dense-stack version-list-scrollable">
               {versions.length ? (
                 versions.map((version) => (
                   <div className={`version-card ${selectedVersionId === version.id ? "is-selected" : ""}`} key={version.id}>
@@ -555,9 +586,12 @@ export function DocumentsPage() {
           </section>
 
           {showPermissionsPanel ? (
-            <section className="panel stack">
+            <section className="panel stack document-permissions-panel">
               <div className="panel-header">
-                <h3>权限信息</h3>
+                <div className="panel-heading">
+                  <h3>权限信息</h3>
+                  <p>展示当前文档的访问控制配置，管理员可在这里补充或调整 ACL。</p>
+                </div>
                 <StatusBadge tone="info">文档访问控制</StatusBadge>
               </div>
               <>
@@ -656,15 +690,18 @@ export function DocumentsPage() {
             </section>
           ) : null}
 
-          <section className="panel stack">
+          <section className="panel stack document-chunks-panel">
             <div className="panel-header">
-              <h3>分块预览</h3>
+              <div className="panel-heading">
+                <h3>分块预览</h3>
+                <p>展示当前版本的 chunk 结果，便于检查分块质量、定位引用和回看上下文。</p>
+              </div>
               <div className="inline-actions">
                 <StatusBadge tone="success">{chunks.length} 个分块</StatusBadge>
                 {selectedVersionDetail ? <StatusBadge tone="info">当前版本 v{selectedVersionDetail.version_number}</StatusBadge> : null}
               </div>
             </div>
-            <div className="chunk-list">
+            <div className="chunk-list chunk-list-scrollable">
               {chunks.length ? (
                 chunks.map((chunk) => (
                   <div

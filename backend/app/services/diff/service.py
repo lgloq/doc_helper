@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import difflib
+import json
 import re
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
+from redis.exceptions import RedisError
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
+from app.db.redis import get_redis_client
 from app.models.document import Document, DocumentVersion
 from app.models.user import User
 from app.repositories.document_repository import DocumentRepository
@@ -21,16 +24,16 @@ from app.services.permissions.service import PermissionFilterBuilder
 
 
 KEYWORD_HINTS = {
-    "security": "Security-related wording changed. Recheck access controls, security guidance, and incident procedures.",
-    "access": "Access or permission language changed. Verify onboarding, privileged access, and approval workflows.",
-    "deadline": "Deadline-related wording changed. Confirm project timelines and downstream commitments.",
-    "sla": "SLA or service expectation wording changed. Notify support and operations stakeholders.",
-    "rollback": "Rollback or recovery guidance changed. Revalidate release and incident runbooks.",
-    "release": "Release process wording changed. Review deployment checklists and communication plans.",
-    "approval": "Approval or sign-off wording changed. Check ownership and escalation paths.",
-    "policy": "Policy wording changed. Review linked FAQs, training, and compliance-facing materials.",
-    "compliance": "Compliance wording changed. Confirm regulatory documentation and audit evidence remain aligned.",
-    "owner": "Ownership or contact wording changed. Verify responsible teams and support contacts.",
+    "security": "安全相关表述发生变化。建议重新检查访问控制、安全指引和事故处理流程。",
+    "access": "访问或权限相关表述发生变化。建议复核入职开通、特权权限和审批流程。",
+    "deadline": "时限相关表述发生变化。建议确认项目时间表和下游承诺是否需要调整。",
+    "sla": "服务等级或服务预期发生变化。建议同步支持、运维和业务相关方。",
+    "rollback": "回滚或恢复指引发生变化。建议重新核对发布和事故处理手册。",
+    "release": "发布流程相关表述发生变化。建议重新检查发布清单和沟通计划。",
+    "approval": "审批或签字要求发生变化。建议复核负责人和升级路径。",
+    "policy": "制度或政策表述发生变化。建议同步检查 FAQ、培训材料和合规说明。",
+    "compliance": "合规相关表述发生变化。建议确认制度文件与审计证据仍然一致。",
+    "owner": "负责人或联系人信息发生变化。建议确认责任团队和支持联系方式。",
 }
 
 
@@ -55,20 +58,28 @@ class DocumentDiffService:
         self.storage = LocalDocumentStorage()
         self.parser = DocumentParser()
         self.summary_generator = DiffSummaryGeneratorFactory.create()
+        self.settings = get_settings()
 
     def get_diff(self, actor: User, document_id: UUID, from_version_id: UUID, to_version_id: UUID) -> DocumentDiffRead:
         diff = self._compute_diff(actor, document_id, from_version_id, to_version_id)
         return self._serialize_diff(diff)
 
     def summarize_diff(self, actor: User, document_id: UUID, payload: DocumentDiffRequest) -> DocumentDiffSummaryRead:
-        diff = self._compute_diff(actor, document_id, payload.from_version_id, payload.to_version_id)
+        document = self._get_viewable_document(actor, document_id)
+        from_version, to_version = self._get_versions(document, payload.from_version_id, payload.to_version_id)
+        cache_key = self._build_summary_cache_key(document.id, from_version.id, to_version.id)
+        cached_summary = self._get_cached_summary(cache_key)
+        if cached_summary is not None:
+            return cached_summary
+
+        diff = self._compute_diff_for_versions(document, from_version, to_version)
         summary = self.summary_generator.generate(
             from_version_number=diff.from_version.version_number,
             to_version_number=diff.to_version.version_number,
             diff_changes=diff.changes,
             unified_diff=diff.unified_diff,
         )
-        return DocumentDiffSummaryRead(
+        result = DocumentDiffSummaryRead(
             document_id=diff.document.id,
             from_version_id=diff.from_version.id,
             to_version_id=diff.to_version.id,
@@ -81,15 +92,22 @@ class DocumentDiffService:
             impact_hints=diff.impact_hints,
             summary_provider=summary.provider_name,
             model_name=summary.model_name,
+            cache_hit=False,
         )
+        self._set_cached_summary(cache_key, result)
+        return result
 
     def _compute_diff(self, actor: User, document_id: UUID, from_version_id: UUID, to_version_id: UUID) -> ComputedDiff:
         document = self._get_viewable_document(actor, document_id)
-        from_version = self.document_repository.get_version(document.id, from_version_id)
-        to_version = self.document_repository.get_version(document.id, to_version_id)
-        if from_version is None or to_version is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document version not found.")
+        from_version, to_version = self._get_versions(document, from_version_id, to_version_id)
+        return self._compute_diff_for_versions(document, from_version, to_version)
 
+    def _compute_diff_for_versions(
+        self,
+        document: Document,
+        from_version: DocumentVersion,
+        to_version: DocumentVersion,
+    ) -> ComputedDiff:
         from_paragraphs = self._extract_paragraphs(from_version)
         to_paragraphs = self._extract_paragraphs(to_version)
         changes, added_count, deleted_count, modified_count = self._build_change_set(from_paragraphs, to_paragraphs)
@@ -113,6 +131,13 @@ class DocumentDiffService:
         if document is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
         return document
+
+    def _get_versions(self, document: Document, from_version_id: UUID, to_version_id: UUID) -> tuple[DocumentVersion, DocumentVersion]:
+        from_version = self.document_repository.get_version(document.id, from_version_id)
+        to_version = self.document_repository.get_version(document.id, to_version_id)
+        if from_version is None or to_version is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document version not found.")
+        return from_version, to_version
 
     def _extract_paragraphs(self, version: DocumentVersion) -> list[str]:
         text = version.extracted_text
@@ -196,13 +221,13 @@ class DocumentDiffService:
             if keyword in changed_text:
                 hints.append(hint)
         if modified_count > 0:
-            hints.append("Existing guidance changed. Recheck downstream FAQs, runbooks, and cached answers.")
+            hints.append("已有指引内容发生修改。建议同步复核相关 FAQ、运行手册和已缓存答案。")
         if added_count >= 3:
-            hints.append("Several new paragraphs were added. Verify whether onboarding or operating procedures need updating.")
+            hints.append("本次新增了较多段落。建议确认入职说明、流程规范或操作手册是否需要同步更新。")
         if deleted_count >= 3:
-            hints.append("Several paragraphs were removed. Confirm no dependent checklist or communication still references deleted guidance.")
+            hints.append("本次删除了较多段落。建议确认是否仍有清单、FAQ 或沟通材料引用了已删除内容。")
         if not hints:
-            hints.append("No high-risk keywords were detected, but consumers should still review the highlighted additions, deletions, and modifications.")
+            hints.append("未检测到明显高风险关键词，但仍建议结合新增、删除和修改内容进行人工复核。")
         deduped: list[str] = []
         seen: set[str] = set()
         for hint in hints:
@@ -211,6 +236,40 @@ class DocumentDiffService:
             seen.add(hint)
             deduped.append(hint)
         return deduped[:6]
+
+    def _build_summary_cache_key(self, document_id: UUID, from_version_id: UUID, to_version_id: UUID) -> str:
+        provider_name = getattr(self.summary_generator, "provider_name", "unknown")
+        model_name = getattr(self.summary_generator, "model_name", None) or "default"
+        return f"diff_summary:{document_id}:{from_version_id}:{to_version_id}:{provider_name}:{model_name}"
+
+    def _get_cached_summary(self, cache_key: str) -> DocumentDiffSummaryRead | None:
+        try:
+            cached_payload = get_redis_client().get(cache_key)
+        except RedisError:
+            return None
+        if not cached_payload:
+            return None
+        try:
+            payload = json.loads(cached_payload)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        payload["cache_hit"] = True
+        try:
+            return DocumentDiffSummaryRead(**payload)
+        except Exception:
+            return None
+
+    def _set_cached_summary(self, cache_key: str, summary: DocumentDiffSummaryRead) -> None:
+        try:
+            get_redis_client().setex(
+                cache_key,
+                self.settings.diff_summary_cache_ttl_seconds,
+                summary.model_dump_json(),
+            )
+        except RedisError:
+            return None
 
     @staticmethod
     def _serialize_diff(diff: ComputedDiff) -> DocumentDiffRead:
