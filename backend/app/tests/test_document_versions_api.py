@@ -177,3 +177,13 @@ def test_document_versions_and_diff_flow(client: TestClient, db_session: Session
     cached_payload = summary_response_cached.json()
     assert cached_payload["cache_hit"] is True
     assert cached_payload["summary"] == summary_payload["summary"]
+
+    summary_response_refreshed = client.post(
+        f"/api/v1/documents/{document_id}/diff/summary",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"from_version_id": version1_id, "to_version_id": version2_id, "force_refresh": True},
+    )
+    assert summary_response_refreshed.status_code == 200
+    refreshed_payload = summary_response_refreshed.json()
+    assert refreshed_payload["cache_hit"] is False
+    assert refreshed_payload["summary"]

@@ -757,6 +757,7 @@ h4 {
 .versions-summary-panel {
   position: sticky;
   top: 2rem;
+  z-index: 1;
 }
 
 .diff-block {
@@ -885,8 +886,29 @@ h4 {
   padding: 0.9rem 0.95rem;
 }
 
+.versions-controls-panel {
+  position: relative;
+  z-index: 30;
+  overflow: visible;
+}
+
 .versions-controls-panel .inline-actions {
   justify-content: flex-end;
+  align-items: center;
+  flex-wrap: nowrap;
+  min-height: 3.2rem;
+}
+
+.versions-controls-panel .secondary-button,
+.versions-controls-panel .summary-action-main,
+.versions-controls-panel .summary-action-toggle {
+  min-height: 3.2rem;
+  height: 3.2rem;
+  line-height: 1;
+}
+
+.versions-controls-panel .summary-action-group {
+  align-self: center;
 }
 
 .versions-summary-panel ul {
@@ -931,6 +953,69 @@ h4 {
   justify-content: flex-end;
 }
 
+.summary-action-group {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  z-index: 60;
+  align-self: center;
+}
+
+.summary-action-main {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  padding-right: 1rem;
+}
+
+.summary-action-toggle {
+  min-width: 2.05rem;
+  width: 2.05rem;
+  border: none;
+  border-left: 1px solid rgba(255, 255, 255, 0.14);
+  border-top-right-radius: 999px;
+  border-bottom-right-radius: 999px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  background: var(--primary);
+  color: white;
+  font-size: 0.58rem;
+  line-height: 1;
+  padding: 0;
+  margin-left: -1px;
+}
+
+.summary-action-toggle:hover:not(:disabled) {
+  background: var(--primary);
+}
+
+.summary-action-menu {
+  position: absolute;
+  top: calc(100% + 0.45rem);
+  right: 0;
+  min-width: 10rem;
+  padding: 0.35rem;
+  border-radius: 14px;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 20px 40px rgba(17, 77, 99, 0.18);
+  z-index: 999;
+}
+
+.summary-action-menu-item {
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  border-radius: 10px;
+  padding: 0.58rem 0.7rem;
+}
+
+.summary-action-menu-item:hover {
+  background: rgba(17, 77, 99, 0.08);
+}
+
 .metadata-subline {
   display: flex;
   flex-wrap: wrap;
@@ -967,3 +1052,9 @@ h4 {
 .chat-conversation-panel .empty-state p {
   color: var(--muted);
 }
+
+/* Chat header width override */
+.chat-conversation-panel .panel-heading p {
+  max-width: none;
+}
+

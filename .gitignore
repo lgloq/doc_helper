@@ -10,6 +10,11 @@ __pycache__/
 frontend/node_modules/
 frontend/dist/
 
+# backend
+backend/__pycache__/
+backend/*.pyc
+backend/.mypy_cache/    
+
 # Data and runtime artifacts
 backend/data/
 *.log
@@ -23,3 +28,10 @@ backend/.env
 Thumbs.db
 .vscode/
 .idea/
+
+# scripts
+scripts/__pycache__/
+scripts/rewrite*
+
+# local private notes
+private/

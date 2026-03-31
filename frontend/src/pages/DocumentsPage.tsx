@@ -382,7 +382,7 @@ export function DocumentsPage() {
 
   return (
     <div className="page-stack">
-      <PageHeader title="文档管理" description="上传知识文档、查看版本与分块，并在进入检索前维护文档级访问控制。" />
+      <PageHeader title="文档管理" description="上传企业文档，查看版本与分块，并维护文档级访问控制。" />
       <ErrorNotice message={error} />
       <div className="page-grid documents-layout">
         <section className="panel stack document-primary-panel">
@@ -732,3 +732,5 @@ export function DocumentsPage() {
     </div>
   );
 }
+
+

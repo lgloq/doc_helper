@@ -20,9 +20,9 @@ export function AppShell() {
       <aside className="app-sidebar">
         <div className="sidebar-top">
           <div>
-            <div className="brand-mark">EKA</div>
-            <h2>企业知识助手</h2>
-            <p className="muted">权限感知问答、派生结果、版本差异、评测与追踪。</p>
+            <div className="brand-mark">RAG</div>
+            <h2>权限感知 RAG 文档知识助手</h2>
+            <p className="muted">面向企业知识库的权限感知检索、引用溯源、版本对比与结构化工作流生成。</p>
           </div>
           <nav className="sidebar-nav">
             {navItems.map((item) => (
@@ -57,3 +57,7 @@ export function AppShell() {
     </div>
   );
 }
+
+
+
+

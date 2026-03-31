@@ -102,7 +102,7 @@ export function InsightsPage() {
     <div className="page-stack">
       <PageHeader
         title="评测与追踪"
-        description="运行一组权限隔离导向的演示评测，并查看一次引用式问答的完整追踪信息。"
+        description="运行权限隔离导向的演示评测，并查看一次 RAG 问答的完整追踪信息。"
         actions={
           isAdmin ? (
             <button className="primary-button" onClick={handleRunEval} type="button">
@@ -270,4 +270,6 @@ export function InsightsPage() {
     </div>
   );
 }
+
+
 

@@ -25,8 +25,10 @@ export function VersionsPage() {
   const [isLoadingSummary, setIsLoadingSummary] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [isSummaryMenuOpen, setIsSummaryMenuOpen] = useState(false);
   const hasAutoLoadContext = useRef(false);
   const summaryCacheRef = useRef<Record<string, DocumentDiffSummaryRead>>({});
+  const summaryMenuRef = useRef<HTMLDivElement | null>(null);
   const requestedDocumentId = searchParams.get("documentId");
   const requestedFromVersionId = searchParams.get("fromVersionId");
   const requestedToVersionId = searchParams.get("toVersionId");
@@ -93,6 +95,7 @@ export function VersionsPage() {
 
   useEffect(() => {
     setDiff(null);
+    setIsSummaryMenuOpen(false);
     hasAutoLoadContext.current = false;
     if (summaryKey && summaryCacheRef.current[summaryKey]) {
       setSummary(summaryCacheRef.current[summaryKey]);
@@ -109,6 +112,19 @@ export function VersionsPage() {
     }
     syncLocation(documentId, fromVersionId || undefined, toVersionId || undefined);
   }, [documentId, fromVersionId, toVersionId]);
+
+  useEffect(() => {
+    if (!isSummaryMenuOpen) {
+      return;
+    }
+    function handleOutsideClick(event: MouseEvent) {
+      if (summaryMenuRef.current && !summaryMenuRef.current.contains(event.target as Node)) {
+        setIsSummaryMenuOpen(false);
+      }
+    }
+    window.addEventListener("mousedown", handleOutsideClick);
+    return () => window.removeEventListener("mousedown", handleOutsideClick);
+  }, [isSummaryMenuOpen]);
 
   useEffect(() => {
     if (!token || !documentId || !fromVersionId || !toVersionId) {
@@ -143,18 +159,22 @@ export function VersionsPage() {
     }
   }
 
-  async function handleLoadSummary() {
+  async function handleLoadSummary(forceRefresh = false) {
     if (!token || !documentId || !fromVersionId || !toVersionId) {
       setStatusMessage("请先选择文档和两个版本。");
       return;
     }
-    if (summaryKey && summaryCacheRef.current[summaryKey]) {
+    if (!forceRefresh && summaryKey && summaryCacheRef.current[summaryKey]) {
       setSummary(summaryCacheRef.current[summaryKey]);
       setStatusMessage("已恢复最近一次差异摘要。");
       return;
     }
+    if (forceRefresh && summaryKey) {
+      delete summaryCacheRef.current[summaryKey];
+    }
+    setIsSummaryMenuOpen(false);
     setIsLoadingSummary(true);
-    setStatusMessage("正在生成差异摘要...");
+    setStatusMessage(forceRefresh ? "正在强制重新生成差异摘要..." : "正在生成差异摘要...");
     try {
       const hasMatchingDiff =
         diff && diff.document_id === documentId && diff.from_version_id === fromVersionId && diff.to_version_id === toVersionId;
@@ -163,7 +183,7 @@ export function VersionsPage() {
         setDiff(nextDiff);
         setIsRawDiffCollapsed(false);
       }
-      const nextSummary = await api.summarizeDocumentDiff(token, documentId, fromVersionId, toVersionId);
+      const nextSummary = await api.summarizeDocumentDiff(token, documentId, fromVersionId, toVersionId, forceRefresh);
       if (summaryKey) {
         summaryCacheRef.current[summaryKey] = nextSummary;
       }
@@ -172,8 +192,12 @@ export function VersionsPage() {
         nextSummary.cache_hit
           ? "已加载缓存摘要。"
           : nextSummary.summary_provider === "deterministic_fallback"
-            ? "大模型摘要不可用，已自动回退为规则摘要。"
-            : "已生成差异摘要与影响提示。",
+            ? forceRefresh
+              ? "已强制重新生成，但大模型摘要不可用，已回退为规则摘要。"
+              : "大模型摘要不可用，已自动回退为规则摘要。"
+            : forceRefresh
+              ? "已强制重新生成差异摘要。"
+              : "已生成差异摘要与影响提示。",
       );
     } catch (nextError) {
       setStatusMessage(nextError instanceof Error ? nextError.message : "生成差异摘要失败。");
@@ -186,7 +210,7 @@ export function VersionsPage() {
     <div className="page-stack">
       <PageHeader
         title="版本对比"
-        description="查看两个版本之间的原始文本差异，并基于差异结果生成可解释的中文摘要。"
+        description="查看两个版本之间的原始差异，并生成可解释的中文摘要。"
       />
       <ErrorNotice message={error} />
       {statusMessage ? <div className="info-block">{statusMessage}</div> : null}
@@ -235,9 +259,28 @@ export function VersionsPage() {
           <button className="secondary-button" disabled={isLoadingDiff || isLoadingSummary} onClick={handleLoadDiff} type="button">
             {isLoadingDiff ? "加载中..." : "加载原始差异"}
           </button>
-          <button className="primary-button" disabled={isLoadingDiff || isLoadingSummary} onClick={handleLoadSummary} type="button">
-            {isLoadingSummary ? "生成中..." : "生成差异摘要"}
-          </button>
+          <div className="summary-action-group" ref={summaryMenuRef}>
+            <button className="primary-button summary-action-main" disabled={isLoadingDiff || isLoadingSummary} onClick={() => void handleLoadSummary()} type="button">
+              {isLoadingSummary ? "生成中..." : "生成差异摘要"}
+            </button>
+            <button
+              aria-expanded={isSummaryMenuOpen}
+              aria-haspopup="menu"
+              className="summary-action-toggle"
+              disabled={isLoadingDiff || isLoadingSummary}
+              onClick={() => setIsSummaryMenuOpen((current) => !current)}
+              type="button"
+            >
+              ▾
+            </button>
+            {isSummaryMenuOpen ? (
+              <div className="summary-action-menu" role="menu">
+                <button className="summary-action-menu-item" onClick={() => void handleLoadSummary(true)} role="menuitem" type="button">
+                  强制重新生成
+                </button>
+              </div>
+            ) : null}
+          </div>
         </div>
       </section>
 
@@ -342,12 +385,7 @@ export function VersionsPage() {
               </ul>
             </>
           ) : diff ? (
-            <>
-              <p className="muted">已加载原始差异，可以继续生成摘要与潜在影响提示。</p>
-              <button className="secondary-button" disabled={isLoadingDiff || isLoadingSummary} onClick={handleLoadSummary} type="button">
-                {isLoadingSummary ? "生成中..." : "生成差异摘要"}
-              </button>
-            </>
+            <p className="muted">已加载原始差异，可以使用上方“生成差异摘要”按钮继续生成结果。</p>
           ) : (
             <p className="muted">生成差异摘要后，将在这里展示新增、删除、修改和潜在影响提示。</p>
           )}
@@ -356,4 +394,6 @@ export function VersionsPage() {
     </div>
   );
 }
+
+
 

@@ -38,7 +38,7 @@ services:
       redis:
         condition: service_healthy
     environment:
-      APP_NAME: Enterprise Knowledge Assistant
+      APP_NAME: 权限感知的 RAG 企业文档知识助手
       ENVIRONMENT: development
       DEBUG: "true"
       LOG_LEVEL: INFO
@@ -81,3 +81,4 @@ services:
 
 volumes:
   postgres_data:
+

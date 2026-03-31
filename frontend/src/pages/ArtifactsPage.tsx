@@ -73,7 +73,7 @@ export function ArtifactsPage() {
     <div className="page-stack">
       <PageHeader
         title="派生结果"
-        description="将一次有引用依据的问答会话转为待办、周报草稿和 FAQ 草稿，并保留来源追溯。"
+        description="把有引用依据的问答会话转为待办、周报草稿和 FAQ 草稿，并保留来源追溯。"
       />
       <ErrorNotice message={error} />
       {statusMessage ? <div className="info-block">{statusMessage}</div> : null}
@@ -183,4 +183,6 @@ export function ArtifactsPage() {
     </div>
   );
 }
+
+
 

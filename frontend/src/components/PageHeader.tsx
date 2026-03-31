@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 
 interface PageHeaderProps {
   title: string;
@@ -7,6 +7,10 @@ interface PageHeaderProps {
 }
 
 export function PageHeader({ title, description, actions }: PageHeaderProps) {
+  useEffect(() => {
+    document.title = `${title} · 权限感知 RAG 文档知识助手`;
+  }, [title]);
+
   return (
     <div className="page-header">
       <div>
@@ -17,3 +21,4 @@ export function PageHeader({ title, description, actions }: PageHeaderProps) {
     </div>
   );
 }
+

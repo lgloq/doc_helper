@@ -157,7 +157,7 @@ export function ChatPage() {
     <div className="page-stack">
       <PageHeader
         title="引用式问答"
-        description="围绕你有权限访问的文档发起问答，查看引用来源，并将当前会话沉淀为待办、周报草稿或 FAQ 草稿。"
+        description="围绕可访问的企业文档发起 RAG 问答，查看引用来源，并沉淀为待办、周报或 FAQ。"
         actions={
           <div className="inline-actions">
             <button className="secondary-button" onClick={handleCreateSession} type="button">
@@ -210,7 +210,7 @@ export function ChatPage() {
           <div className="panel-header">
             <div className="panel-heading">
               <h3>{activeSession?.title ?? "当前会话"}</h3>
-              <p>回答只基于已检索证据生成；如果证据不足，系统会明确提示并保留引用来源。</p>
+              <p>仅基于检索证据作答；证据不足时会提示并保留引用来源。</p>
             </div>
             {activeSession ? <StatusBadge tone="info">会话已关联</StatusBadge> : null}
           </div>
@@ -393,3 +393,7 @@ function MessageBubble({ message, onSelectCitation }: MessageBubbleProps) {
     </article>
   );
 }
+
+
+
+

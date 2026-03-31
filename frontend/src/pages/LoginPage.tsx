@@ -1,4 +1,4 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 
 import { ErrorNotice } from "../components/ErrorNotice";
@@ -18,6 +18,10 @@ export function LoginPage() {
   const [password, setPassword] = useState(demoAccounts[2].password);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    document.title = "登录 · 权限感知 RAG 文档知识助手";
+  }, []);
 
   if (token) {
     return <Navigate to="/documents" replace />;
@@ -42,9 +46,9 @@ export function LoginPage() {
     <div className="login-page">
       <div className="login-card">
         <div className="login-copy">
-          <span className="eyebrow">前端演示版</span>
-          <h1>企业知识助手</h1>
-          <p>一个面向企业内部知识库的最小可用控制台，支持权限感知检索、引用式问答、派生结果、版本对比与评测追踪。</p>
+          <span className="eyebrow">企业文档知识场景演示</span>
+          <h1>权限感知的 RAG 企业文档知识助手</h1>
+          <p>面向企业知识库的权限感知 RAG 应用，支持多角色访问控制、引用溯源、版本对比与结构化工作流生成。</p>
         </div>
         <form className="stack" onSubmit={handleSubmit}>
           <label>
@@ -91,4 +95,5 @@ export function LoginPage() {
     </div>
   );
 }
+
 

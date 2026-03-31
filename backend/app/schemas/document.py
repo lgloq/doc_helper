@@ -42,6 +42,7 @@ class DocumentIngestRequest(BaseModel):
 class DocumentDiffRequest(BaseModel):
     from_version_id: UUID
     to_version_id: UUID
+    force_refresh: bool = False
 
 
 class DocumentDiffChangeRead(BaseModel):

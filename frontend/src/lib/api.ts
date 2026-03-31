@@ -160,11 +160,11 @@ export const api = {
       { token },
     );
   },
-  summarizeDocumentDiff(token: string, documentId: string, fromVersionId: string, toVersionId: string) {
+  summarizeDocumentDiff(token: string, documentId: string, fromVersionId: string, toVersionId: string, forceRefresh = false) {
     return request<DocumentDiffSummaryRead>(`/api/v1/documents/${documentId}/diff/summary`, {
       method: "POST",
       token,
-      body: { from_version_id: fromVersionId, to_version_id: toVersionId },
+      body: { from_version_id: fromVersionId, to_version_id: toVersionId, force_refresh: forceRefresh },
     });
   },
   createChatSession(token: string, title?: string) {

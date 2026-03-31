@@ -17,7 +17,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "Enterprise Knowledge Assistant"
+    app_name: str = "权限感知的 RAG 企业文档知识助手"
     environment: str = "development"
     debug: bool = True
     log_level: str = "INFO"
@@ -96,3 +96,4 @@ def get_settings() -> Settings:
     settings = Settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     return settings
+

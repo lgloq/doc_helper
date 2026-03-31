@@ -68,9 +68,10 @@ class DocumentDiffService:
         document = self._get_viewable_document(actor, document_id)
         from_version, to_version = self._get_versions(document, payload.from_version_id, payload.to_version_id)
         cache_key = self._build_summary_cache_key(document.id, from_version.id, to_version.id)
-        cached_summary = self._get_cached_summary(cache_key)
-        if cached_summary is not None:
-            return cached_summary
+        if not payload.force_refresh:
+            cached_summary = self._get_cached_summary(cache_key)
+            if cached_summary is not None:
+                return cached_summary
 
         diff = self._compute_diff_for_versions(document, from_version, to_version)
         summary = self.summary_generator.generate(
