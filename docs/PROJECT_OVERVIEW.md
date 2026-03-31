@@ -3,6 +3,15 @@
 ## 项目一句话
 一个面向企业知识库的权限感知 RAG 文档知识助手，支持权限感知检索、引用溯源、版本对比、结构化工作流生成，以及基础评测与追踪。
 
+## 补充界面
+<p align="center">
+  <img src="assets/homepage.png" alt="文档与权限视图" width="42%" />
+  <img src="assets/diff.png" alt="版本对比与结果生成" width="42%" />
+</p>
+<p align="center">
+  <sub>文档与权限管理 / 版本对比与结果生成</sub>
+</p>
+
 ## 当前完成度
 ### 已实现
 - mock 登录与三类角色：`viewer / manager / admin`

@@ -2,6 +2,14 @@
 
 面向企业知识库的权限感知 RAG 应用，支持多角色访问控制、引用溯源、版本对比与结构化工作流生成。
 
+## 界面预览
+<p align="center">
+  <img src="docs/assets/chat_citation.png" alt="引用问答预览" width="82%" />
+</p>
+<p align="center">
+  <sub>主流程示意：权限感知检索、引用问答与会话沉淀</sub>
+</p>
+
 ## 项目概述
 这个项目聚焦企业文档知识场景，目标不是做一个只会聊天的演示页，而是把权限控制、文档检索、引用溯源、版本追踪和结构化结果沉淀放进一条完整链路里。
 
@@ -86,7 +94,6 @@ flowchart LR
     /services
     /tests
     /workers
-  /scripts
 /frontend
   /src
 /docs
@@ -123,6 +130,14 @@ docker-compose.yml
 - Slack / 飞书 / 邮件等外部协作集成
 - cross-encoder rerank 或更高级 judge 评测
 - 完整的生产部署与安全加固
+
+## 验证状态
+- 已提供 `docker compose up --build` 的完整本地启动链路
+- 已提供 `seed_demo_data.py`，可初始化演示知识库数据
+- 已包含 chat、search、ACL、version、workflow、observability 等后端测试用例
+- 已覆盖 admin / manager / viewer 的权限隔离演示场景
+
+说明：当前工作区未安装 `pytest`，因此这次未在本地重新执行测试；上面的“已包含 / 已覆盖”基于仓库内现有脚本、测试文件和演示链路。
 
 ## 本地启动
 ### Docker Compose
@@ -235,24 +250,44 @@ npm run dev
 
 ## 环境变量说明
 - 前端开发模式下通过 Vite 代理 `/api` 到 `http://localhost:8000`
-- 默认使用 deterministic embedding / answer provider，因此不依赖 OpenAI Key 也可以本地演示
+- 默认使用 deterministic embedding / answer provider，因此不依赖外部模型也可以本地演示
 - `JWT_SECRET_KEY` 建议使用至少 32 字节以上的随机字符串；仓库中的示例值仅用于本地开发与演示
-- 如果要切换到 OpenAI provider，可在后端配置：
+
+### OpenAI-compatible provider
+当前后端配置同时支持 OpenAI 官方接口和兼容 OpenAI API 的模型服务，推荐优先使用统一的 `LLM_*` 配置：
 
 ```env
 EMBEDDING_PROVIDER=openai
 ANSWER_PROVIDER=openai
+ROUTER_PROVIDER=openai_compatible
 DIFF_SUMMARY_PROVIDER=openai
-OPENAI_API_KEY=your_key
+
+LLM_API_KEY=your_api_key
+LLM_BASE_URL=https://your-compatible-provider/v1
+LLM_CHAT_MODEL=gpt-4.1-mini
+LLM_ROUTER_MODEL=gpt-4.1-mini
+LLM_REASONING_MODEL=gpt-4.1-mini
+
+OPENAI_API_KEY=your_openai_api_key
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 OPENAI_CHAT_MODEL=gpt-4.1-mini
+OPENAI_ROUTER_MODEL=gpt-4.1-mini
 OPENAI_DIFF_MODEL=gpt-4.1-mini
+
 JWT_SECRET_KEY=replace-with-a-long-random-secret
 ```
+
+配置说明：
+- `LLM_BASE_URL` 用于接入 OpenAI-compatible provider
+- `LLM_CHAT_MODEL / LLM_ROUTER_MODEL / LLM_REASONING_MODEL` 是统一的聊天、路由与推理模型配置
+- `OPENAI_*` 仍保留为 embedding 与默认模型回退配置
+- 若未配置外部模型，系统会继续使用 deterministic fallback 以保证本地可演示
 
 ## 文档说明
 - RAG 技术链路：[`docs/RAG_NOTES.md`](docs/RAG_NOTES.md)
 - 项目说明：[`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md)
+- 手动上传演示样例：[`docs/manual_upload_demo.md`](docs/manual_upload_demo.md)
+- 手动上传演示样例 v2：[`docs/manual_upload_demo_v2.md`](docs/manual_upload_demo_v2.md)
 
 ## 使用建议
 这个仓库当前是一个 MVP / 参考实现，适合作为课程项目、实习项目、内部工具原型或继续产品化的起点。
