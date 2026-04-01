@@ -75,17 +75,16 @@
 - Eval 支持 retrieval、citation、faithfulness、permission isolation 等指标
 - Trace 记录 query、retrieved chunks、selected citations、token、latency、error
 
-## 真实业务价值
+## 可能的业务价值
 - 降低企业知识问答中的信息泄漏风险
 - 提高流程、制度、运维文档问答的可信度和可追溯性
 - 把问答直接转成待办、周报和 FAQ，缩短从信息获取到执行的路径
 - 帮助团队追踪文档版本变化，理解变更影响
 - 为后续模型、检索和提示词优化提供数据基础
 
-## 使用建议
-这个仓库当前是一个 MVP / 参考实现，适合作为课程项目、实习项目、内部工具原型或继续产品化的起点。
 
-## 后续可以怎么继续做
+
+## 后续方向
 - 接入正式 OpenAI structured output
 - 在 permission-safe 候选集之后加入 cross-encoder rerank
 - 接入 Langfuse / OpenTelemetry

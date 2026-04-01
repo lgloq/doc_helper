@@ -20,15 +20,15 @@
 - 文档版本变更可以被对比、总结和解释
 - 整个链路可以被评测和追踪，而不是只能手工演示
 
-## 项目定位
-这是一个面向企业知识库的权限感知 RAG 文档知识助手，强调以下能力：
+## 项目说明
+这是一个面向企业知识库的权限感知 RAG 文档知识助手，主要包括以下功能：
 - 权限感知检索：无权限文档不会进入候选集
 - Grounded QA：回答与引用来源分开返回
 - 版本对比：支持原始 diff、差异摘要和影响提示
 - 结构化工作流：支持待办、周报草稿、FAQ 草稿生成
 - Eval 与 Observability：支持效果验证与链路追踪
 
-## 核心能力
+## 主要功能
 - mock 登录与本地账号：`viewer / manager / admin`
 - 支持 `TXT / Markdown / HTML / PDF / DOCX` 文档上传与摄取
 - 文档版本管理与历史保留
@@ -48,12 +48,12 @@
 - Observability：记录 trace、召回 chunk、selected citation、延迟、token、错误
 - 最小但完整的 React 前端演示链路
 
-## 为什么这个项目有区分度
-- 权限不是最后做展示过滤，而是检索链路的一部分
-- citation 是结构化返回结果，不是埋在回答里的附带文本
-- 问答只是入口，后面还能沉淀成结构化产物
-- 文档系统不仅支持当前版本问答，也支持版本差异分析
-- 项目自带基础评测和 trace，便于验证效果和定位问题
+## 项目特点
+- 权限控制直接纳入检索流程，而不是在结果展示阶段再做过滤
+- 问答结果单独返回 citation，便于追溯答案来源
+- 除了问答，还支持待办、周报草稿和 FAQ 草稿生成
+- 支持文档版本对比与差异摘要，便于跟踪文档变化
+- 提供基础测试与链路记录，方便验证效果和定位问题
 
 ## 系统架构
 ```mermaid
@@ -131,13 +131,12 @@ docker-compose.yml
 - cross-encoder rerank 或更高级 judge 评测
 - 完整的生产部署与安全加固
 
-## 验证状态
-- 已提供 `docker compose up --build` 的完整本地启动链路
-- 已提供 `seed_demo_data.py`，可初始化演示知识库数据
-- 已包含 chat、search、ACL、version、workflow、observability 等后端测试用例
-- 已覆盖 admin / manager / viewer 的权限隔离演示场景
+## 运行与验证
+- 支持通过 `docker compose up --build` 启动完整本地环境
+- 提供 `seed_demo_data.py` 用于初始化演示知识库数据
+- 仓库包含 chat、search、ACL、version、workflow、observability 等后端测试用例
+- 已覆盖 admin、manager、viewer 三类角色的权限隔离演示场景
 
-说明：当前工作区未安装 `pytest`，因此这次未在本地重新执行测试；上面的“已包含 / 已覆盖”基于仓库内现有脚本、测试文件和演示链路。
 
 ## 本地启动
 ### Docker Compose
@@ -288,6 +287,3 @@ JWT_SECRET_KEY=replace-with-a-long-random-secret
 - 项目说明：[`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md)
 - 手动上传演示样例：[`docs/manual_upload_demo.md`](docs/manual_upload_demo.md)
 - 手动上传演示样例 v2：[`docs/manual_upload_demo_v2.md`](docs/manual_upload_demo_v2.md)
-
-## 使用建议
-这个仓库当前是一个 MVP / 参考实现，适合作为课程项目、实习项目、内部工具原型或继续产品化的起点。
