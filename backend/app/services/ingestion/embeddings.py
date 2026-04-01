@@ -40,18 +40,34 @@ class DeterministicEmbeddingProvider(EmbeddingProvider):
 
 
 class OpenAIEmbeddingProvider(EmbeddingProvider):
-    def __init__(self, api_key: str, model: str, dimensions: int):
-        self.client = OpenAI(api_key=api_key)
+    def __init__(self, api_key: str, model: str, dimensions: int, base_url: str | None = None):
+        client_kwargs: dict[str, str] = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self.client = OpenAI(**client_kwargs)
         self.model = model
         self.dimensions = dimensions
+        self.fallback_provider = DeterministicEmbeddingProvider(dimensions)
+        self._fallback_logged = False
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        response = self.client.embeddings.create(
-            model=self.model,
-            input=texts,
-            dimensions=self.dimensions,
-        )
-        return [item.embedding for item in response.data]
+        try:
+            response = self.client.embeddings.create(
+                model=self.model,
+                input=texts,
+                dimensions=self.dimensions,
+            )
+            return [item.embedding for item in response.data]
+        except Exception as exc:
+            if not self._fallback_logged:
+                logger.warning(
+                    "Embedding request failed for model '%s'%s. Falling back to deterministic embeddings. Error: %s",
+                    self.model,
+                    f" via {self.client.base_url}" if getattr(self.client, 'base_url', None) else "",
+                    exc,
+                )
+                self._fallback_logged = True
+            return self.fallback_provider.embed_texts(texts)
 
 
 class EmbeddingProviderFactory:
@@ -63,6 +79,7 @@ class EmbeddingProviderFactory:
                 api_key=settings.openai_api_key,
                 model=settings.openai_embedding_model,
                 dimensions=settings.embedding_dimensions,
+                base_url=settings.effective_openai_base_url,
             )
 
         if settings.embedding_provider == "openai" and not settings.openai_api_key:

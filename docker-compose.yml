@@ -32,6 +32,8 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     container_name: eka-backend
+    env_file:
+      - ./backend/.env
     depends_on:
       postgres:
         condition: service_healthy
@@ -50,17 +52,8 @@ services:
       SEED_MOCK_DATA: "true"
       SEED_DEMO_EVAL_CASES: "true"
       DATA_DIR: /app/backend/data
-      EMBEDDING_PROVIDER: deterministic
-      ROUTER_PROVIDER: openai_compatible
-      ANSWER_PROVIDER: openai_compatible
-      DIFF_SUMMARY_PROVIDER: openai_compatible
-      LLM_API_KEY: ${LLM_API_KEY}
-      LLM_BASE_URL: ${LLM_BASE_URL}
-      LLM_ROUTER_MODEL: ${LLM_ROUTER_MODEL}
-      LLM_CHAT_MODEL: ${LLM_CHAT_MODEL}
-      LLM_REASONING_MODEL: ${LLM_REASONING_MODEL}
     ports:
-      - "8000:8000"
+      - "8500:8000"
     volumes:
       - ./backend:/app/backend
       - ./scripts:/app/scripts
@@ -81,4 +74,6 @@ services:
 
 volumes:
   postgres_data:
+
+
 

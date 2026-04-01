@@ -263,7 +263,8 @@ export function DocumentsPage() {
     if (!token) {
       return;
     }
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const file = form.get("file");
     if (!(file instanceof File) || !file.name) {
       setUploadError("请选择要上传的文件。");
@@ -287,7 +288,7 @@ export function DocumentsPage() {
       setSelectedDocumentId(response.document.id);
       updateDocumentLocation(response.document.id, response.version.id, null);
       await refreshSelectedDocument(response.document.id, response.version.id);
-      event.currentTarget.reset();
+      formElement.reset();
       setActionMessage(`已完成上传并入库：${response.document.title}`);
     } catch (nextError) {
       setUploadError(nextError instanceof Error ? nextError.message : "上传失败，请稍后重试。");
@@ -301,7 +302,8 @@ export function DocumentsPage() {
     if (!token || !selectedDocument) {
       return;
     }
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const file = form.get("file");
     if (!(file instanceof File) || !file.name) {
       setActionMessage("请选择新的版本文件。");
@@ -316,7 +318,7 @@ export function DocumentsPage() {
       setLatestIngestion(ingestion);
       updateDocumentLocation(selectedDocument.id, response.version.id, null);
       await refreshSelectedDocument(selectedDocument.id, response.version.id);
-      event.currentTarget.reset();
+      formElement.reset();
       setActionMessage(`已上传新版本 v${response.version.version_number}，并完成重新入库。`);
     } catch (nextError) {
       setActionMessage(nextError instanceof Error ? nextError.message : "上传新版本失败。");
@@ -732,5 +734,8 @@ export function DocumentsPage() {
     </div>
   );
 }
+
+
+
 
 

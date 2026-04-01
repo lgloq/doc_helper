@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     llm_chat_model: str | None = None
     llm_reasoning_model: str | None = None
     openai_api_key: str | None = None
+    openai_base_url: str | None = None
     openai_embedding_model: str = "text-embedding-3-small"
     openai_chat_model: str = "gpt-4.1-mini"
     openai_router_model: str = "gpt-4.1-mini"
@@ -76,6 +77,13 @@ class Settings(BaseSettings):
         if not self.llm_base_url:
             return None
         cleaned = self.llm_base_url.strip()
+        return cleaned or None
+
+    @property
+    def effective_openai_base_url(self) -> str | None:
+        if not self.openai_base_url:
+            return None
+        cleaned = self.openai_base_url.strip()
         return cleaned or None
 
     @property

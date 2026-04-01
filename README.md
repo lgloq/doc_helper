@@ -149,7 +149,7 @@ docker compose up --build
 启动后默认服务：
 - PostgreSQL + pgvector：`localhost:5432`
 - Redis：`localhost:6379`
-- FastAPI 后端：`http://localhost:8000`
+- FastAPI 后端：`http://localhost:8500`
 - React 前端：`http://localhost:5173`
 
 ### 初始化演示数据
@@ -248,27 +248,29 @@ npm run dev
 - `GET /api/v1/observability/traces/{id}`
 
 ## 环境变量说明
-- 前端开发模式下通过 Vite 代理 `/api` 到 `http://localhost:8000`
+- Docker Compose 下前端通过 Vite 代理 `/api` 到容器内的 `http://backend:8000`
+- 宿主机访问后端地址为 `http://localhost:8500`
 - 默认使用 deterministic embedding / answer provider，因此不依赖外部模型也可以本地演示
 - `JWT_SECRET_KEY` 建议使用至少 32 字节以上的随机字符串；仓库中的示例值仅用于本地开发与演示
 
 ### OpenAI-compatible provider
-当前后端配置同时支持 OpenAI 官方接口和兼容 OpenAI API 的模型服务，推荐优先使用统一的 `LLM_*` 配置：
+当前后端配置同时支持 DeepSeek 等 OpenAI-compatible 聊天模型服务，以及通过 `OPENAI_BASE_URL` 映射到 OpenRouter 的 embedding 服务。当前项目推荐使用“DeepSeek 负责 chat，OpenRouter 负责 embedding”的组合：
 
 ```env
 EMBEDDING_PROVIDER=openai
-ANSWER_PROVIDER=openai
+ANSWER_PROVIDER=openai_compatible
 ROUTER_PROVIDER=openai_compatible
-DIFF_SUMMARY_PROVIDER=openai
+DIFF_SUMMARY_PROVIDER=openai_compatible
 
-LLM_API_KEY=your_api_key
-LLM_BASE_URL=https://your-compatible-provider/v1
-LLM_CHAT_MODEL=gpt-4.1-mini
-LLM_ROUTER_MODEL=gpt-4.1-mini
-LLM_REASONING_MODEL=gpt-4.1-mini
+LLM_API_KEY=your_deepseek_api_key
+LLM_BASE_URL=https://api.deepseek.com
+LLM_CHAT_MODEL=deepseek-chat
+LLM_ROUTER_MODEL=deepseek-chat
+LLM_REASONING_MODEL=deepseek-reasoner
 
-OPENAI_API_KEY=your_openai_api_key
-OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+OPENAI_API_KEY=your_openrouter_api_key
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+OPENAI_EMBEDDING_MODEL=openai/text-embedding-3-small
 OPENAI_CHAT_MODEL=gpt-4.1-mini
 OPENAI_ROUTER_MODEL=gpt-4.1-mini
 OPENAI_DIFF_MODEL=gpt-4.1-mini
@@ -277,13 +279,18 @@ JWT_SECRET_KEY=replace-with-a-long-random-secret
 ```
 
 配置说明：
-- `LLM_BASE_URL` 用于接入 OpenAI-compatible provider
-- `LLM_CHAT_MODEL / LLM_ROUTER_MODEL / LLM_REASONING_MODEL` 是统一的聊天、路由与推理模型配置
-- `OPENAI_*` 仍保留为 embedding 与默认模型回退配置
-- 若未配置外部模型，系统会继续使用 deterministic fallback 以保证本地可演示
+- `LLM_BASE_URL` 用于接入 DeepSeek 等 OpenAI-compatible 聊天模型服务
+- `LLM_CHAT_MODEL / LLM_ROUTER_MODEL / LLM_REASONING_MODEL` 对应问答、路由与推理模型配置
+- `OPENAI_BASE_URL` 可用于把 embedding 请求映射到 OpenRouter 等兼容 OpenAI embeddings 的服务
+- `OPENAI_API_KEY` 在这套组合里应填写 OpenRouter key，而不是 OpenAI 官方 key
+- 当前代码已验证可以实例化 `OpenAIEmbeddingProvider`，并向 `https://openrouter.ai/api/v1/embeddings` 发起实际请求
+- 若 embedding 请求失败，系统会自动回退到 deterministic embedding 以保证本地演示不中断
 
 ## 文档说明
 - RAG 技术链路：[`docs/RAG_NOTES.md`](docs/RAG_NOTES.md)
 - 项目说明：[`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md)
 - 手动上传演示样例：[`docs/manual_upload_demo.md`](docs/manual_upload_demo.md)
 - 手动上传演示样例 v2：[`docs/manual_upload_demo_v2.md`](docs/manual_upload_demo_v2.md)
+
+
+
