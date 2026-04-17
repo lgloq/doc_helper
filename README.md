@@ -137,6 +137,17 @@ docker-compose.yml
 - 仓库包含 chat、search、ACL、version、workflow、observability 等后端测试用例
 - 已覆盖 admin、manager、viewer 三类角色的权限隔离演示场景
 
+## Eval Results（demo_permission_eval，3 cases）
+
+| 指标 | 修复前 | 修复后 |
+|------|--------|--------|
+| retrieval_hit_rate_avg | 0.667 | 1.0 |
+| citation_accuracy_avg | 0.667 | 1.0 |
+| answer_faithfulness_avg | 0.60 | 0.933 |
+| permission_isolation_pass_rate | 0.667 | 1.0 |
+
+发现 `viewer` 账号因 `team_name` 配置与评测用例预期不一致，导致权限隔离 case 失败；定位后修复了 bootstrap 默认用户同步逻辑并补充回归测试，修复后 `demo_permission_eval` 全部 case 通过。
+
 
 ## 本地启动
 ### Docker Compose

@@ -19,7 +19,7 @@ DEFAULT_USERS = [
         "email": "viewer@local.test",
         "full_name": "Default Viewer",
         "password": "viewer123",
-        "team_name": "platform",
+        "team_name": "sales",
         "role_name": RoleName.VIEWER,
     },
     {
@@ -72,6 +72,11 @@ def _ensure_users(session, roles: dict[RoleName, Role]) -> None:
     for item in DEFAULT_USERS:
         existing = session.scalar(select(User).where(User.email == item["email"]))
         if existing is not None:
+            desired_role_id = roles[item["role_name"]].id
+            existing.full_name = item["full_name"]
+            existing.team_name = item["team_name"]
+            existing.is_active = True
+            existing.role_id = desired_role_id
             continue
         session.add(
             User(
