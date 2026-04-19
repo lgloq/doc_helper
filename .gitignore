@@ -28,6 +28,8 @@ backend/.env
 Thumbs.db
 .vscode/
 .idea/
+.tmp-chrome-profile/
+.tmp-edge-profile/
 
 # scripts
 scripts/__pycache__/

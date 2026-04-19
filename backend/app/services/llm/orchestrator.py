@@ -100,16 +100,15 @@ class CopilotOrchestrator:
             retrieval_debug=tool_result.retrieval_response.debug,
         )
         if decision.should_refuse_if_inaccessible and not decision.target_document_title:
-            requested_name = decision.requested_document_name or "该文档"
             return self._build_refusal_result(
                 router_result=router_result,
-                answer=f"当前可访问文档中未找到“{requested_name}”的相关内容。你可能没有权限访问该文档，或该文档不存在。",
+                answer="当前可访问范围内未找到相关文档内容。该文档可能不存在，或你当前没有访问权限。",
                 refusal_reason="target_document_not_accessible_or_not_found",
                 tool_name=tool_metadata.tool_name,
                 tool_input=tool_metadata.tool_input,
                 tool_output_summary=tool_metadata.tool_output_summary,
                 retrieval_response=tool_result.retrieval_response,
-                target_document=requested_name,
+                target_document=decision.requested_document_name,
                 intent="document_qa",
             )
         if tool_result.refusal_reason == "no_relevant_evidence_in_target_document" or not tool_result.retrieval_response.matched_chunks:
@@ -196,7 +195,7 @@ class CopilotOrchestrator:
             requested_name = decision.target_document_title or decision.requested_document_name or "该文档"
             answer = "当前无法完成版本差异比较。"
             if tool_result.refusal_reason == "target_document_not_accessible_or_not_found":
-                answer = f"当前可访问文档中未找到“{requested_name}”，因此无法进行版本对比。"
+                answer = "当前可访问范围内未找到相关文档内容，因此暂时无法进行版本对比。"
             elif tool_result.refusal_reason == "insufficient_versions_for_compare":
                 answer = f"“{requested_name}”当前可访问范围内不足两个版本，暂时无法比较差异。"
             return self._build_version_compare_result(

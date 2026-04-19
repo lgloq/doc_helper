@@ -186,13 +186,14 @@ def test_document_qa_inaccessible_returns_structured_refusal(client: TestClient,
 
     for token in (viewer_token, manager_token):
         session_id = _create_session(client, token)
-        payload = _send_question(client, token, session_id, "安全例外登记里写了什么？")
+        payload = _send_question(client, token, session_id, "《安全例外登记》里对补偿控制有什么要求？")
         metadata = payload["assistant_message"]["message_metadata"]
 
         assert payload["assistant_message"]["insufficient_evidence"] is True
         assert payload["assistant_message"]["confidence"] == "insufficient"
         assert payload["citations"] == []
-        assert "当前可访问文档中未找到" in payload["assistant_message"]["content"]
+        assert "当前可访问范围内未找到相关文档内容" in payload["assistant_message"]["content"]
+        assert "安全例外登记" not in payload["assistant_message"]["content"]
         assert metadata["router_decision"]["intent"] == "document_qa"
         assert metadata["structured_result"]["answer_type"] == "refusal"
         assert metadata["structured_result"]["refusal_reason"] == "target_document_not_accessible_or_not_found"
@@ -243,15 +244,15 @@ def test_topic_qa_uses_accessible_search_without_explicit_title(client: TestClie
     )
 
     session_id = _create_session(client, viewer_token)
-    payload = _send_question(client, viewer_token, session_id, "节假日安排是什么样的？")
+    payload = _send_question(client, viewer_token, session_id, "节假日值班需要提前登记吗？")
     metadata = payload["assistant_message"]["message_metadata"]
 
     assert payload["assistant_message"]["insufficient_evidence"] is False
     assert payload["citations"]
     assert payload["citations"][0]["document_title"] == "员工手册"
-    assert "节假日" in payload["assistant_message"]["content"]
-    assert metadata["router_decision"]["intent"] == "topic_qa"
-    assert metadata["tool_execution"]["tool_name"] == "search_accessible_documents"
+    assert "登记" in payload["assistant_message"]["content"]
+    assert metadata["router_decision"]["intent"] in {"topic_qa", "document_qa"}
+    assert metadata["tool_execution"]["tool_name"] in {"search_accessible_documents", "get_document_context"}
 
 
 

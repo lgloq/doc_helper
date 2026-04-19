@@ -230,13 +230,12 @@ def should_abstain_from_answer(
     target_match: DocumentTargetMatch | None,
 ) -> AbstainDecision:
     if target_match and target_match.inaccessible_or_not_found:
-        requested_name = target_match.requested_document_name or "目标文档"
         return AbstainDecision(
             should_abstain=True,
             reason="target_document_not_accessible_or_not_found",
             user_message=(
-                f"当前可访问文档中未找到“{requested_name}”的相关内容。"
-                "你可能没有权限访问该文档，或该文档不存在。"
+                "当前可访问范围内未找到相关文档内容。"
+                "该文档可能不存在，或你当前没有访问权限。"
             ),
             filtered_chunks=[],
         )

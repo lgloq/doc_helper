@@ -137,7 +137,9 @@ docker-compose.yml
 - 仓库包含 chat、search、ACL、version、workflow、observability 等后端测试用例
 - 已覆盖 admin、manager、viewer 三类角色的权限隔离演示场景
 
-## Eval Results（demo_permission_eval，3 cases）
+## Eval Results
+
+### 回归修复集（`demo_permission_eval`，3 cases）
 
 | 指标 | 修复前 | 修复后 |
 |------|--------|--------|
@@ -147,6 +149,18 @@ docker-compose.yml
 | permission_isolation_pass_rate | 0.667 | 1.0 |
 
 发现 `viewer` 账号因 `team_name` 配置与评测用例预期不一致，导致权限隔离 case 失败；定位后修复了 bootstrap 默认用户同步逻辑并补充回归测试，修复后 `demo_permission_eval` 全部 case 通过。
+
+### 扩展权限矩阵集（`demo_access_matrix_eval`，8 cases）
+
+| 指标 | 当前结果 |
+|------|----------|
+| pass_count | 8 / 8 |
+| retrieval_hit_rate_avg | 1.0 |
+| citation_accuracy_avg | 1.0 |
+| answer_faithfulness_avg | 0.95 |
+| permission_isolation_pass_rate | 1.0 |
+
+这组扩展评测覆盖普通员工、组长、管理员三类账号，以及公开文档、团队文档、角色文档和管理员专属文档等权限场景，主要验证不同角色下的可访问、不可访问和拒答行为。
 
 
 ## 本地启动
