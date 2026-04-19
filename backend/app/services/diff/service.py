@@ -162,6 +162,8 @@ class DocumentDiffService:
 
     @staticmethod
     def _build_change_set(from_paragraphs: list[str], to_paragraphs: list[str]) -> tuple[list[dict[str, Any]], int, int, int]:
+        # Diff 统计当前以“段落级”语义为准：
+        # insert/delete 只统计整段新增或整段删除，段内文本替换统一记为 replace。
         matcher = difflib.SequenceMatcher(a=from_paragraphs, b=to_paragraphs)
         changes: list[dict[str, Any]] = []
         added_count = 0

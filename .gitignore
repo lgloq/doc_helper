@@ -27,6 +27,7 @@ backend/.env
 .DS_Store
 Thumbs.db
 .vscode/
+.vs/
 .idea/
 .tmp-chrome-profile/
 .tmp-edge-profile/
