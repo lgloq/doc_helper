@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -10,6 +11,7 @@ from app.models.eval import EvalCase
 from app.models.enums import RoleName
 from app.models.role import Role
 from app.models.user import User
+from app.services.eval import bootstrap as eval_bootstrap
 
 
 def _create_user(db_session: Session, role: Role, email: str, team_name: str | None, password: str) -> User:
@@ -163,3 +165,34 @@ def test_eval_run_reports_metrics_and_permission_isolation(client: TestClient, d
     )
     assert list_runs_response.status_code == 200
     assert len(list_runs_response.json()) == 1
+
+
+def test_seed_demo_eval_cases_removes_stale_demo_cases(monkeypatch, db_session: Session) -> None:
+    db_session.add(
+        EvalCase(
+            dataset_name="demo_access_matrix_eval",
+            case_name="平台团队普通员工可检索平台发布手册",
+            description="stale demo case",
+            acting_user_email="viewer2@local.test",
+            question="stale",
+            expected_document_titles=["平台发布手册"],
+            forbidden_document_titles=[],
+            expected_answer_keywords=["15"],
+            is_demo_case=True,
+        )
+    )
+    db_session.commit()
+
+    monkeypatch.setattr(eval_bootstrap, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(eval_bootstrap, "get_settings", lambda: SimpleNamespace(seed_demo_eval_cases=True))
+
+    eval_bootstrap.seed_demo_eval_cases()
+
+    current_demo_case_names = {
+        case.case_name
+        for case in db_session.query(EvalCase)
+        .filter(EvalCase.dataset_name == "demo_access_matrix_eval", EvalCase.is_demo_case.is_(True))
+        .all()
+    }
+    assert "平台团队普通员工可检索平台发布手册" not in current_demo_case_names
+    assert "组长可检索平台发布手册" in current_demo_case_names

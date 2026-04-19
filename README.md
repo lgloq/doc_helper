@@ -11,30 +11,30 @@
 </p>
 
 ## 项目概述
-这个项目聚焦企业文档知识场景，目标不是做一个只会聊天的演示页，而是把权限控制、文档检索、引用溯源、版本追踪和结构化结果沉淀放进一条完整链路里。
+项目面向企业知识库场景，聚焦权限控制、文档检索、引用溯源、版本追踪和结构化结果生成。当前实现已将文档摄取、权限感知检索、引用问答和结果沉淀整合到同一条链路中。
 
-它解决的核心问题是：
+系统主要解决以下问题：
 - 用户只能检索和引用自己有权限访问的文档
-- 回答要尽量带 citation，而不是只给一段自由文本
+- 回答应尽量附带 citation，方便核对依据
 - 会话不止用于问答，还能继续沉淀为待办、周报草稿和 FAQ 草稿
 - 文档版本变更可以被对比、总结和解释
-- 整个链路可以被评测和追踪，而不是只能手工演示
+- 整个链路可以被评测和追踪，便于回归和排查
 
-## 项目说明
-这是一个面向企业知识库的权限感知 RAG 文档知识助手，主要包括以下功能：
+## 能力范围
+当前版本包括以下能力：
 - 权限感知检索：无权限文档不会进入候选集
-- Grounded QA：回答与引用来源分开返回
+- 引用式问答：回答与引用来源分开返回
 - 版本对比：支持原始 diff、差异摘要和影响提示
 - 结构化工作流：支持待办、周报草稿、FAQ 草稿生成
-- Eval 与 Observability：支持效果验证与链路追踪
+- 评测与链路追踪：支持效果验证与 trace 记录
 
 ## 主要功能
-- mock 登录与本地账号：`viewer / manager / admin`
+- 内置演示账号覆盖 `viewer / manager / admin` 三类角色，并额外提供 `viewer2@local.test` 用于团队权限演示
 - 支持 `TXT / Markdown / HTML / PDF / DOCX` 文档上传与摄取
 - 文档版本管理与历史保留
 - 文档级 ACL：支持 `public / user / role / team`
 - 基于 PostgreSQL FTS + pgvector 的权限感知混合检索
-- grounded QA：回答、citation、confidence、证据不足兜底
+- 引用式问答：回答、citation、confidence、证据不足兜底
 - 派生工作流：
   - 待办提取
   - 周报草稿生成
@@ -46,14 +46,14 @@
   - answer faithfulness
   - permission isolation correctness
 - Observability：记录 trace、召回 chunk、selected citation、延迟、token、错误
-- 最小但完整的 React 前端演示链路
+- 用于展示完整业务链路的 React 前端
 
-## 项目特点
-- 权限控制直接纳入检索流程，而不是在结果展示阶段再做过滤
-- 问答结果单独返回 citation，便于追溯答案来源
-- 除了问答，还支持待办、周报草稿和 FAQ 草稿生成
-- 支持文档版本对比与差异摘要，便于跟踪文档变化
-- 提供基础测试与链路记录，方便验证效果和定位问题
+## 设计重点
+- 权限过滤在检索阶段生效，候选集、citation 和 prompt 都只基于可访问文档
+- 回答与 citation 分开返回，前端可以单独展示来源片段和定位信息
+- 会话结果可以继续派生成待办、周报草稿和 FAQ 草稿
+- 版本对比同时保留原始 diff、摘要和影响提示
+- 评测与 trace 数据落库，便于复现问题和回看链路
 
 ## 系统架构
 ```mermaid
@@ -106,7 +106,7 @@ docker-compose.yml
 - 数据库：PostgreSQL、pgvector
 - 缓存：Redis
 - 前端：React、Vite、TypeScript、React Router
-- LLM 集成：OpenAI SDK + OpenAI-compatible provider + deterministic fallback
+- 模型接入：OpenAI SDK、兼容 OpenAI 协议的模型服务、deterministic fallback
 - 测试：pytest
 - 本地运行与集成：Docker Compose
 
@@ -132,12 +132,12 @@ docker-compose.yml
 - 完整的生产部署与安全加固
 
 ## 运行与验证
-- 支持通过 `docker compose up --build` 启动完整本地环境
-- 提供 `seed_demo_data.py` 用于初始化演示知识库数据
-- 仓库包含 chat、search、ACL、version、workflow、observability 等后端测试用例
-- 已覆盖 admin、manager、viewer 三类角色的权限隔离演示场景
+- 支持通过 `docker compose up --build` 拉起 PostgreSQL、Redis、FastAPI 和 React 本地环境
+- 提供 `seed_demo_data.py` 用于初始化演示知识库、版本和权限数据
+- 仓库包含 chat、search、ACL、version、workflow、eval、observability 等后端测试用例
+- 已覆盖 `admin / manager / viewer` 三类角色的演示与回归验证，并补充 `viewer2` 作为团队权限演示账号
 
-## Eval Results
+## 评测结果
 
 ### 回归修复集（`demo_permission_eval`，3 cases）
 
@@ -148,7 +148,7 @@ docker-compose.yml
 | answer_faithfulness_avg | 0.60 | 0.933 |
 | permission_isolation_pass_rate | 0.667 | 1.0 |
 
-发现 `viewer` 账号因 `team_name` 配置与评测用例预期不一致，导致权限隔离 case 失败；定位后修复了 bootstrap 默认用户同步逻辑并补充回归测试，修复后 `demo_permission_eval` 全部 case 通过。
+在 `demo_permission_eval` 中，`viewer` 账号的 `team_name` 与评测用例预期不一致，导致权限隔离用例失败。修正默认用户同步逻辑并补充回归测试后，这组 3 条用例已恢复通过。
 
 ### 扩展权限矩阵集（`demo_access_matrix_eval`，8 cases）
 
@@ -160,7 +160,7 @@ docker-compose.yml
 | answer_faithfulness_avg | 0.95 |
 | permission_isolation_pass_rate | 1.0 |
 
-这组扩展评测覆盖普通员工、组长、管理员三类账号，以及公开文档、团队文档、角色文档和管理员专属文档等权限场景，主要验证不同角色下的可访问、不可访问和拒答行为。
+这组扩展评测覆盖公开文档、团队 ACL 文档、角色 ACL 文档和管理员专属文档场景，主要验证不同权限条件下的可访问、不可访问与拒答行为。
 
 
 ## 本地启动
@@ -214,8 +214,11 @@ npm run dev
 ## 演示账号
 当后端环境变量 `SEED_MOCK_DATA=true` 时，系统启动会自动创建以下账号：
 - `viewer@local.test / viewer123`
+- `viewer2@local.test / viewer123`
 - `manager@local.test / manager123`
 - `admin@local.test / admin123`
+
+其中 `viewer2@local.test` 为手动演示账号，角色仍为 `viewer`，但所属团队为 `platform`，可用于单独演示 team ACL 文档访问场景。
 
 ## 演示流程
 1. 执行 `docker compose up --build`
@@ -227,7 +230,7 @@ npm run dev
 7. 从当前 session 生成待办、周报草稿和 FAQ 草稿
 8. 在 `Versions` 页面查看文档 diff 和摘要
 9. 在 `Insights` 页面运行 demo eval 并查看 trace
-10. 切换 `viewer` 或 `manager` 验证权限隔离效果
+10. 如需演示团队权限，可手动输入 `viewer2@local.test / viewer123` 并验证团队文档访问效果
 
 ## 关键接口
 ### 认证
@@ -275,11 +278,11 @@ npm run dev
 ## 环境变量说明
 - Docker Compose 下前端通过 Vite 代理 `/api` 到容器内的 `http://backend:8000`
 - 宿主机访问后端地址为 `http://localhost:8500`
-- 默认使用 deterministic embedding / answer provider，因此不依赖外部模型也可以本地演示
+- 是否依赖外部模型取决于 `backend/.env` 配置；当前仓库保留 deterministic 回退能力，外部调用失败时本地链路仍可继续运行
 - `JWT_SECRET_KEY` 建议使用至少 32 字节以上的随机字符串；仓库中的示例值仅用于本地开发与演示
 
-### OpenAI-compatible provider
-当前后端配置同时支持 DeepSeek 等 OpenAI-compatible 聊天模型服务，以及通过 `OPENAI_BASE_URL` 映射到 OpenRouter 的 embedding 服务。当前项目推荐使用“DeepSeek 负责 chat，OpenRouter 负责 embedding”的组合：
+### 模型与 Embedding 配置
+当前后端同时支持两类模型配置：一类用于问答、路由和版本摘要，另一类用于 embedding。当前仓库推荐的联调组合为“DeepSeek 负责 chat，OpenRouter 负责 embedding”：
 
 ```env
 EMBEDDING_PROVIDER=openai
@@ -308,12 +311,12 @@ JWT_SECRET_KEY=replace-with-a-long-random-secret
 - `LLM_CHAT_MODEL / LLM_ROUTER_MODEL / LLM_REASONING_MODEL` 对应问答、路由与推理模型配置
 - `OPENAI_BASE_URL` 可用于把 embedding 请求映射到 OpenRouter 等兼容 OpenAI embeddings 的服务
 - `OPENAI_API_KEY` 在这套组合里应填写 OpenRouter key，而不是 OpenAI 官方 key
-- 当前代码已验证可以实例化 `OpenAIEmbeddingProvider`，并向 `https://openrouter.ai/api/v1/embeddings` 发起实际请求
-- 若 embedding 请求失败，系统会自动回退到 deterministic embedding 以保证本地演示不中断
+- 当前仓库已验证可通过 OpenRouter 的 embeddings 接口生成 1536 维向量
+- 若 embedding 请求失败，系统会自动回退到 deterministic embedding，保证摄取和演示链路不中断
 
 ## 文档说明
 - RAG 技术链路：[`docs/RAG_NOTES.md`](docs/RAG_NOTES.md)
-- 项目说明：[`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md)
+- 项目概览：[`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md)
 - 手动上传演示样例：[`docs/manual_upload_demo.md`](docs/manual_upload_demo.md)
 - 手动上传演示样例 v2：[`docs/manual_upload_demo_v2.md`](docs/manual_upload_demo_v2.md)
 

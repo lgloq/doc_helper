@@ -4,7 +4,7 @@ DEMO_EVAL_CASES: list[dict] = [
     {
         "dataset_name": "demo_permission_eval",
         "case_name": "组长可检索平台发布手册",
-        "legacy_case_names": ["manager_can_find_platform_runbook"],
+        "legacy_case_names": ["manager_can_find_platform_runbook", "平台团队普通员工可检索平台发布手册"],
         "description": "组长应能检索到授权给 platform 团队的《平台发布手册》。",
         "acting_user_email": "manager@local.test",
         "question": "平台发布检查清单要求什么？",
@@ -51,6 +51,7 @@ DEMO_EVAL_CASES: list[dict] = [
     {
         "dataset_name": "demo_access_matrix_eval",
         "case_name": "组长可检索平台发布手册",
+        "legacy_case_names": ["平台团队普通员工可检索平台发布手册"],
         "description": "组长应能检索到授权给 platform 团队的《平台发布手册》。",
         "acting_user_email": "manager@local.test",
         "question": "平台发布手册里提到，回滚超过多久要立即升级给平台经理？",
@@ -84,6 +85,7 @@ DEMO_EVAL_CASES: list[dict] = [
     {
         "dataset_name": "demo_access_matrix_eval",
         "case_name": "普通员工不可查看客户事故响应指南",
+        "legacy_case_names": ["平台团队普通员工不可查看客户事故响应指南"],
         "description": "普通员工不应检索到按角色授权给组长的《客户事故响应指南》。",
         "acting_user_email": "viewer@local.test",
         "question": "《客户事故响应指南》里，经理在事故前五分钟需要做什么？",

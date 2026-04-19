@@ -601,6 +601,7 @@ def main() -> None:
             print("")
             print("建议演示账号：")
             print("- viewer@local.test / viewer123")
+            print("- viewer2@local.test / viewer123")
             print("- manager@local.test / manager123")
             print("- admin@local.test / admin123")
             print("")

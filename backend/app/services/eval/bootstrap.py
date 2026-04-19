@@ -21,7 +21,9 @@ def seed_demo_eval_cases() -> None:
     session = SessionLocal()
     try:
         repository = EvalRepository(session)
+        dataset_target_names: dict[str, set[str]] = {}
         for item in DEMO_EVAL_CASES:
+            dataset_target_names.setdefault(item["dataset_name"], set()).add(item["case_name"])
             candidate_case_names = [item["case_name"], *item.get("legacy_case_names", [])]
             existing = next(
                 (
@@ -57,6 +59,11 @@ def seed_demo_eval_cases() -> None:
             existing.expected_answer_keywords = item.get("expected_answer_keywords", [])
             existing.notes = item.get("notes")
             existing.is_demo_case = True
+
+        for dataset_name, target_case_names in dataset_target_names.items():
+            for case in repository.list_cases(dataset_name):
+                if case.is_demo_case and case.case_name not in target_case_names:
+                    session.delete(case)
 
         session.commit()
     except SQLAlchemyError:

@@ -23,6 +23,13 @@ DEFAULT_USERS = [
         "role_name": RoleName.VIEWER,
     },
     {
+        "email": "viewer2@local.test",
+        "full_name": "Platform Viewer",
+        "password": "viewer123",
+        "team_name": "platform",
+        "role_name": RoleName.VIEWER,
+    },
+    {
         "email": "manager@local.test",
         "full_name": "Default Manager",
         "password": "manager123",
