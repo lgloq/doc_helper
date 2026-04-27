@@ -36,6 +36,7 @@ class PreparedChatAnswer:
     selected_chunks: list
     confidence: str
     structured_result: object
+    agent_steps: list
 
 
 class ChatService:
@@ -110,6 +111,7 @@ class ChatService:
                 "router_decision": prepared.router_result.decision.model_dump(mode="json"),
                 "tool_execution": prepared.tool_metadata.model_dump(mode="json"),
                 "structured_result": prepared.structured_result.model_dump(mode="json"),
+                "agent_steps": [item.model_dump(mode="json") for item in prepared.agent_steps],
                 "raw_payload": assistant_result.raw_payload,
             },
         )
@@ -164,6 +166,7 @@ class ChatService:
                     "router_decision": prepared.router_result.decision.model_dump(mode="json"),
                     "tool_execution": prepared.tool_metadata.model_dump(mode="json"),
                     "structured_result": prepared.structured_result.model_dump(mode="json"),
+                    "agent_steps": [item.model_dump(mode="json") for item in prepared.agent_steps],
                 },
             )
         except Exception:
@@ -203,6 +206,7 @@ class ChatService:
             selected_chunks=orchestrated.selected_chunks,
             confidence=orchestrated.confidence,
             structured_result=orchestrated.structured_result,
+            agent_steps=orchestrated.agent_steps,
         )
 
     def _get_session_or_404(self, actor: User, session_id: UUID, include_messages: bool = False) -> ChatSession:

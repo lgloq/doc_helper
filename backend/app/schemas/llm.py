@@ -15,6 +15,14 @@ CopilotIntent = Literal[
     "workflow_generation",
     "unsupported_or_unclear",
 ]
+AgentStepName = Literal[
+    "query_analysis",
+    "tool_selection",
+    "tool_execution",
+    "evidence_review",
+    "answer_generation",
+]
+AgentStepStatus = Literal["completed", "skipped", "refused"]
 
 ArtifactType = Literal["tasks", "weekly_report", "faq"]
 QAAnswerType = Literal["grounded_answer", "refusal"]
@@ -50,6 +58,15 @@ class RouterDecisionResult(BaseModel):
     completion_tokens: int | None = None
     latency_ms: int | None = None
     raw_payload: dict[str, Any] | None = None
+
+
+class AgentStep(BaseModel):
+    name: AgentStepName
+    input_summary: str
+    output_summary: str
+    status: AgentStepStatus
+    tool_name: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ToolCitation(BaseModel):

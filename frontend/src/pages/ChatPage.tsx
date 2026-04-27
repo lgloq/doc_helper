@@ -3,13 +3,14 @@ import { Link } from "react-router-dom";
 
 import { CitationList } from "../components/CitationList";
 import { ErrorNotice } from "../components/ErrorNotice";
+import { ExecutionTrace } from "../components/ExecutionTrace";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 import { useAppContext } from "../context/AppContext";
 import { api } from "../lib/api";
 import { formatArtifactType, formatConfidence, formatCopilotIntent, formatMessageRole, formatRefusalReason } from "../lib/display";
 import { formatDateTime, locationLabel } from "../lib/format";
-import type { ChatCitationRead, ChatMessageRead, ChatSessionDetailRead, ChatSessionRead } from "../types/api";
+import type { AgentStepRead, ChatCitationRead, ChatMessageRead, ChatSessionDetailRead, ChatSessionRead } from "../types/api";
 
 export function ChatPage() {
   const { token, selectedSessionId, setSelectedSessionId } = useAppContext();
@@ -317,6 +318,26 @@ interface MessageDebugInfo {
   artifactType: string | null;
 }
 
+function readAgentSteps(message: ChatMessageRead): AgentStepRead[] {
+  const metadata = message.message_metadata;
+  if (!metadata || typeof metadata !== "object") {
+    return [];
+  }
+  const steps = (metadata as Record<string, unknown>).agent_steps;
+  if (!Array.isArray(steps)) {
+    return [];
+  }
+  return steps.filter((item): item is AgentStepRead => {
+    return Boolean(
+      item &&
+      typeof item === "object" &&
+      typeof (item as Record<string, unknown>).name === "string" &&
+      typeof (item as Record<string, unknown>).input_summary === "string" &&
+      typeof (item as Record<string, unknown>).output_summary === "string",
+    );
+  });
+}
+
 function readMessageDebugInfo(message: ChatMessageRead): MessageDebugInfo | null {
   const metadata = message.message_metadata;
   if (!metadata || typeof metadata !== "object") {
@@ -361,6 +382,7 @@ interface MessageBubbleProps {
 function MessageBubble({ message, onSelectCitation }: MessageBubbleProps) {
   const tone = message.role === "assistant" ? "assistant" : "user";
   const debugInfo = message.role === "assistant" ? readMessageDebugInfo(message) : null;
+  const agentSteps = message.role === "assistant" ? readAgentSteps(message) : [];
   return (
     <article className={`message-bubble ${tone}`}>
       <div className="message-meta">
@@ -381,6 +403,7 @@ function MessageBubble({ message, onSelectCitation }: MessageBubbleProps) {
           {debugInfo.refusalReason ? <span>拒答原因：{formatRefusalReason(debugInfo.refusalReason)}</span> : null}
         </div>
       ) : null}
+      {agentSteps.length ? <ExecutionTrace steps={agentSteps} /> : null}
       {message.citations.length ? (
         <div className="message-citations">
           {message.citations.map((citation) => (

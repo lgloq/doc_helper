@@ -457,6 +457,39 @@ h4 {
   margin-top: 0.75rem;
 }
 
+.execution-trace {
+  margin-top: 0.75rem;
+  border-radius: 14px;
+  background: rgba(17, 77, 99, 0.05);
+  padding: 0.6rem 0.7rem;
+}
+
+.execution-trace summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--primary-strong);
+}
+
+.execution-trace-list {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.7rem;
+}
+
+.execution-trace-item {
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.6);
+  padding: 0.65rem 0.72rem;
+}
+
+.execution-trace-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  margin-bottom: 0.35rem;
+}
+
 .citation-pill {
   border: 0;
   border-radius: 999px;

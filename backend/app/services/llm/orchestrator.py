@@ -6,6 +6,7 @@ from typing import Any
 from uuid import UUID
 
 from app.schemas.llm import (
+    AgentStep,
     CopilotExecutionMetadata,
     QAAnswerResult,
     RouterDecision,
@@ -14,12 +15,19 @@ from app.schemas.llm import (
     VersionCompareResult,
     WorkflowGenerationResult,
 )
-from app.schemas.search import SearchDebugInfo, SearchRequest, SearchResponse, SearchResultChunk
+from app.services.chat.memory import ConversationMemory, build_conversation_memory, has_usable_workflow_context
+from app.schemas.search import SearchDebugInfo, SearchResponse, SearchResultChunk
 from app.services.chat.generation import AnswerGenerationResult, AnswerGeneratorFactory
-from app.services.chat.prompts import format_history_line, validate_used_chunk_ids
+from app.services.chat.prompts import validate_used_chunk_ids
 from app.services.chat.reliability import should_abstain_from_answer
 from app.services.llm.router import LLMRouterService
-from app.services.llm.tools import CopilotToolService, DocumentContextToolResult, VersionCompareToolResult, WorkflowToolResult
+from app.services.llm.tools import CopilotToolService
+
+TOOL_SEARCH_DOCS = "search_docs"
+TOOL_COMPARE_VERSIONS = "compare_versions"
+TOOL_EXTRACT_TODOS = "extract_todos"
+TOOL_GENERATE_WEEKLY_REPORT = "generate_weekly_report"
+TOOL_GENERATE_FAQ = "generate_faq"
 
 
 @dataclass
@@ -32,6 +40,7 @@ class CopilotRunResult:
     selected_chunks: list[SearchResultChunk]
     confidence: str
     structured_result: QAAnswerResult | VersionCompareResult | WorkflowGenerationResult
+    agent_steps: list[AgentStep]
 
 
 class CopilotOrchestrator:
@@ -49,21 +58,28 @@ class CopilotOrchestrator:
         top_k: int,
         existing_messages,
     ) -> CopilotRunResult:
+        memory = build_conversation_memory(existing_messages)
         accessible_documents = self.tools.list_accessible_documents(actor)
-        router_result = self.router.route(question=question, accessible_documents=accessible_documents)
+        router_result = self.router.route(
+            question=question,
+            accessible_documents=accessible_documents,
+            conversation_context=memory,
+        )
         decision = router_result.decision
 
         if decision.intent == "document_qa":
-            return self._run_document_qa(actor, question, top_k, existing_messages, router_result)
+            return self._run_document_qa(actor, question, existing_messages, memory, top_k, router_result)
         if decision.intent == "topic_qa":
-            return self._run_topic_qa(actor, question, top_k, existing_messages, router_result)
+            return self._run_topic_qa(actor, question, existing_messages, memory, top_k, router_result)
         if decision.intent == "version_compare":
-            return self._run_version_compare(actor, question, router_result)
+            return self._run_version_compare(actor, question, memory, router_result)
         if decision.intent == "workflow_generation":
             if session_id.int == 0:
                 return self._build_workflow_result(
+                    question=question,
                     router_result=router_result,
-                    tool_metadata=CopilotExecutionMetadata(tool_name="workflow_generation", tool_input={"session_id": None}),
+                    conversation_memory=memory,
+                    tool_metadata=CopilotExecutionMetadata(tool_name="none", tool_input={"session_id": None}),
                     answer="当前请求需要依赖已有会话上下文，预览模式下暂时无法直接生成派生结果。",
                     confidence="insufficient",
                     artifact_type=None,
@@ -71,22 +87,32 @@ class CopilotOrchestrator:
                     citations=[],
                     refusal_reason="missing_session_context",
                 )
-            return self._run_workflow_generation(actor, question, session_id, router_result)
+            return self._run_workflow_generation(actor, question, session_id, existing_messages, memory, router_result)
         return self._build_refusal_result(
+            question=question,
             router_result=router_result,
             answer="我还不能可靠地理解这条请求。请更明确地说明你想查询的文档、主题，或直接说明要生成待办、周报、FAQ、版本差异。",
             refusal_reason="unsupported_or_unclear",
+            conversation_memory=memory,
             tool_name="none",
             tool_input={"question": question},
             tool_output_summary={"status": "not_routed"},
         )
 
-    def _run_document_qa(self, actor, question: str, top_k: int, existing_messages, router_result: RouterDecisionResult) -> CopilotRunResult:
+    def _run_document_qa(
+        self,
+        actor,
+        question: str,
+        existing_messages,
+        conversation_memory: ConversationMemory,
+        top_k: int,
+        router_result: RouterDecisionResult,
+    ) -> CopilotRunResult:
         decision = router_result.decision
         requested_document = decision.target_document_title or decision.target_document_id or decision.requested_document_name
         tool_result = self.tools.get_document_context(actor, requested_document, question, top_k)
         tool_metadata = CopilotExecutionMetadata(
-            tool_name="get_document_context",
+            tool_name=TOOL_SEARCH_DOCS,
             tool_input={
                 "query": question,
                 "top_k": top_k,
@@ -101,9 +127,11 @@ class CopilotOrchestrator:
         )
         if decision.should_refuse_if_inaccessible and not decision.target_document_title:
             return self._build_refusal_result(
+                question=question,
                 router_result=router_result,
                 answer="当前可访问范围内未找到相关文档内容。该文档可能不存在，或你当前没有访问权限。",
                 refusal_reason="target_document_not_accessible_or_not_found",
+                conversation_memory=conversation_memory,
                 tool_name=tool_metadata.tool_name,
                 tool_input=tool_metadata.tool_input,
                 tool_output_summary=tool_metadata.tool_output_summary,
@@ -114,9 +142,11 @@ class CopilotOrchestrator:
         if tool_result.refusal_reason == "no_relevant_evidence_in_target_document" or not tool_result.retrieval_response.matched_chunks:
             target_name = tool_result.document_title or decision.requested_document_name or "该文档"
             return self._build_refusal_result(
+                question=question,
                 router_result=router_result,
                 answer=f"在“{target_name}”当前可访问的内容中，未找到足够相关的证据来回答这个问题。",
                 refusal_reason=tool_result.refusal_reason or "insufficient_relevant_evidence",
+                conversation_memory=conversation_memory,
                 tool_name=tool_metadata.tool_name,
                 tool_input=tool_metadata.tool_input,
                 tool_output_summary=tool_metadata.tool_output_summary,
@@ -127,6 +157,7 @@ class CopilotOrchestrator:
         return self._generate_grounded_qa(
             question=question,
             existing_messages=existing_messages,
+            conversation_memory=conversation_memory,
             router_result=router_result,
             retrieval_response=tool_result.retrieval_response,
             candidate_chunks=tool_result.retrieval_response.matched_chunks,
@@ -135,10 +166,18 @@ class CopilotOrchestrator:
             allow_low_score=True,
         )
 
-    def _run_topic_qa(self, actor, question: str, top_k: int, existing_messages, router_result: RouterDecisionResult) -> CopilotRunResult:
+    def _run_topic_qa(
+        self,
+        actor,
+        question: str,
+        existing_messages,
+        conversation_memory: ConversationMemory,
+        top_k: int,
+        router_result: RouterDecisionResult,
+    ) -> CopilotRunResult:
         retrieval_response = self.tools.search_accessible_documents(actor, question, top_k)
         tool_metadata = CopilotExecutionMetadata(
-            tool_name="search_accessible_documents",
+            tool_name=TOOL_SEARCH_DOCS,
             tool_input={"query": question, "top_k": top_k},
             tool_output_summary={"matched_chunks": len(retrieval_response.matched_chunks)},
             retrieval_debug=retrieval_response.debug,
@@ -147,9 +186,11 @@ class CopilotOrchestrator:
         candidate_chunks = list(abstain_decision.filtered_chunks or retrieval_response.matched_chunks)
         if abstain_decision.should_abstain or not candidate_chunks:
             return self._build_refusal_result(
+                question=question,
                 router_result=router_result,
                 answer=abstain_decision.user_message or "未找到足够相关的可访问内容来支持可靠回答。",
                 refusal_reason=abstain_decision.reason or "insufficient_relevant_evidence",
+                conversation_memory=conversation_memory,
                 tool_name=tool_metadata.tool_name,
                 tool_input=tool_metadata.tool_input,
                 tool_output_summary={
@@ -162,6 +203,7 @@ class CopilotOrchestrator:
         return self._generate_grounded_qa(
             question=question,
             existing_messages=existing_messages,
+            conversation_memory=conversation_memory,
             router_result=router_result,
             retrieval_response=retrieval_response,
             candidate_chunks=candidate_chunks,
@@ -170,7 +212,13 @@ class CopilotOrchestrator:
             allow_low_score=False,
         )
 
-    def _run_version_compare(self, actor, question: str, router_result: RouterDecisionResult) -> CopilotRunResult:
+    def _run_version_compare(
+        self,
+        actor,
+        question: str,
+        conversation_memory: ConversationMemory,
+        router_result: RouterDecisionResult,
+    ) -> CopilotRunResult:
         decision = router_result.decision
         tool_result = self.tools.compare_document_versions(
             actor,
@@ -179,7 +227,7 @@ class CopilotOrchestrator:
             decision.to_version_ref,
         )
         tool_metadata = CopilotExecutionMetadata(
-            tool_name="compare_document_versions",
+            tool_name=TOOL_COMPARE_VERSIONS,
             tool_input={
                 "target_document": decision.target_document_title or decision.requested_document_name,
                 "from_version_ref": decision.from_version_ref,
@@ -199,7 +247,9 @@ class CopilotOrchestrator:
             elif tool_result.refusal_reason == "insufficient_versions_for_compare":
                 answer = f"“{requested_name}”当前可访问范围内不足两个版本，暂时无法比较差异。"
             return self._build_version_compare_result(
+                question=question,
                 router_result=router_result,
+                conversation_memory=conversation_memory,
                 tool_metadata=tool_metadata,
                 answer=answer,
                 confidence="insufficient",
@@ -210,7 +260,9 @@ class CopilotOrchestrator:
         summary = tool_result.summary
         answer = f"“{tool_result.document_title}”版本差异摘要：{summary.summary}"
         return self._build_version_compare_result(
+            question=question,
             router_result=router_result,
+            conversation_memory=conversation_memory,
             tool_metadata=tool_metadata,
             answer=answer,
             confidence="high",
@@ -219,8 +271,33 @@ class CopilotOrchestrator:
             summary=tool_result.summary,
         )
 
-    def _run_workflow_generation(self, actor, question: str, session_id: UUID, router_result: RouterDecisionResult) -> CopilotRunResult:
+    def _run_workflow_generation(
+        self,
+        actor,
+        question: str,
+        session_id: UUID,
+        existing_messages,
+        conversation_memory: ConversationMemory,
+        router_result: RouterDecisionResult,
+    ) -> CopilotRunResult:
         artifact_type = router_result.decision.artifact_type
+        if not has_usable_workflow_context(existing_messages):
+            return self._build_workflow_result(
+                question=question,
+                router_result=router_result,
+                conversation_memory=conversation_memory,
+                tool_metadata=CopilotExecutionMetadata(
+                    tool_name=_workflow_tool_name(artifact_type),
+                    tool_input={"session_id": str(session_id)},
+                    tool_output_summary={"artifact_type": artifact_type, "status": "skipped_due_to_insufficient_context"},
+                ),
+                answer="当前会话里缺少足够稳定的问答结果，暂时不直接生成待办、周报或 FAQ。请先完成一次有证据支撑的问答，再继续生成结构化结果。",
+                confidence="insufficient",
+                artifact_type=None,
+                structured_payload=None,
+                citations=[],
+                refusal_reason="insufficient_session_context_for_workflow",
+            )
         if artifact_type == "tasks":
             tool_result = self.tools.generate_tasks_from_session(actor, session_id)
             answer = f"已根据当前会话提取 {len(tool_result.structured_payload.get('items', []))} 条待办事项，可前往“派生结果”查看。"
@@ -233,8 +310,10 @@ class CopilotOrchestrator:
             answer = f"已根据当前会话生成 {len(tool_result.structured_payload.get('entries', []))} 条 FAQ 草稿。"
         else:
             return self._build_workflow_result(
+                question=question,
                 router_result=router_result,
-                tool_metadata=CopilotExecutionMetadata(tool_name="workflow_generation", tool_input={"session_id": str(session_id)}),
+                conversation_memory=conversation_memory,
+                tool_metadata=CopilotExecutionMetadata(tool_name="none", tool_input={"session_id": str(session_id)}),
                 answer="我还不能确定你希望生成哪类结果。请明确说明是待办、周报，还是 FAQ 草稿。",
                 confidence="insufficient",
                 artifact_type=None,
@@ -243,7 +322,7 @@ class CopilotOrchestrator:
                 refusal_reason="unsupported_or_unclear_workflow_request",
             )
         tool_metadata = CopilotExecutionMetadata(
-            tool_name=f"generate_{tool_result.artifact_type}_from_session",
+            tool_name=_workflow_tool_name(tool_result.artifact_type),
             tool_input={"session_id": str(session_id)},
             tool_output_summary={
                 "artifact_type": tool_result.artifact_type,
@@ -251,7 +330,9 @@ class CopilotOrchestrator:
             },
         )
         return self._build_workflow_result(
+            question=question,
             router_result=router_result,
+            conversation_memory=conversation_memory,
             tool_metadata=tool_metadata,
             answer=answer,
             confidence="high",
@@ -266,6 +347,7 @@ class CopilotOrchestrator:
         *,
         question: str,
         existing_messages,
+        conversation_memory: ConversationMemory,
         router_result: RouterDecisionResult,
         retrieval_response: SearchResponse,
         candidate_chunks: list[SearchResultChunk],
@@ -273,11 +355,11 @@ class CopilotOrchestrator:
         target_document: str | None,
         allow_low_score: bool,
     ) -> CopilotRunResult:
-        history_lines = [format_history_line(message.role.value, message.content) for message in existing_messages[-12:]]
         generation = self.answer_generator.generate(
             question=question,
             retrieved_chunks=candidate_chunks,
-            history_lines=history_lines,
+            history_lines=conversation_memory.history_lines,
+            conversation_context=conversation_memory.to_answer_context(),
             allow_low_score=allow_low_score,
         )
         generation = self._merge_answer_metrics(router_result, generation)
@@ -319,6 +401,17 @@ class CopilotOrchestrator:
             "selected_citations": len(selected_chunks),
             "insufficient_evidence": generation.insufficient_evidence,
         }
+        agent_steps = self._build_agent_steps(
+            question=question,
+            conversation_memory=conversation_memory,
+            router_result=router_result,
+            tool_metadata=tool_metadata,
+            retrieval_response=retrieval_response,
+            candidate_chunks=candidate_chunks,
+            selected_chunks=selected_chunks,
+            answer_result=generation,
+            structured_result=qa_result,
+        )
         return CopilotRunResult(
             router_result=router_result,
             tool_metadata=tool_metadata,
@@ -328,14 +421,17 @@ class CopilotOrchestrator:
             selected_chunks=selected_chunks,
             confidence=confidence,
             structured_result=qa_result,
+            agent_steps=agent_steps,
         )
 
     def _build_refusal_result(
         self,
         *,
+        question: str,
         router_result: RouterDecisionResult,
         answer: str,
         refusal_reason: str,
+        conversation_memory: ConversationMemory,
         tool_name: str,
         tool_input: dict[str, Any],
         tool_output_summary: dict[str, Any],
@@ -355,26 +451,41 @@ class CopilotOrchestrator:
             target_document=target_document,
             intent=(intent or router_result.decision.intent),  # type: ignore[arg-type]
         )
+        tool_metadata = CopilotExecutionMetadata(
+            tool_name=tool_name,
+            tool_input=tool_input,
+            tool_output_summary=tool_output_summary,
+            retrieval_debug=retrieval_response.debug,
+        )
+        agent_steps = self._build_agent_steps(
+            question=question,
+            conversation_memory=conversation_memory,
+            router_result=router_result,
+            tool_metadata=tool_metadata,
+            retrieval_response=retrieval_response,
+            candidate_chunks=[],
+            selected_chunks=[],
+            answer_result=generation,
+            structured_result=qa_result,
+        )
         return CopilotRunResult(
             router_result=router_result,
-            tool_metadata=CopilotExecutionMetadata(
-                tool_name=tool_name,
-                tool_input=tool_input,
-                tool_output_summary=tool_output_summary,
-                retrieval_debug=retrieval_response.debug,
-            ),
+            tool_metadata=tool_metadata,
             answer_result=generation,
             retrieval_response=retrieval_response,
             candidate_chunks=[],
             selected_chunks=[],
             confidence="insufficient",
             structured_result=qa_result,
+            agent_steps=agent_steps,
         )
 
     def _build_version_compare_result(
         self,
         *,
+        question: str,
         router_result: RouterDecisionResult,
+        conversation_memory: ConversationMemory,
         tool_metadata: CopilotExecutionMetadata,
         answer: str,
         confidence: str,
@@ -404,6 +515,17 @@ class CopilotOrchestrator:
             impact_hints=list(summary.impact_hints) if summary else [],
             refusal_reason=refusal_reason,
         )
+        agent_steps = self._build_agent_steps(
+            question=question,
+            conversation_memory=conversation_memory,
+            router_result=router_result,
+            tool_metadata=tool_metadata,
+            retrieval_response=_empty_search_response(answer),
+            candidate_chunks=[],
+            selected_chunks=[],
+            answer_result=answer_result,
+            structured_result=structured_result,
+        )
         return CopilotRunResult(
             router_result=router_result,
             tool_metadata=tool_metadata,
@@ -413,12 +535,15 @@ class CopilotOrchestrator:
             selected_chunks=[],
             confidence=confidence,
             structured_result=structured_result,
+            agent_steps=agent_steps,
         )
 
     def _build_workflow_result(
         self,
         *,
+        question: str,
         router_result: RouterDecisionResult,
+        conversation_memory: ConversationMemory,
         tool_metadata: CopilotExecutionMetadata,
         answer: str,
         confidence: str,
@@ -444,6 +569,17 @@ class CopilotOrchestrator:
             citations=list(citations),
             refusal_reason=refusal_reason,
         )
+        agent_steps = self._build_agent_steps(
+            question=question,
+            conversation_memory=conversation_memory,
+            router_result=router_result,
+            tool_metadata=tool_metadata,
+            retrieval_response=_empty_search_response(answer),
+            candidate_chunks=[],
+            selected_chunks=[],
+            answer_result=answer_result,
+            structured_result=structured_result,
+        )
         return CopilotRunResult(
             router_result=router_result,
             tool_metadata=tool_metadata,
@@ -453,7 +589,180 @@ class CopilotOrchestrator:
             selected_chunks=[],
             confidence=confidence,
             structured_result=structured_result,
+            agent_steps=agent_steps,
         )
+
+    def _build_agent_steps(
+        self,
+        *,
+        question: str,
+        conversation_memory: ConversationMemory,
+        router_result: RouterDecisionResult,
+        tool_metadata: CopilotExecutionMetadata,
+        retrieval_response: SearchResponse,
+        candidate_chunks: list[SearchResultChunk],
+        selected_chunks: list[SearchResultChunk],
+        answer_result: AnswerGenerationResult,
+        structured_result: QAAnswerResult | VersionCompareResult | WorkflowGenerationResult,
+    ) -> list[AgentStep]:
+        intent = router_result.decision.intent
+        target_document = self._resolve_target_document(router_result.decision, structured_result)
+        is_refusal = bool(answer_result.insufficient_evidence)
+        tool_name = tool_metadata.tool_name if tool_metadata.tool_name != "none" else None
+
+        query_output = f"识别为 {intent}"
+        if target_document:
+            query_output += f"，目标文档为“{target_document}”"
+        if conversation_memory.previous_target_document and _looks_like_followup_question(question):
+            query_output += "，并复用了上一轮对话上下文"
+
+        tool_selection_output = "未选择工具，直接返回拒答。"
+        if tool_name:
+            tool_selection_output = f"选择工具 {tool_name}。"
+
+        tool_execution_status = "skipped" if tool_name is None else "completed"
+        if str(tool_metadata.tool_output_summary.get("status") or "").startswith("skipped"):
+            tool_execution_status = "skipped"
+        tool_execution_output = "未执行工具。"
+        if tool_name:
+            tool_execution_output = self._summarize_tool_execution(tool_metadata)
+
+        evidence_status = "completed"
+        evidence_output = self._summarize_evidence_review(intent, candidate_chunks, selected_chunks, answer_result, structured_result)
+        if intent == "unsupported_or_unclear":
+            evidence_status = "skipped"
+            evidence_output = "当前请求未进入检索或工具结果校验。"
+        elif intent == "workflow_generation" and is_refusal:
+            evidence_status = "refused"
+
+        answer_status = "refused" if is_refusal else "completed"
+        answer_output = self._summarize_answer_generation(structured_result, answer_result)
+
+        return [
+            AgentStep(
+                name="query_analysis",
+                input_summary=_truncate(question, 140),
+                output_summary=query_output,
+                status="completed",
+                tool_name=None,
+                metadata={
+                    "previous_target_document": conversation_memory.previous_target_document,
+                    "previous_tool_name": conversation_memory.previous_tool_name,
+                    "previous_artifact_type": conversation_memory.previous_artifact_type,
+                    "previous_intent": conversation_memory.previous_intent,
+                    "older_message_count": conversation_memory.older_message_count,
+                },
+            ),
+            AgentStep(
+                name="tool_selection",
+                input_summary=f"intent={intent}",
+                output_summary=tool_selection_output,
+                status="completed",
+                tool_name=tool_name,
+                metadata={"reasoning_brief": router_result.decision.reasoning_brief},
+            ),
+            AgentStep(
+                name="tool_execution",
+                input_summary=self._summarize_tool_input(tool_metadata),
+                output_summary=tool_execution_output,
+                status=tool_execution_status,  # type: ignore[arg-type]
+                tool_name=tool_name,
+                metadata=tool_metadata.tool_output_summary,
+            ),
+            AgentStep(
+                name="evidence_review",
+                input_summary=f"candidate_chunks={len(candidate_chunks)}",
+                output_summary=evidence_output,
+                status=evidence_status,  # type: ignore[arg-type]
+                tool_name=tool_name,
+                metadata={
+                    "selected_citations": len(selected_chunks),
+                    "retrieval_debug": retrieval_response.debug.model_dump(),
+                },
+            ),
+            AgentStep(
+                name="answer_generation",
+                input_summary=f"provider={answer_result.provider_name}",
+                output_summary=answer_output,
+                status=answer_status,  # type: ignore[arg-type]
+                tool_name=tool_name,
+                metadata={
+                    "confidence": getattr(structured_result, "confidence", None),
+                    "answer_basis": answer_result.answer_basis,
+                    "artifact_type": getattr(structured_result, "artifact_type", None),
+                    "refusal_reason": getattr(structured_result, "refusal_reason", None),
+                },
+            ),
+        ]
+
+    @staticmethod
+    def _resolve_target_document(
+        decision: RouterDecision,
+        structured_result: QAAnswerResult | VersionCompareResult | WorkflowGenerationResult,
+    ) -> str | None:
+        return getattr(structured_result, "target_document", None) or decision.target_document_title or decision.requested_document_name
+
+    @staticmethod
+    def _summarize_tool_input(tool_metadata: CopilotExecutionMetadata) -> str:
+        if not tool_metadata.tool_input:
+            return "无额外输入参数。"
+        parts = []
+        for key, value in tool_metadata.tool_input.items():
+            if value is None:
+                continue
+            parts.append(f"{key}={value}")
+        return "，".join(parts) if parts else "无额外输入参数。"
+
+    @staticmethod
+    def _summarize_tool_execution(tool_metadata: CopilotExecutionMetadata) -> str:
+        summary = tool_metadata.tool_output_summary
+        parts: list[str] = []
+        if "matched_chunks" in summary:
+            parts.append(f"命中 {summary['matched_chunks']} 个分块")
+        if "candidate_chunks" in summary:
+            parts.append(f"候选 {summary['candidate_chunks']} 个")
+        if "selected_citations" in summary:
+            parts.append(f"选中 {summary['selected_citations']} 条引用")
+        if "document_title" in summary and summary.get("document_title"):
+            parts.append(f"目标文档={summary['document_title']}")
+        if "artifact_type" in summary and summary.get("artifact_type"):
+            parts.append(f"产物类型={summary['artifact_type']}")
+        if "citation_count" in summary:
+            parts.append(f"引用来源 {summary['citation_count']} 条")
+        if "refusal_reason" in summary and summary.get("refusal_reason"):
+            parts.append(f"返回拒答：{summary['refusal_reason']}")
+        return "；".join(parts) if parts else "工具已执行。"
+
+    @staticmethod
+    def _summarize_evidence_review(
+        intent: str,
+        candidate_chunks: list[SearchResultChunk],
+        selected_chunks: list[SearchResultChunk],
+        answer_result: AnswerGenerationResult,
+        structured_result: QAAnswerResult | VersionCompareResult | WorkflowGenerationResult,
+    ) -> str:
+        if intent in {"document_qa", "topic_qa"}:
+            if answer_result.insufficient_evidence:
+                return f"候选分块 {len(candidate_chunks)} 个，但证据不足，未确认正式引用。"
+            return f"候选分块 {len(candidate_chunks)} 个，最终选中 {len(selected_chunks)} 条引用。"
+        if intent == "version_compare":
+            return "基于版本 diff 与摘要结果完成证据校验。"
+        if intent == "workflow_generation":
+            if getattr(structured_result, "refusal_reason", None):
+                return "会话上下文不足，未继续生成结构化结果。"
+            return "基于当前会话内容完成结构化结果生成前检查。"
+        return "未进入证据校验阶段。"
+
+    @staticmethod
+    def _summarize_answer_generation(
+        structured_result: QAAnswerResult | VersionCompareResult | WorkflowGenerationResult,
+        answer_result: AnswerGenerationResult,
+    ) -> str:
+        answer_type = getattr(structured_result, "answer_type", "unknown")
+        refusal_reason = getattr(structured_result, "refusal_reason", None)
+        if refusal_reason:
+            return f"生成 {answer_type}，原因：{refusal_reason}"
+        return f"生成 {answer_type}，confidence={getattr(structured_result, 'confidence', None) or 'n/a'}"
 
     @staticmethod
     def _refusal_generation_result(*, answer: str, refusal_reason: str, router_result: RouterDecisionResult) -> AnswerGenerationResult:
@@ -555,6 +864,29 @@ class CopilotOrchestrator:
             preview=chunk.preview,
             fused_score=chunk.score.fused,
         )
+
+
+def _workflow_tool_name(artifact_type: str | None) -> str:
+    if artifact_type == "tasks":
+        return TOOL_EXTRACT_TODOS
+    if artifact_type == "weekly_report":
+        return TOOL_GENERATE_WEEKLY_REPORT
+    if artifact_type == "faq":
+        return TOOL_GENERATE_FAQ
+    return "none"
+
+
+def _looks_like_followup_question(question: str) -> bool:
+    lowered = question.casefold()
+    markers = ("刚才", "上一个", "上一轮", "继续", "这个文档", "这份文档", "那份文档", "这个手册", "这份手册")
+    return any(marker in lowered for marker in markers)
+
+
+def _truncate(value: str, limit: int) -> str:
+    compact = " ".join(value.strip().split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3].rstrip() + "..."
 
 
 

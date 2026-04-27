@@ -152,6 +152,15 @@ export interface SearchDebugInfo {
   fusion_strategy: string;
 }
 
+export interface AgentStepRead {
+  name: "query_analysis" | "tool_selection" | "tool_execution" | "evidence_review" | "answer_generation";
+  input_summary: string;
+  output_summary: string;
+  status: "completed" | "skipped" | "refused" | string;
+  tool_name: string | null;
+  metadata: Record<string, unknown>;
+}
+
 export interface ChatCitationRead {
   id: string;
   message_id: string;

@@ -185,8 +185,32 @@ const REFUSAL_REASON_LABELS: Record<string, string> = {
   unsupported_or_unclear: "问题不明确或暂不支持",
   unsupported_or_unclear_workflow_request: "无法判断要生成哪类结果",
   missing_session_context: "缺少可用于生成结果的会话上下文",
+  insufficient_session_context_for_workflow: "当前会话缺少足够稳定的问答结果",
   insufficient_versions_for_compare: "可比较的版本数量不足",
   unable_to_resolve_version_pair: "无法解析要比较的版本",
+};
+
+const AGENT_STEP_LABELS: Record<string, string> = {
+  query_analysis: "query_analysis",
+  tool_selection: "tool_selection",
+  tool_execution: "tool_execution",
+  evidence_review: "evidence_review",
+  answer_generation: "answer_generation",
+};
+
+const AGENT_STEP_STATUS_LABELS: Record<string, string> = {
+  completed: "已完成",
+  skipped: "已跳过",
+  refused: "已拒绝",
+};
+
+const TOOL_NAME_LABELS: Record<string, string> = {
+  search_docs: "search_docs",
+  compare_versions: "compare_versions",
+  extract_todos: "extract_todos",
+  generate_weekly_report: "generate_weekly_report",
+  generate_faq: "generate_faq",
+  none: "none",
 };
 
 export function formatCopilotIntent(value: string | null | undefined): string {
@@ -208,5 +232,26 @@ export function formatRefusalReason(value: string | null | undefined): string {
     return "-";
   }
   return REFUSAL_REASON_LABELS[value] ?? value;
+}
+
+export function formatAgentStepName(value: string | null | undefined): string {
+  if (!value) {
+    return "unknown_step";
+  }
+  return AGENT_STEP_LABELS[value] ?? value;
+}
+
+export function formatAgentStepStatus(value: string | null | undefined): string {
+  if (!value) {
+    return "-";
+  }
+  return AGENT_STEP_STATUS_LABELS[value] ?? value;
+}
+
+export function formatToolName(value: string | null | undefined): string {
+  if (!value) {
+    return "none";
+  }
+  return TOOL_NAME_LABELS[value] ?? value;
 }
 

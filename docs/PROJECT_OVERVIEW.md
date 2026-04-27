@@ -1,7 +1,7 @@
 # 权限感知的 RAG 企业文档知识助手：项目概览
 
 ## 项目一句话
-面向企业知识库的文档应用，重点支持权限感知检索、引用问答、版本对比、结构化结果生成和基础评测追踪。
+面向企业知识库的文档应用，重点支持权限感知检索、引用问答、版本对比、工具调用、结构化结果生成和基础评测追踪。
 
 ## 补充界面
 <p align="center">
@@ -21,6 +21,7 @@
 - 基于 PostgreSQL FTS + pgvector 的权限感知混合检索
 - 带 citation、confidence 和拒答策略的 grounded chat
 - 会话与消息历史持久化
+- 固定步骤流下的工具调用轨迹与轻量上下文复用
 - 工作流产物：待办提取、周报草稿、FAQ 草稿
 - 文档版本 diff：原始 diff、摘要、影响提示
 - Eval 服务与权限隔离测试
@@ -48,6 +49,7 @@
 - 问答作为入口，会话结果还可继续生成待办、周报草稿和 FAQ 草稿
 - 当前版本既支持当前文档问答，也支持版本 diff 与变更摘要
 - Eval 和 trace 会保留链路结果，便于排查问题和做回归验证
+- 前端可直接展开查看处理轨迹，确认当前请求的工具选择与执行结果
 
 ## 核心设计
 ### 权限感知检索
@@ -70,6 +72,12 @@
 - 支持从问答会话提取待办
 - 支持生成周报草稿
 - 支持生成 FAQ 草稿
+
+### 最小 Agent 化编排
+- 使用固定步骤流组织问答与工作流请求：`query_analysis -> tool_selection -> tool_execution -> evidence_review -> answer_generation`
+- 工具调用对外统一展示为 `search_docs / compare_versions / extract_todos / generate_weekly_report / generate_faq`
+- 多轮追问会复用上一轮目标文档、上一轮工具和上一轮结果类型
+- 该实现强调可解释性、可追踪性和回归验证，不等价于开放式自治 Agent 或 MultiAgent 平台
 
 ### 评测与追踪
 - Eval 支持 retrieval、citation、faithfulness、permission isolation 等指标

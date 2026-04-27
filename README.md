@@ -1,6 +1,6 @@
 # 权限感知的 RAG 企业文档知识助手
 
-面向企业知识库的权限感知 RAG 应用，支持多角色访问控制、引用溯源、版本对比与结构化工作流生成。
+面向企业知识库的权限感知 RAG 应用，支持多角色访问控制、引用溯源、版本对比、工具调用与结构化工作流生成。
 
 ## 界面预览
 <p align="center">
@@ -24,6 +24,8 @@
 当前版本包括以下能力：
 - 权限感知检索：无权限文档不会进入候选集
 - 引用式问答：回答与引用来源分开返回
+- 工具调用与处理轨迹：显式展示 query 分析、工具选择、工具执行、证据校验与结果生成
+- 轻量上下文复用：保留最近多轮消息，并复用上一轮目标文档、工具与结果类型
 - 版本对比：支持原始 diff、差异摘要和影响提示
 - 结构化工作流：支持待办、周报草稿、FAQ 草稿生成
 - 评测与链路追踪：支持效果验证与 trace 记录
@@ -35,6 +37,7 @@
 - 文档级 ACL：支持 `public / user / role / team`
 - 基于 PostgreSQL FTS + pgvector 的权限感知混合检索
 - 引用式问答：回答、citation、confidence、证据不足兜底
+- Agent-like 编排：固定步骤流下的工具选择、执行轨迹和上下文复用
 - 派生工作流：
   - 待办提取
   - 周报草稿生成
@@ -51,6 +54,8 @@
 ## 设计重点
 - 权限过滤在检索阶段生效，候选集、citation 和 prompt 都只基于可访问文档
 - 回答与 citation 分开返回，前端可以单独展示来源片段和定位信息
+- 工具调用采用显式编排而非开放式自治循环，便于约束行为、展示轨迹和补充回归测试
+- 多轮追问可复用上一轮目标文档、上一轮工具和结果类型，但不引入长期 memory 或额外状态表
 - 会话结果可以继续派生成待办、周报草稿和 FAQ 草稿
 - 版本对比同时保留原始 diff、摘要和影响提示
 - 评测与 trace 数据落库，便于复现问题和回看链路
@@ -62,8 +67,9 @@ flowchart LR
     FE --> API["FastAPI 后端"]
     API --> AUTH["认证 / ACL"]
     API --> INGEST["文档摄取"]
+    API --> ROUTER["意图路由 / 上下文复用"]
     API --> RET["权限感知检索"]
-    API --> CHAT["Grounded 问答"]
+    API --> CHAT["Grounded 问答 / 工具调用"]
     API --> TASKS["待办 / 周报 / FAQ"]
     API --> DIFF["版本 Diff"]
     API --> EVAL["评测服务"]
@@ -71,6 +77,7 @@ flowchart LR
     AUTH --> PG[("PostgreSQL + pgvector")]
     INGEST --> FILES["本地文件存储"]
     INGEST --> PG
+    ROUTER --> PG
     RET --> PG
     CHAT --> PG
     TASKS --> PG
@@ -116,6 +123,7 @@ docker-compose.yml
 - 文档上传、解析、切块、向量化、索引
 - 权限感知混合检索
 - citation grounding 问答与会话历史
+- 显式工具调用步骤流与轻量上下文复用
 - 待办提取 / 周报草稿 / FAQ 草稿
 - 文档版本上传、版本对比与摘要
 - Eval 服务与 demo case
@@ -136,6 +144,17 @@ docker-compose.yml
 - 提供 `seed_demo_data.py` 用于初始化演示知识库、版本和权限数据
 - 仓库包含 chat、search、ACL、version、workflow、eval、observability 等后端测试用例
 - 已覆盖 `admin / manager / viewer` 三类角色的演示与回归验证，并补充 `viewer2` 作为团队权限演示账号
+- 当前后端测试已覆盖 `agent_steps` 生成、版本对比工具调用、待办/周报工作流触发、无权限追问拒答与证据不足阻断结构化生成等场景
+
+## 最小 Agent 化改造说明
+当前版本没有引入 LangGraph、AutoGen 或多智能体框架，而是在现有 RAG 链路上补充了一层轻量编排：
+
+- 固定步骤流：`query_analysis -> tool_selection -> tool_execution -> evidence_review -> answer_generation`
+- 对外工具名统一为 `search_docs / compare_versions / extract_todos / generate_weekly_report / generate_faq`
+- assistant 消息 metadata 与 trace 中会保留 `agent_steps`
+- 前端可展开查看“处理轨迹”，直接看到当前问题的工具选择、执行结果和拒答原因
+
+这意味着当前项目更适合描述为“具备工具调用、多步骤处理和上下文复用能力的 RAG 知识助手”，而不是开放式自治 Agent 系统。
 
 ## 评测结果
 

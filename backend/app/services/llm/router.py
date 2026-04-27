@@ -9,6 +9,7 @@ from uuid import UUID
 
 from app.core.config import get_settings
 from app.schemas.llm import RouterAccessibleDocument, RouterDecision, RouterDecisionResult
+from app.services.chat.memory import ConversationMemory
 from app.services.llm.openai_compatible import (
     create_openai_compatible_client,
     has_openai_compatible_credentials,
@@ -57,17 +58,29 @@ class _ResolvedAccessibleDocument:
 
 
 class RouterProvider(Protocol):
-    def route(self, *, question: str, accessible_documents: list[RouterAccessibleDocument]) -> RouterDecisionResult: ...
+    def route(
+        self,
+        *,
+        question: str,
+        accessible_documents: list[RouterAccessibleDocument],
+        conversation_context: ConversationMemory | None = None,
+    ) -> RouterDecisionResult: ...
 
 
 class DeterministicRouterProvider:
     provider_name = "deterministic-router"
     model_name = "router-fallback-v1"
 
-    def route(self, *, question: str, accessible_documents: list[RouterAccessibleDocument]) -> RouterDecisionResult:
+    def route(
+        self,
+        *,
+        question: str,
+        accessible_documents: list[RouterAccessibleDocument],
+        conversation_context: ConversationMemory | None = None,
+    ) -> RouterDecisionResult:
         started = time.perf_counter()
         lowered = question.strip().lower()
-        decision = self._route(question, accessible_documents)
+        decision = self._route(question, accessible_documents, conversation_context)
         return RouterDecisionResult(
             decision=decision,
             provider_name=self.provider_name,
@@ -75,10 +88,18 @@ class DeterministicRouterProvider:
             prompt_tokens=max(len(question) // 4, 1),
             completion_tokens=max(len(decision.reasoning_brief) // 4, 1),
             latency_ms=int((time.perf_counter() - started) * 1000),
-            raw_payload={"lowered_question": lowered},
+            raw_payload={
+                "lowered_question": lowered,
+                "conversation_context": conversation_context.to_router_context() if conversation_context else None,
+            },
         )
 
-    def _route(self, question: str, accessible_documents: list[RouterAccessibleDocument]) -> RouterDecision:
+    def _route(
+        self,
+        question: str,
+        accessible_documents: list[RouterAccessibleDocument],
+        conversation_context: ConversationMemory | None,
+    ) -> RouterDecision:
         lowered = question.strip().lower()
         stripped = question.strip()
         if not lowered or UNSUPPORTED_PATTERNS.match(stripped) or len(re.sub(r"[\\s？?！!。,.…]", "", stripped)) <= 2:
@@ -98,20 +119,28 @@ class DeterministicRouterProvider:
             )
 
         if any(pattern in lowered for pattern in VERSION_COMPARE_PATTERNS):
-            matched_document = _match_accessible_document(question, accessible_documents)
+            matched_document = _match_accessible_document(question, accessible_documents) or _match_context_document(
+                question,
+                accessible_documents,
+                conversation_context,
+            )
             return RouterDecision(
                 intent="version_compare",
                 target_document_id=matched_document.document_id if matched_document else None,
                 target_document_title=matched_document.title if matched_document else None,
-                requested_document_name=_extract_requested_document_name(question),
+                requested_document_name=_resolve_requested_document_name(question, conversation_context),
                 from_version_ref=_extract_version_ref(question, prefer="from"),
                 to_version_ref=_extract_version_ref(question, prefer="to"),
                 needs_citations=False,
-                should_refuse_if_inaccessible=matched_document is None and _looks_like_document_request(question),
+                should_refuse_if_inaccessible=matched_document is None and _looks_like_document_request(question, conversation_context),
                 reasoning_brief="问题询问版本变化或差异，适合进入版本对比工具。",
             )
 
-        matched_document = _match_accessible_document(question, accessible_documents)
+        matched_document = _match_accessible_document(question, accessible_documents) or _match_context_document(
+            question,
+            accessible_documents,
+            conversation_context,
+        )
         if matched_document:
             return RouterDecision(
                 intent="document_qa",
@@ -123,7 +152,7 @@ class DeterministicRouterProvider:
                 reasoning_brief="问题明确指向一个当前可访问的具体文档。",
             )
 
-        requested_document_name = _extract_requested_document_name(question)
+        requested_document_name = _resolve_requested_document_name(question, conversation_context)
         if requested_document_name:
             return RouterDecision(
                 intent="document_qa",
@@ -148,7 +177,13 @@ class OpenAIRouterProvider:
         self.settings = get_settings()
         self.model_name = self.settings.effective_llm_router_model
 
-    def route(self, *, question: str, accessible_documents: list[RouterAccessibleDocument]) -> RouterDecisionResult:
+    def route(
+        self,
+        *,
+        question: str,
+        accessible_documents: list[RouterAccessibleDocument],
+        conversation_context: ConversationMemory | None = None,
+    ) -> RouterDecisionResult:
         started = time.perf_counter()
         client = create_openai_compatible_client(self.settings)
         response = client.chat.completions.create(
@@ -159,7 +194,7 @@ class OpenAIRouterProvider:
                 {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
                 {
                     "role": "user",
-                    "content": self._build_user_prompt(question, accessible_documents),
+                    "content": self._build_user_prompt(question, accessible_documents, conversation_context),
                 },
             ],
         )
@@ -178,7 +213,11 @@ class OpenAIRouterProvider:
         )
 
     @staticmethod
-    def _build_user_prompt(question: str, accessible_documents: list[RouterAccessibleDocument]) -> str:
+    def _build_user_prompt(
+        question: str,
+        accessible_documents: list[RouterAccessibleDocument],
+        conversation_context: ConversationMemory | None,
+    ) -> str:
         accessible_json = json.dumps(
             [
                 {"document_id": str(item.document_id), "title": item.title}
@@ -186,9 +225,12 @@ class OpenAIRouterProvider:
             ],
             ensure_ascii=False,
         )
+        context_block = conversation_context.to_router_context() if conversation_context else "No prior conversation context."
         return (
             "User question:\n"
             f"{question}\n\n"
+            "Conversation context:\n"
+            f"{context_block}\n\n"
             "Currently accessible documents (choose target_document_id/title only from this list when applicable):\n"
             f"{accessible_json}\n\n"
             "Return JSON with keys: intent, target_document_id, target_document_title, requested_document_name, topic, artifact_type, from_version_ref, to_version_ref, needs_citations, should_refuse_if_inaccessible, reasoning_brief."
@@ -199,8 +241,18 @@ class LLMRouterService:
     def __init__(self) -> None:
         self.provider = RouterProviderFactory.create()
 
-    def route(self, *, question: str, accessible_documents: list[RouterAccessibleDocument]) -> RouterDecisionResult:
-        return self.provider.route(question=question, accessible_documents=accessible_documents)
+    def route(
+        self,
+        *,
+        question: str,
+        accessible_documents: list[RouterAccessibleDocument],
+        conversation_context: ConversationMemory | None = None,
+    ) -> RouterDecisionResult:
+        return self.provider.route(
+            question=question,
+            accessible_documents=accessible_documents,
+            conversation_context=conversation_context,
+        )
 
 
 class RouterProviderFactory:
@@ -306,6 +358,18 @@ def _match_accessible_document(question: str, accessible_documents: list[RouterA
     return _ResolvedAccessibleDocument(document_id=best.document_id, title=best.title)
 
 
+def _match_context_document(
+    question: str,
+    accessible_documents: list[RouterAccessibleDocument],
+    conversation_context: ConversationMemory | None,
+) -> _ResolvedAccessibleDocument | None:
+    if conversation_context is None or not conversation_context.previous_target_document:
+        return None
+    if not _looks_like_followup_document_reference(question):
+        return None
+    return _resolve_document_title(conversation_context.previous_target_document, accessible_documents)
+
+
 
 def _extract_requested_document_name(question: str) -> str | None:
     patterns = [
@@ -322,6 +386,15 @@ def _extract_requested_document_name(question: str) -> str | None:
     if _looks_like_document_request(question):
         compact = question.strip().strip("？?。.! ")
         return compact[:40]
+    return None
+
+
+def _resolve_requested_document_name(question: str, conversation_context: ConversationMemory | None) -> str | None:
+    extracted = _extract_requested_document_name(question)
+    if extracted:
+        return extracted
+    if conversation_context and conversation_context.previous_target_document and _looks_like_followup_document_reference(question):
+        return conversation_context.previous_target_document
     return None
 
 
@@ -344,11 +417,34 @@ def _extract_version_ref(question: str, *, prefer: str) -> str | None:
 
 
 
-def _looks_like_document_request(question: str) -> bool:
+def _looks_like_document_request(question: str, conversation_context: ConversationMemory | None = None) -> bool:
     lowered = question.casefold()
     if any(token in lowered for token in DOCUMENT_HINT_TOKENS):
         return True
+    if conversation_context and conversation_context.previous_target_document and _looks_like_followup_document_reference(question):
+        return True
     return bool(re.search(r"里.*(怎么说|写了什么|要求什么|改了什么)", question))
+
+
+def _looks_like_followup_document_reference(question: str) -> bool:
+    lowered = question.casefold()
+    markers = (
+        "这个文档",
+        "这份文档",
+        "刚才那个文档",
+        "刚才那份文档",
+        "上一份文档",
+        "上一个文档",
+        "那个文档",
+        "那份文档",
+        "这个手册",
+        "这份手册",
+        "这个指南",
+        "这份指南",
+        "那个手册",
+        "那份手册",
+    )
+    return any(marker in lowered for marker in markers)
 
 
 
@@ -366,6 +462,19 @@ def _strip_document_suffixes(text: str) -> str:
         if stripped.endswith(suffix):
             stripped = stripped[: -len(suffix)].strip()
     return stripped
+
+
+def _resolve_document_title(title: str, accessible_documents: list[RouterAccessibleDocument]) -> _ResolvedAccessibleDocument | None:
+    lowered = title.casefold()
+    normalized = _normalize_text(title)
+    stripped = _strip_document_suffixes(normalized)
+    for document in accessible_documents:
+        document_title = document.title.casefold()
+        document_normalized = _normalize_text(document.title)
+        document_stripped = _strip_document_suffixes(document_normalized)
+        if lowered == document_title or normalized == document_normalized or (stripped and stripped == document_stripped):
+            return _ResolvedAccessibleDocument(document_id=document.document_id, title=document.title)
+    return None
 
 
 

@@ -1,12 +1,12 @@
 # 权限感知的 RAG 企业文档知识助手：技术链路说明
 
-本文档说明当前项目中 RAG 链路的实现方式，以及权限过滤、文档解析、切块、向量化、混合检索、citation 和拒答策略在链路中的位置。
+本文档说明当前项目中 RAG 链路的实现方式，以及权限过滤、文档解析、切块、向量化、混合检索、citation、工具调用和拒答策略在链路中的位置。
 
 ## 概述
 该 RAG 流程不会将整篇文档直接提交给模型，而是先将文档整理为可检索、可引用、可追溯的片段，再基于当前用户有权限访问的证据生成回答。
 
 ## 完整链路
-整条链路可分为 5 个阶段：
+整条链路可分为 6 个阶段：
 
 1. 文档解析
    - 支持 `TXT / Markdown / HTML / PDF / DOCX`
@@ -23,15 +23,22 @@
    - embedding 写入 pgvector，用于语义检索
    - 摄取阶段一次完成解析、切块、向量化和入库
 
-4. 权限感知检索
+4. 意图路由与轻量上下文复用
+   - 先读取最近多轮消息
+   - 更早历史压缩为摘要
+   - 复用上一轮目标文档、上一轮工具和上一轮结果类型
+   - 判断当前请求属于文档问答、主题问答、版本对比还是结构化结果生成
+
+5. 权限感知检索
    - 先根据当前用户的 `user / role / team / ACL` 算出可访问文档集合
    - lexical retrieval 和 vector retrieval 都只在可访问范围内执行
    - 两路结果做 score fusion，得到最终候选 chunk
 
-5. 引用式问答
+6. 引用式问答 / 结构化结果生成
    - 回答基于检索结果生成
    - 回答和 citation 分开返回
    - 如果证据不足，系统会拒答，不继续拼凑答案
+   - 如果是待办、周报、FAQ 请求，则改走对应工具链路
 
 ## 为什么权限过滤必须前置
 当前项目将权限过滤纳入检索链路本身，而不是在最终展示阶段再做结果过滤。
@@ -90,6 +97,30 @@ citation 会记录：
 - 调试与评测
 - 审计与可追踪性
 
+## 工具调用与处理轨迹
+当前版本没有引入 LangGraph、AutoGen 或开放式 agent loop，而是采用显式编排的工具调用链路。
+
+固定步骤包括：
+- `query_analysis`
+- `tool_selection`
+- `tool_execution`
+- `evidence_review`
+- `answer_generation`
+
+这些步骤会同时写入：
+- assistant 消息 metadata
+- observability trace extra metadata
+- 前端“处理轨迹”面板
+
+当前对外工具名统一为：
+- `search_docs`
+- `compare_versions`
+- `extract_todos`
+- `generate_weekly_report`
+- `generate_faq`
+
+这种实现更接近“带工具调用和上下文复用的 RAG 编排层”，而不是开放式自治 Agent 系统。
+
 ## 拒答与可靠性策略
 项目不会在证据不足时强行生成回答，而是增加了多层可靠性约束：
 - 证据不足拒答：没有足够相关 chunk 时拒答
@@ -130,4 +161,5 @@ citation 会记录：
 2. 每个 chunk 都带定位元数据，方便 citation 和回溯。
 3. PostgreSQL FTS + pgvector 的 hybrid retrieval，不依赖单一路径检索。
 4. 权限过滤前置到检索链路中，避免无权限内容进入候选集和 prompt。
-5. 回答结果带 citation，并配套 eval 和 trace，方便分析链路质量。
+5. 增加显式工具调用步骤流与轻量上下文复用，便于前端展示、链路追踪和回归验证。
+6. 回答结果带 citation，并配套 eval 和 trace，方便分析链路质量。

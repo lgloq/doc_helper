@@ -104,6 +104,20 @@ def _send_question(client: TestClient, token: str, session_id: str, content: str
     return response.json()
 
 
+def _agent_steps(payload: dict) -> list[dict]:
+    metadata = payload["assistant_message"]["message_metadata"]
+    steps = metadata.get("agent_steps")
+    assert isinstance(steps, list)
+    return steps
+
+
+def _find_step(payload: dict, name: str) -> dict:
+    for step in _agent_steps(payload):
+        if step["name"] == name:
+            return step
+    raise AssertionError(f"missing agent step: {name}")
+
+
 
 def _seed_roles_and_users(db_session: Session) -> tuple[Role, Role, Role]:
     viewer_role = Role(name=RoleName.VIEWER, description="Viewer")
@@ -143,10 +157,18 @@ def test_chat_roundtrip_persists_history_and_targeted_citations(client: TestClie
     assert payload["citations"]
     assert payload["citations"][0]["document_title"] == "客户事故响应指南"
     metadata = payload["assistant_message"]["message_metadata"]
+    steps = _agent_steps(payload)
     assert metadata["router_decision"]["intent"] == "document_qa"
     assert metadata["router_decision"]["target_document_title"] == "客户事故响应指南"
-    assert metadata["tool_execution"]["tool_name"] == "get_document_context"
+    assert metadata["tool_execution"]["tool_name"] == "search_docs"
     assert metadata["structured_result"]["answer_type"] == "grounded_answer"
+    assert [step["name"] for step in steps] == [
+        "query_analysis",
+        "tool_selection",
+        "tool_execution",
+        "evidence_review",
+        "answer_generation",
+    ]
 
     detail_response = client.get(
         f"/api/v1/chat/sessions/{session_id}",
@@ -252,7 +274,7 @@ def test_topic_qa_uses_accessible_search_without_explicit_title(client: TestClie
     assert payload["citations"][0]["document_title"] == "员工手册"
     assert "登记" in payload["assistant_message"]["content"]
     assert metadata["router_decision"]["intent"] in {"topic_qa", "document_qa"}
-    assert metadata["tool_execution"]["tool_name"] in {"search_accessible_documents", "get_document_context"}
+    assert metadata["tool_execution"]["tool_name"] == "search_docs"
 
 
 
@@ -277,13 +299,22 @@ def test_version_compare_routes_to_compare_tool(client: TestClient, db_session: 
     session_id = _create_session(client, admin_token)
     payload = _send_question(client, admin_token, session_id, "比较平台发布手册 v1 和 v2 的差异")
     metadata = payload["assistant_message"]["message_metadata"]
+    steps = _agent_steps(payload)
 
     assert payload["assistant_message"]["insufficient_evidence"] is False
     assert payload["citations"] == []
     assert metadata["router_decision"]["intent"] == "version_compare"
-    assert metadata["tool_execution"]["tool_name"] == "compare_document_versions"
+    assert metadata["tool_execution"]["tool_name"] == "compare_versions"
     assert metadata["structured_result"]["summary"]
     assert metadata["structured_result"]["additions"] or metadata["structured_result"]["modifications"]
+    assert [step["name"] for step in steps] == [
+        "query_analysis",
+        "tool_selection",
+        "tool_execution",
+        "evidence_review",
+        "answer_generation",
+    ]
+    assert _find_step(payload, "tool_execution")["tool_name"] == "compare_versions"
 
 
 
@@ -302,21 +333,27 @@ def test_workflow_generation_routes_to_session_artifact_tools(client: TestClient
     first_qa = _send_question(client, admin_token, session_id, "平台发布检查清单要求什么？")
     assert first_qa["assistant_message"]["insufficient_evidence"] is False
 
-    task_payload = _send_question(client, admin_token, session_id, "从这段对话提取待办")
+    task_payload = _send_question(client, admin_token, session_id, "把刚才整理成待办")
     task_metadata = task_payload["assistant_message"]["message_metadata"]
     assert task_metadata["router_decision"]["intent"] == "workflow_generation"
+    assert task_metadata["tool_execution"]["tool_name"] == "extract_todos"
     assert task_metadata["structured_result"]["artifact_type"] == "tasks"
+    assert _find_step(task_payload, "tool_execution")["tool_name"] == "extract_todos"
 
-    report_payload = _send_question(client, admin_token, session_id, "帮我生成周报")
+    report_payload = _send_question(client, admin_token, session_id, "生成周报")
     report_metadata = report_payload["assistant_message"]["message_metadata"]
     assert report_metadata["router_decision"]["intent"] == "workflow_generation"
+    assert report_metadata["tool_execution"]["tool_name"] == "generate_weekly_report"
     assert report_metadata["structured_result"]["artifact_type"] == "weekly_report"
     assert "周报草稿" in report_payload["assistant_message"]["content"]
+    assert _find_step(report_payload, "tool_execution")["tool_name"] == "generate_weekly_report"
 
     faq_payload = _send_question(client, admin_token, session_id, "生成 FAQ 草稿")
     faq_metadata = faq_payload["assistant_message"]["message_metadata"]
     assert faq_metadata["router_decision"]["intent"] == "workflow_generation"
+    assert faq_metadata["tool_execution"]["tool_name"] == "generate_faq"
     assert faq_metadata["structured_result"]["artifact_type"] == "faq"
+    assert _find_step(faq_payload, "tool_execution")["tool_name"] == "generate_faq"
 
     reports_response = client.get(
         "/api/v1/reports",
@@ -353,4 +390,66 @@ def test_unsupported_or_unclear_returns_structured_refusal(client: TestClient, d
     assert metadata["router_decision"]["intent"] == "unsupported_or_unclear"
     assert metadata["structured_result"]["answer_type"] == "refusal"
     assert metadata["structured_result"]["refusal_reason"] == "unsupported_or_unclear"
+
+
+def test_followup_on_inaccessible_document_still_refuses_with_context_reuse(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    viewer_token = _login(client, "viewer@example.com", "viewer-pass")
+
+    _upload_and_ingest(
+        client,
+        admin_token,
+        "安全例外登记",
+        "安全例外登记要求：必须记录例外原因、影响范围、补偿控制、审批人和到期时间。",
+    )
+
+    session_id = _create_session(client, viewer_token)
+    first_payload = _send_question(client, viewer_token, session_id, "《安全例外登记》里对补偿控制有什么要求？")
+    assert first_payload["assistant_message"]["insufficient_evidence"] is True
+
+    followup_payload = _send_question(client, viewer_token, session_id, "那这个文档的审批人是谁？")
+    followup_metadata = followup_payload["assistant_message"]["message_metadata"]
+    query_step = _find_step(followup_payload, "query_analysis")
+
+    assert followup_payload["assistant_message"]["insufficient_evidence"] is True
+    assert followup_payload["citations"] == []
+    assert "安全例外登记" not in followup_payload["assistant_message"]["content"]
+    assert followup_metadata["router_decision"]["intent"] == "document_qa"
+    assert followup_metadata["tool_execution"]["tool_name"] == "search_docs"
+    assert followup_metadata["tool_execution"]["tool_input"]["target_document"] == "安全例外登记"
+    assert followup_metadata["structured_result"]["refusal_reason"] == "target_document_not_accessible_or_not_found"
+    assert "复用了上一轮对话上下文" in query_step["output_summary"]
+    assert query_step["metadata"]["previous_target_document"] == "安全例外登记"
+
+
+def test_insufficient_evidence_does_not_force_workflow_generation(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    viewer_token = _login(client, "viewer@example.com", "viewer-pass")
+
+    _upload_and_ingest(
+        client,
+        admin_token,
+        "安全例外登记",
+        "安全例外登记要求：必须记录例外原因、影响范围、补偿控制、审批人和到期时间。",
+    )
+
+    session_id = _create_session(client, viewer_token)
+    refusal_payload = _send_question(client, viewer_token, session_id, "《安全例外登记》里对补偿控制有什么要求？")
+    assert refusal_payload["assistant_message"]["insufficient_evidence"] is True
+
+    workflow_payload = _send_question(client, viewer_token, session_id, "生成周报")
+    workflow_metadata = workflow_payload["assistant_message"]["message_metadata"]
+    tool_step = _find_step(workflow_payload, "tool_execution")
+    evidence_step = _find_step(workflow_payload, "evidence_review")
+
+    assert workflow_payload["assistant_message"]["insufficient_evidence"] is True
+    assert workflow_metadata["router_decision"]["intent"] == "workflow_generation"
+    assert workflow_metadata["tool_execution"]["tool_name"] == "generate_weekly_report"
+    assert workflow_metadata["structured_result"]["answer_type"] == "refusal"
+    assert workflow_metadata["structured_result"]["artifact_type"] is None
+    assert workflow_metadata["structured_result"]["refusal_reason"] == "insufficient_session_context_for_workflow"
+    assert tool_step["status"] == "skipped"
+    assert evidence_step["status"] == "refused"
 

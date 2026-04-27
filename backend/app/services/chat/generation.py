@@ -38,6 +38,7 @@ class AnswerGenerator(Protocol):
         question: str,
         retrieved_chunks: list[SearchResultChunk],
         history_lines: list[str],
+        conversation_context: str | None = None,
         allow_low_score: bool = False,
     ) -> AnswerGenerationResult: ...
 
@@ -52,6 +53,7 @@ class DeterministicAnswerGenerator:
         question: str,
         retrieved_chunks: list[SearchResultChunk],
         history_lines: list[str],
+        conversation_context: str | None = None,
         allow_low_score: bool = False,
     ) -> AnswerGenerationResult:
         started = time.perf_counter()
@@ -124,7 +126,11 @@ class DeterministicAnswerGenerator:
             prompt_tokens=max((len(question) + sum(len(chunk.content) for chunk in selected_chunks)) // 4, 1),
             completion_tokens=max(len(answer) // 4, 1),
             latency_ms=int((time.perf_counter() - started) * 1000),
-            raw_payload={"history_lines": history_lines, "allow_low_score": allow_low_score},
+            raw_payload={
+                "history_lines": history_lines,
+                "conversation_context": conversation_context,
+                "allow_low_score": allow_low_score,
+            },
         )
 
 
@@ -141,13 +147,14 @@ class OpenAIAnswerGenerator:
         question: str,
         retrieved_chunks: list[SearchResultChunk],
         history_lines: list[str],
+        conversation_context: str | None = None,
         allow_low_score: bool = False,
     ) -> AnswerGenerationResult:
         started = time.perf_counter()
         client = create_openai_compatible_client(self.settings)
         response = client.chat.completions.create(
             model=self.model_name,
-            messages=build_grounded_messages(question, retrieved_chunks, history_lines),
+            messages=build_grounded_messages(question, retrieved_chunks, history_lines, context_summary=conversation_context),
             temperature=0.1,
             response_format={"type": "json_object"},
         )

@@ -19,12 +19,16 @@ def build_grounded_messages(
     question: str,
     retrieved_chunks: Sequence[SearchResultChunk],
     history_lines: Sequence[str],
+    context_summary: str | None = None,
 ) -> list[dict[str, str]]:
     history_block = "\n".join(history_lines) if history_lines else "No prior chat history."
+    context_block = context_summary or "No earlier conversation context."
     evidence_block = "\n\n".join(_format_chunk(chunk) for chunk in retrieved_chunks)
     user_prompt = (
         "User question:\n"
         f"{question}\n\n"
+        "Conversation context:\n"
+        f"{context_block}\n\n"
         "Recent chat history:\n"
         f"{history_block}\n\n"
         "Evidence snippets:\n"
