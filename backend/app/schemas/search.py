@@ -15,6 +15,7 @@ class SearchScoreBreakdown(BaseModel):
     vector_raw: float
     vector_normalized: float
     fused: float
+    rerank: float | None = None
 
 
 class SearchResultChunk(BaseModel):
@@ -43,6 +44,9 @@ class SearchDebugInfo(BaseModel):
     lexical_candidate_count: int
     vector_candidate_count: int
     fusion_strategy: str
+    pre_rerank_count: int = 0
+    post_rerank_count: int = 0
+    rerank_strategy: str = "none"
 
 
 class SearchResponse(BaseModel):

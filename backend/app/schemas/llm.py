@@ -15,6 +15,8 @@ CopilotIntent = Literal[
     "workflow_generation",
     "unsupported_or_unclear",
 ]
+ToolActionType = Literal["tool_call", "final_answer", "refuse"]
+PlannerActionType = Literal["tool_call", "final_answer", "refuse", "ask_clarification"]
 AgentStepName = Literal[
     "query_analysis",
     "tool_selection",
@@ -23,12 +25,21 @@ AgentStepName = Literal[
     "answer_generation",
 ]
 AgentStepStatus = Literal["completed", "skipped", "refused"]
+ToolObservationStatus = Literal["completed", "failed", "skipped", "insufficient_context"]
+EvidenceState = Literal["none", "partial", "sufficient", "insufficient"]
 
 ArtifactType = Literal["tasks", "weekly_report", "faq"]
 QAAnswerType = Literal["grounded_answer", "refusal"]
 VersionCompareAnswerType = Literal["version_compare_result", "refusal"]
 WorkflowAnswerType = Literal["workflow_result", "refusal"]
 ConfidenceLabel = Literal["high", "medium", "low", "insufficient"]
+PublicToolName = Literal[
+    "search_docs",
+    "compare_versions",
+    "extract_todos",
+    "generate_weekly_report",
+    "generate_faq",
+]
 
 
 class RouterAccessibleDocument(BaseModel):
@@ -67,6 +78,52 @@ class AgentStep(BaseModel):
     status: AgentStepStatus
     tool_name: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolPlan(BaseModel):
+    planner_name: str
+    available_tools: list[PublicToolName] = Field(default_factory=list)
+    max_steps: int = 3
+    initial_intent: CopilotIntent
+    requested_artifact_type: ArtifactType | None = None
+    context_summary: str | None = None
+
+
+class PlannerDecision(BaseModel):
+    action_type: PlannerActionType
+    tool_name: str | None = None
+    tool_args: dict[str, Any] = Field(default_factory=dict)
+    reason: str
+    evidence_state: EvidenceState = "none"
+    expected_next: str | None = None
+
+
+class ToolAction(BaseModel):
+    step_index: int
+    action_type: PlannerActionType
+    tool_name: str | None = None
+    tool_args: dict[str, Any] = Field(default_factory=dict)
+    reason: str
+    evidence_state: EvidenceState = "none"
+    expected_next: str | None = None
+    depends_on: list[int] = Field(default_factory=list)
+
+
+class ToolObservation(BaseModel):
+    step_index: int
+    tool_name: str
+    status: ToolObservationStatus
+    output_summary: str
+    evidence_refs: list[str] = Field(default_factory=list)
+    raw_output: dict[str, Any] | None = None
+
+
+class AgentRunTrace(BaseModel):
+    tool_plan: ToolPlan
+    actions: list[ToolAction] = Field(default_factory=list)
+    observations: list[ToolObservation] = Field(default_factory=list)
+    final_status: str
+    final_reason: str | None = None
 
 
 class ToolCitation(BaseModel):

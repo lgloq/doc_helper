@@ -188,6 +188,7 @@ const REFUSAL_REASON_LABELS: Record<string, string> = {
   insufficient_session_context_for_workflow: "当前会话缺少足够稳定的问答结果",
   insufficient_versions_for_compare: "可比较的版本数量不足",
   unable_to_resolve_version_pair: "无法解析要比较的版本",
+  clarification_required: "需要补充更多上下文或约束",
 };
 
 const AGENT_STEP_LABELS: Record<string, string> = {
@@ -253,5 +254,47 @@ export function formatToolName(value: string | null | undefined): string {
     return "none";
   }
   return TOOL_NAME_LABELS[value] ?? value;
+}
+
+const TOOL_ACTION_LABELS: Record<string, string> = {
+  tool_call: "调用工具",
+  final_answer: "生成最终回答",
+  refuse: "拒绝继续执行",
+  ask_clarification: "请求补充信息",
+};
+
+const EVIDENCE_STATE_LABELS: Record<string, string> = {
+  none: "尚无证据",
+  partial: "证据部分具备",
+  sufficient: "证据充分",
+  insufficient: "证据不足",
+};
+
+const TOOL_OBSERVATION_STATUS_LABELS: Record<string, string> = {
+  completed: "已完成",
+  failed: "失败",
+  skipped: "已跳过",
+  insufficient_context: "上下文不足",
+};
+
+export function formatToolActionType(value: string | null | undefined): string {
+  if (!value) {
+    return "-";
+  }
+  return TOOL_ACTION_LABELS[value] ?? value;
+}
+
+export function formatToolObservationStatus(value: string | null | undefined): string {
+  if (!value) {
+    return "-";
+  }
+  return TOOL_OBSERVATION_STATUS_LABELS[value] ?? value;
+}
+
+export function formatEvidenceState(value: string | null | undefined): string {
+  if (!value) {
+    return "-";
+  }
+  return EVIDENCE_STATE_LABELS[value] ?? value;
 }
 

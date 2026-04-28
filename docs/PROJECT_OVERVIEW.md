@@ -18,10 +18,10 @@
 - 支持 `TXT / Markdown / HTML / PDF / DOCX` 文档上传与摄取
 - 本地文件存储与文档版本保留
 - 文档级 ACL：支持 `public / user / role / team`
-- 基于 PostgreSQL FTS + pgvector 的权限感知混合检索
+- 基于 PostgreSQL FTS + pgvector 的权限感知混合检索与候选重排
 - 带 citation、confidence 和拒答策略的 grounded chat
 - 会话与消息历史持久化
-- 固定步骤流下的工具调用轨迹与轻量上下文复用
+- 受控工具调用工作流轨迹与轻量上下文复用
 - 工作流产物：待办提取、周报草稿、FAQ 草稿
 - 文档版本 diff：原始 diff、摘要、影响提示
 - Eval 服务与权限隔离测试
@@ -45,6 +45,7 @@
 
 ## 实现重点
 - 权限过滤发生在检索阶段，候选集、citation 和 prompt 都只来自可访问文档
+- 混合召回后的安全候选会进入轻量 rerank，再选出最终进入回答阶段的 chunk
 - citation 作为结构化字段返回，前端可以单独展示来源片段和定位信息
 - 问答作为入口，会话结果还可继续生成待办、周报草稿和 FAQ 草稿
 - 当前版本既支持当前文档问答，也支持版本 diff 与变更摘要
@@ -73,11 +74,12 @@
 - 支持生成周报草稿
 - 支持生成 FAQ 草稿
 
-### 最小 Agent 化编排
-- 使用固定步骤流组织问答与工作流请求：`query_analysis -> tool_selection -> tool_execution -> evidence_review -> answer_generation`
+### 受控工具调用工作流
+- `router` 只负责粗分类，后续由 LLM planner 根据问题、上下文和 observation 决定下一步 action
 - 工具调用对外统一展示为 `search_docs / compare_versions / extract_todos / generate_weekly_report / generate_faq`
-- 多轮追问会复用上一轮目标文档、上一轮工具和上一轮结果类型
-- 该实现强调可解释性、可追踪性和回归验证，不等价于开放式自治 Agent 或 MultiAgent 平台
+- 工作流按 `observe -> decide -> act` 循环执行，最多 3 步，超过上限后会基于已有 observation 收束为最终回答或拒答
+- 多轮追问会复用上一轮目标文档、上一轮工具、上一轮结果类型和 observation 摘要
+- 该工作流强调受控执行、轨迹可回看和回归验证，适合文档问答、版本对比和结构化结果生成场景
 
 ### 评测与追踪
 - Eval 支持 retrieval、citation、faithfulness、permission isolation 等指标
@@ -91,7 +93,7 @@
 - 需要查看文档版本变更和差异摘要的日常维护场景
 
 ## 后续可扩展方向
-- 在权限安全候选集之后增加 rerank
+- 将当前轻量 rerank 升级为 cross-encoder 或模型重排序
 - 接入 Langfuse / OpenTelemetry 做更完整的观测
 - 将本地文件存储替换为 S3 / MinIO
 - 增加 FAQ 审核流和结果回写

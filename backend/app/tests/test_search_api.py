@@ -137,7 +137,10 @@ def test_search_returns_chat_ready_scores_and_citation_metadata(client: TestClie
     first = payload["matched_chunks"][0]
     assert first["document_id"] == document_id
     assert first["score"]["fused"] >= 0
+    assert first["score"]["rerank"] >= first["score"]["fused"]
     assert first["score"]["lexical_raw"] > 0
     assert first["citation_preview"]["document_title"] == "FAQ Notes"
     assert first["citation_preview"]["chunk_id"]
     assert "paragraph_start" in first
+    assert payload["debug"]["pre_rerank_count"] >= payload["debug"]["post_rerank_count"] >= 1
+    assert payload["debug"]["rerank_strategy"] == "heuristic-overlap"

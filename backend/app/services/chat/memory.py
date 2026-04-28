@@ -17,6 +17,7 @@ class ConversationMemory:
     older_summary: str | None
     previous_target_document: str | None
     previous_tool_name: str | None
+    previous_observation_summary: str | None
     previous_artifact_type: str | None
     previous_intent: str | None
     previous_refusal_reason: str | None
@@ -56,6 +57,8 @@ class ConversationMemory:
             hints.append(f"- previous_target_document: {self.previous_target_document}")
         if self.previous_tool_name:
             hints.append(f"- previous_tool_name: {self.previous_tool_name}")
+        if self.previous_observation_summary:
+            hints.append(f"- previous_observation_summary: {self.previous_observation_summary}")
         if self.previous_artifact_type:
             hints.append(f"- previous_artifact_type: {self.previous_artifact_type}")
         if self.previous_intent:
@@ -77,6 +80,7 @@ def build_conversation_memory(
 
     previous_target_document = None
     previous_tool_name = None
+    previous_observation_summary = None
     previous_artifact_type = None
     previous_intent = None
     previous_refusal_reason = None
@@ -89,6 +93,7 @@ def build_conversation_memory(
         router_decision = metadata.get("router_decision") if isinstance(metadata.get("router_decision"), dict) else {}
         tool_execution = metadata.get("tool_execution") if isinstance(metadata.get("tool_execution"), dict) else {}
         structured_result = metadata.get("structured_result") if isinstance(metadata.get("structured_result"), dict) else {}
+        agent_run_trace = metadata.get("agent_run_trace") if isinstance(metadata.get("agent_run_trace"), dict) else {}
 
         previous_target_document = _first_string(
             structured_result.get("target_document"),
@@ -96,6 +101,7 @@ def build_conversation_memory(
             router_decision.get("requested_document_name"),
         )
         previous_tool_name = _as_string(tool_execution.get("tool_name"))
+        previous_observation_summary = _resolve_previous_observation_summary(agent_run_trace, tool_execution)
         previous_artifact_type = _as_string(structured_result.get("artifact_type"))
         previous_intent = _as_string(router_decision.get("intent"))
         previous_refusal_reason = _as_string(structured_result.get("refusal_reason"))
@@ -109,6 +115,7 @@ def build_conversation_memory(
         older_summary=older_summary,
         previous_target_document=previous_target_document,
         previous_tool_name=previous_tool_name,
+        previous_observation_summary=previous_observation_summary,
         previous_artifact_type=previous_artifact_type,
         previous_intent=previous_intent,
         previous_refusal_reason=previous_refusal_reason,
@@ -168,3 +175,17 @@ def _first_string(*values: object) -> str | None:
         if cleaned:
             return cleaned
     return None
+
+
+def _resolve_previous_observation_summary(
+    agent_run_trace: dict[str, object],
+    tool_execution: dict[str, object],
+) -> str | None:
+    observations = agent_run_trace.get("observations")
+    if isinstance(observations, list):
+        for observation in reversed(observations):
+            if isinstance(observation, dict):
+                summary = _as_string(observation.get("output_summary"))
+                if summary:
+                    return summary
+    return _as_string(tool_execution.get("output_summary"))

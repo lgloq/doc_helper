@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Iterable
 from uuid import UUID
 
@@ -11,20 +10,10 @@ from app.repositories.retrieval_repository import RetrievalCandidate, RetrievalR
 from app.schemas.search import SearchDebugInfo, SearchRequest, SearchResponse, SearchResultChunk, SearchScoreBreakdown
 from app.services.ingestion.embeddings import EmbeddingProviderFactory
 from app.services.permissions.service import PermissionFilterBuilder
+from app.services.retrieval.reranker import HeuristicReranker, RerankCandidate
 
 LEXICAL_WEIGHT = 0.45
 VECTOR_WEIGHT = 0.55
-
-
-@dataclass
-class CombinedCandidate:
-    candidate: RetrievalCandidate
-    lexical_raw: float = 0.0
-    vector_raw: float = 0.0
-    lexical_norm: float = 0.0
-    vector_norm: float = 0.0
-    fused_score: float = 0.0
-    sources: set[str] = field(default_factory=set)
 
 
 class RetrievalService:
@@ -33,6 +22,7 @@ class RetrievalService:
         self.permission_builder = PermissionFilterBuilder()
         self.retrieval_repository = RetrievalRepository(session)
         self.embedding_provider = EmbeddingProviderFactory.create()
+        self.reranker = HeuristicReranker()
 
     def search(self, actor: User, payload: SearchRequest, scoped_document_ids: list[UUID] | None = None) -> SearchResponse:
         accessible_document_ids = self.permission_builder.resolve_accessible_document_ids(self.session, actor, require_manage=False)
@@ -49,6 +39,9 @@ class RetrievalService:
                     lexical_candidate_count=0,
                     vector_candidate_count=0,
                     fusion_strategy="min-max weighted sum",
+                    pre_rerank_count=0,
+                    post_rerank_count=0,
+                    rerank_strategy="none",
                 ),
             )
 
@@ -57,17 +50,26 @@ class RetrievalService:
         query_embedding = self.embedding_provider.embed_texts([payload.query])[0]
         vector_hits = self.retrieval_repository.search_vector(query_embedding, accessible_document_ids, candidate_pool)
         fused_candidates = self._fuse_hits(lexical_hits, vector_hits)
-        top_candidates = sorted(fused_candidates.values(), key=lambda item: item.fused_score, reverse=True)[: payload.top_k]
+        target_document_id = scoped_document_ids[0] if scoped_document_ids and len(scoped_document_ids) == 1 else None
+        reranked = self.reranker.rerank(
+            payload.query,
+            list(fused_candidates.values()),
+            payload.top_k,
+            target_document_id=target_document_id,
+        )
 
         return SearchResponse(
             query=payload.query,
             top_k=payload.top_k,
-            matched_chunks=[self._to_schema(candidate) for candidate in top_candidates],
+            matched_chunks=[self._to_schema(candidate) for candidate in reranked.candidates],
             debug=SearchDebugInfo(
                 accessible_document_count=len(accessible_document_ids),
                 lexical_candidate_count=len(lexical_hits),
                 vector_candidate_count=len(vector_hits),
                 fusion_strategy="min-max weighted sum",
+                pre_rerank_count=reranked.pre_rerank_count,
+                post_rerank_count=reranked.post_rerank_count,
+                rerank_strategy=reranked.strategy,
             ),
         )
 
@@ -79,11 +81,11 @@ class RetrievalService:
         combined: dict = {}
 
         for hit in lexical_hits:
-            current = combined.setdefault(hit.chunk_id, CombinedCandidate(candidate=hit))
+            current = combined.setdefault(hit.chunk_id, RerankCandidate(candidate=hit))
             current.lexical_raw = hit.lexical_score or 0.0
             current.sources.add("lexical")
         for hit in vector_hits:
-            current = combined.setdefault(hit.chunk_id, CombinedCandidate(candidate=hit))
+            current = combined.setdefault(hit.chunk_id, RerankCandidate(candidate=hit))
             if current.candidate.content != hit.content:
                 current.candidate = hit
             current.vector_raw = hit.vector_score or 0.0
@@ -101,7 +103,7 @@ class RetrievalService:
         return combined
 
     @staticmethod
-    def _normalize_scores(items: Iterable[CombinedCandidate], score_field: str, normalized_field: str) -> None:
+    def _normalize_scores(items: Iterable[RerankCandidate], score_field: str, normalized_field: str) -> None:
         values = [getattr(item, score_field) for item in items]
         if not values:
             return
@@ -118,7 +120,7 @@ class RetrievalService:
             setattr(item, normalized_field, normalized)
 
     @staticmethod
-    def _to_schema(item: CombinedCandidate) -> SearchResultChunk:
+    def _to_schema(item: RerankCandidate) -> SearchResultChunk:
         candidate = item.candidate
         return SearchResultChunk(
             chunk_id=candidate.chunk_id,
@@ -143,6 +145,7 @@ class RetrievalService:
                 vector_raw=item.vector_raw,
                 vector_normalized=item.vector_norm,
                 fused=item.fused_score,
+                rerank=item.rerank_score,
             ),
             citation_preview={
                 "document_title": candidate.document_title,

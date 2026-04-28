@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from uuid import UUID
 
+from app.models.chat import ChatMessage
 from app.models.user import User
 from app.repositories.document_repository import DocumentRepository
 from app.schemas.document import DocumentDiffRead, DocumentDiffRequest, DocumentDiffSummaryRead
@@ -161,6 +162,62 @@ class CopilotToolService:
         return WorkflowToolResult(
             artifact_type="faq",
             structured_payload=response.model_dump(mode="json"),
+            citations=citations,
+        )
+
+    def generate_tasks_from_messages(
+        self,
+        actor: User,
+        messages: list[ChatMessage],
+        source_session_id: UUID | None,
+        max_items: int = 8,
+    ) -> WorkflowToolResult:
+        items = self.task_service._build_task_items(actor, messages, source_session_id, max_items)
+        self.task_service.artifact_repository.add_task_items(items)
+        self.session.flush()
+        citations = [citation for item in items for citation in (item.source_citations or [])]
+        return WorkflowToolResult(
+            artifact_type="tasks",
+            structured_payload={
+                "items": [self.task_service._serialize_task_item(item).model_dump(mode="json") for item in items],
+            },
+            citations=citations,
+        )
+
+    def generate_weekly_report_from_messages(
+        self,
+        actor: User,
+        messages: list[ChatMessage],
+        source_session_id: UUID | None,
+        title: str | None = None,
+    ) -> WorkflowToolResult:
+        report = self.report_service._build_report(actor, messages, source_session_id, title)
+        self.report_service.artifact_repository.add_weekly_report(report)
+        self.session.flush()
+        return WorkflowToolResult(
+            artifact_type="weekly_report",
+            structured_payload={
+                "report": self.report_service._serialize_report(report).model_dump(mode="json"),
+            },
+            citations=list(report.reference_sources),
+        )
+
+    def generate_faq_from_messages(
+        self,
+        actor: User,
+        messages: list[ChatMessage],
+        source_session_id: UUID | None,
+        max_entries: int = 5,
+    ) -> WorkflowToolResult:
+        entries = self.faq_service._build_entries(actor, messages, source_session_id, max_entries)
+        self.faq_service.artifact_repository.add_faq_entries(entries)
+        self.session.flush()
+        citations = [citation for entry in entries for citation in entry.source_citations]
+        return WorkflowToolResult(
+            artifact_type="faq",
+            structured_payload={
+                "entries": [self.faq_service._serialize_entry(entry).model_dump(mode="json") for entry in entries],
+            },
             citations=citations,
         )
 

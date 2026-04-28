@@ -7,15 +7,15 @@ from pathlib import Path
 
 TEST_DATA_DIR = Path(tempfile.mkdtemp(prefix="eka-test-data-"))
 
-os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
-os.environ.setdefault("SEED_MOCK_DATA", "false")
-os.environ.setdefault("SEED_DEMO_EVAL_CASES", "false")
-os.environ.setdefault("JWT_SECRET_KEY", "test-enterprise-knowledge-assistant-secret-key-2026")
-os.environ.setdefault("DATA_DIR", str(TEST_DATA_DIR))
-os.environ.setdefault("EMBEDDING_PROVIDER", "deterministic")
-os.environ.setdefault("ANSWER_PROVIDER", "deterministic")
-os.environ.setdefault("ROUTER_PROVIDER", "deterministic")
-os.environ.setdefault("EMBEDDING_DIMENSIONS", "32")
+os.environ["DATABASE_URL"] = "sqlite+pysqlite:///:memory:"
+os.environ["SEED_MOCK_DATA"] = "false"
+os.environ["SEED_DEMO_EVAL_CASES"] = "false"
+os.environ["JWT_SECRET_KEY"] = "test-enterprise-knowledge-assistant-secret-key-2026"
+os.environ["DATA_DIR"] = str(TEST_DATA_DIR)
+os.environ["EMBEDDING_PROVIDER"] = "deterministic"
+os.environ["ANSWER_PROVIDER"] = "deterministic"
+os.environ["ROUTER_PROVIDER"] = "deterministic"
+os.environ["EMBEDDING_DIMENSIONS"] = "32"
 
 import pytest
 from fastapi.testclient import TestClient

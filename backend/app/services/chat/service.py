@@ -37,6 +37,7 @@ class PreparedChatAnswer:
     confidence: str
     structured_result: object
     agent_steps: list
+    agent_run_trace: object | None = None
 
 
 class ChatService:
@@ -112,6 +113,7 @@ class ChatService:
                 "tool_execution": prepared.tool_metadata.model_dump(mode="json"),
                 "structured_result": prepared.structured_result.model_dump(mode="json"),
                 "agent_steps": [item.model_dump(mode="json") for item in prepared.agent_steps],
+                "agent_run_trace": prepared.agent_run_trace.model_dump(mode="json") if prepared.agent_run_trace else None,
                 "raw_payload": assistant_result.raw_payload,
             },
         )
@@ -167,6 +169,7 @@ class ChatService:
                     "tool_execution": prepared.tool_metadata.model_dump(mode="json"),
                     "structured_result": prepared.structured_result.model_dump(mode="json"),
                     "agent_steps": [item.model_dump(mode="json") for item in prepared.agent_steps],
+                    "agent_run_trace": prepared.agent_run_trace.model_dump(mode="json") if prepared.agent_run_trace else None,
                 },
             )
         except Exception:
@@ -207,6 +210,7 @@ class ChatService:
             confidence=orchestrated.confidence,
             structured_result=orchestrated.structured_result,
             agent_steps=orchestrated.agent_steps,
+            agent_run_trace=orchestrated.agent_run_trace,
         )
 
     def _get_session_or_404(self, actor: User, session_id: UUID, include_messages: bool = False) -> ChatSession:

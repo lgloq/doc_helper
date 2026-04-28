@@ -26,19 +26,19 @@
 4. 意图路由与轻量上下文复用
    - 先读取最近多轮消息
    - 更早历史压缩为摘要
-   - 复用上一轮目标文档、上一轮工具和上一轮结果类型
-   - 判断当前请求属于文档问答、主题问答、版本对比还是结构化结果生成
+   - 复用上一轮目标文档、上一轮工具、上一轮结果类型和上一轮 observation 摘要
+   - `router` 只做粗分类，后续工具选择由 planner 结合上下文继续决定
 
 5. 权限感知检索
    - 先根据当前用户的 `user / role / team / ACL` 算出可访问文档集合
    - lexical retrieval 和 vector retrieval 都只在可访问范围内执行
-   - 两路结果做 score fusion，得到最终候选 chunk
+   - 两路结果先做 score fusion，再进入轻量 rerank，得到最终候选 chunk
 
 6. 引用式问答 / 结构化结果生成
    - 回答基于检索结果生成
    - 回答和 citation 分开返回
    - 如果证据不足，系统会拒答，不继续拼凑答案
-   - 如果是待办、周报、FAQ 请求，则改走对应工具链路
+   - 如果是待办、周报、FAQ 请求，则改走对应工作流链路
 
 ## 为什么权限过滤必须前置
 当前项目将权限过滤纳入检索链路本身，而不是在最终展示阶段再做结果过滤。
@@ -79,6 +79,17 @@
 - 自然语言表达、模糊提问更适合 dense
 - 两路结合通常比单一路线更稳
 
+## 为什么召回后还要 rerank
+混合召回解决的是“把相关 chunk 先找出来”，但不一定能保证最终排序最适合回答问题。
+
+当前版本会在可访问候选集上增加一层轻量 rerank，主要考虑：
+- query 和 chunk 的 token overlap
+- 标题和 section 的命中情况
+- lexical 支撑是否存在
+- 指定文档场景下的目标文档加分
+
+这样做的目标不是替代 hybrid retrieval，而是减少“召回到了但排序不够准”的情况。
+
 ## Citation 的作用
 citation 会随问答结果一并返回，不依赖前端额外拼接说明。
 
@@ -97,17 +108,24 @@ citation 会记录：
 - 调试与评测
 - 审计与可追踪性
 
-## 工具调用与处理轨迹
-当前版本没有引入 LangGraph、AutoGen 或开放式 agent loop，而是采用显式编排的工具调用链路。
+## 工具调用工作流与处理轨迹
+当前系统采用受控工具调用工作流来组织检索、版本对比和结构化结果生成。
 
-固定步骤包括：
+主路径包括：
+- `router` 先做粗分类
+- `planner` 根据问题、上下文、已有 observation 和工具描述输出结构化 action
+- `agent_runner` 按 `observe -> decide -> act` 循环执行，最多 3 步
+- `tool_executor` 只允许调用白名单工具
+- 超过 `max_steps` 或证据不足时，会收束为最终回答、拒答或补充说明
+
+兼容层仍保留以下五步摘要，便于前端和 trace 对齐展示：
 - `query_analysis`
 - `tool_selection`
 - `tool_execution`
 - `evidence_review`
 - `answer_generation`
 
-这些步骤会同时写入：
+这些信息会同时写入：
 - assistant 消息 metadata
 - observability trace extra metadata
 - 前端“处理轨迹”面板
@@ -119,7 +137,7 @@ citation 会记录：
 - `generate_weekly_report`
 - `generate_faq`
 
-这种实现更接近“带工具调用和上下文复用的 RAG 编排层”，而不是开放式自治 Agent 系统。
+这层工作流把工具选择、执行结果和最终回答串成一条可追踪链路，便于前端展示、问题排查和回归验证。
 
 ## 拒答与可靠性策略
 项目不会在证据不足时强行生成回答，而是增加了多层可靠性约束：
@@ -160,6 +178,7 @@ citation 会记录：
 1. 结构感知的文档解析与切块，不直接做简单固定长度截断。
 2. 每个 chunk 都带定位元数据，方便 citation 和回溯。
 3. PostgreSQL FTS + pgvector 的 hybrid retrieval，不依赖单一路径检索。
-4. 权限过滤前置到检索链路中，避免无权限内容进入候选集和 prompt。
-5. 增加显式工具调用步骤流与轻量上下文复用，便于前端展示、链路追踪和回归验证。
-6. 回答结果带 citation，并配套 eval 和 trace，方便分析链路质量。
+4. 在安全候选集上增加轻量 rerank，提升最终进入回答阶段的排序稳定性。
+5. 权限过滤前置到检索链路中，避免无权限内容进入候选集和 prompt。
+6. 增加受控工具调用工作流与轻量上下文复用，便于前端展示、链路追踪和回归验证。
+7. 回答结果带 citation，并配套 eval 和 trace，方便分析链路质量。

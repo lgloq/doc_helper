@@ -7,6 +7,7 @@ from uuid import UUID
 
 from app.schemas.llm import (
     AgentStep,
+    AgentRunTrace,
     CopilotExecutionMetadata,
     QAAnswerResult,
     RouterDecision,
@@ -20,7 +21,11 @@ from app.schemas.search import SearchDebugInfo, SearchResponse, SearchResultChun
 from app.services.chat.generation import AnswerGenerationResult, AnswerGeneratorFactory
 from app.services.chat.prompts import validate_used_chunk_ids
 from app.services.chat.reliability import should_abstain_from_answer
+from app.services.llm.agent_runner import AgentRunner
+from app.services.llm.planner import ActionPlannerFactory
 from app.services.llm.router import LLMRouterService
+from app.services.llm.tool_executor import ToolExecutor
+from app.services.llm.tool_registry import DEFAULT_TOOL_REGISTRY
 from app.services.llm.tools import CopilotToolService
 
 TOOL_SEARCH_DOCS = "search_docs"
@@ -41,13 +46,18 @@ class CopilotRunResult:
     confidence: str
     structured_result: QAAnswerResult | VersionCompareResult | WorkflowGenerationResult
     agent_steps: list[AgentStep]
+    agent_run_trace: AgentRunTrace | None = None
 
 
 class CopilotOrchestrator:
     def __init__(self, session) -> None:
         self.router = LLMRouterService()
         self.tools = CopilotToolService(session)
+        self.tool_registry = DEFAULT_TOOL_REGISTRY
+        self.tool_executor = ToolExecutor(self.tools, tool_registry=self.tool_registry)
         self.answer_generator = AnswerGeneratorFactory.create()
+        self.agent_runner_cls = AgentRunner
+        self.action_planner = ActionPlannerFactory.create()
 
     def run(
         self,
@@ -66,6 +76,19 @@ class CopilotOrchestrator:
             conversation_context=memory,
         )
         decision = router_result.decision
+
+        if self._should_use_agent_runner(question, memory, router_result) and not (
+            decision.intent == "workflow_generation" and session_id.int == 0
+        ):
+            return self._run_agent_workflow(
+                actor=actor,
+                question=question,
+                session_id=session_id,
+                top_k=top_k,
+                existing_messages=existing_messages,
+                conversation_memory=memory,
+                router_result=router_result,
+            )
 
         if decision.intent == "document_qa":
             return self._run_document_qa(actor, question, existing_messages, memory, top_k, router_result)
@@ -342,6 +365,241 @@ class CopilotOrchestrator:
             refusal_reason=tool_result.refusal_reason,
         )
 
+    def _should_use_agent_runner(
+        self,
+        question: str,
+        conversation_memory: ConversationMemory,
+        router_result: RouterDecisionResult,
+    ) -> bool:
+        decision = router_result.decision
+        if decision.intent == "unsupported_or_unclear":
+            return False
+        return True
+
+    def _run_agent_workflow(
+        self,
+        *,
+        actor,
+        question: str,
+        session_id: UUID,
+        top_k: int,
+        existing_messages,
+        conversation_memory: ConversationMemory,
+        router_result: RouterDecisionResult,
+    ) -> CopilotRunResult:
+        runner = self.agent_runner_cls(
+            tool_executor=self.tool_executor,
+            tool_registry=self.tool_registry,
+            planner=self.action_planner,
+            max_steps=3,
+        )
+        runner_result = runner.run(
+            actor=actor,
+            user_query=question,
+            session_id=None if session_id.int == 0 else session_id,
+            top_k=top_k,
+            chat_context=conversation_memory,
+            router_result=router_result,
+            existing_messages=list(existing_messages),
+        )
+
+        execution_results = runner_result.execution_results
+        latest_execution = execution_results[-1] if execution_results else None
+        latest_search = next((item for item in reversed(execution_results) if item.retrieval_response is not None), None)
+        latest_compare = next((item for item in reversed(execution_results) if item.version_compare_result is not None), None)
+        latest_workflow = next((item for item in reversed(execution_results) if item.workflow_result is not None), None)
+
+        if runner_result.final_action.action_type == "ask_clarification":
+            clarification_answer = runner_result.final_action.reason or "我还需要你补充更明确的目标后，才能继续执行。"
+            if router_result.decision.intent == "version_compare":
+                return self._build_version_compare_result(
+                    question=question,
+                    router_result=router_result,
+                    conversation_memory=conversation_memory,
+                    tool_metadata=latest_execution.tool_metadata if latest_execution else CopilotExecutionMetadata(tool_name="none"),
+                    answer=clarification_answer,
+                    confidence="insufficient",
+                    target_document=router_result.decision.target_document_title or router_result.decision.requested_document_name,
+                    refusal_reason="clarification_required",
+                    summary=None,
+                    agent_run_trace=runner_result.run_trace,
+                )
+            if router_result.decision.intent == "workflow_generation" or router_result.decision.artifact_type is not None:
+                return self._build_workflow_result(
+                    question=question,
+                    router_result=router_result,
+                    conversation_memory=conversation_memory,
+                    tool_metadata=latest_execution.tool_metadata if latest_execution else CopilotExecutionMetadata(tool_name="none"),
+                    answer=clarification_answer,
+                    confidence="insufficient",
+                    artifact_type=None,
+                    structured_payload=None,
+                    citations=[],
+                    refusal_reason="clarification_required",
+                    agent_run_trace=runner_result.run_trace,
+                )
+            return self._build_refusal_result(
+                question=question,
+                router_result=router_result,
+                answer=clarification_answer,
+                refusal_reason="clarification_required",
+                conversation_memory=conversation_memory,
+                tool_name=latest_execution.tool_metadata.tool_name if latest_execution else "none",
+                tool_input=latest_execution.tool_metadata.tool_input if latest_execution else {"question": question},
+                tool_output_summary=latest_execution.tool_metadata.tool_output_summary if latest_execution else {"status": "not_executed"},
+                retrieval_response=latest_execution.retrieval_response if latest_execution and latest_execution.retrieval_response else _empty_search_response(question),
+                intent=router_result.decision.intent,
+                agent_run_trace=runner_result.run_trace,
+            )
+
+        if latest_workflow and latest_workflow.workflow_result:
+            workflow_result = latest_workflow.workflow_result
+            refusal_reason = workflow_result.refusal_reason
+            if latest_execution and latest_execution.refusal_reason == "insufficient_context":
+                refusal_reason = "insufficient_session_context_for_workflow"
+            if refusal_reason:
+                return self._build_workflow_result(
+                    question=question,
+                    router_result=router_result,
+                    conversation_memory=conversation_memory,
+                    tool_metadata=latest_workflow.tool_metadata,
+                    answer=latest_execution.observation.output_summary if latest_execution else "当前上下文不足，暂不生成结构化结果。",
+                    confidence="insufficient",
+                    artifact_type=None,
+                    structured_payload=None,
+                    citations=[],
+                    refusal_reason=refusal_reason,
+                    agent_run_trace=runner_result.run_trace,
+                )
+
+            answer = latest_workflow.answer_hint or _workflow_success_answer(workflow_result)
+            return self._build_workflow_result(
+                question=question,
+                router_result=router_result,
+                conversation_memory=conversation_memory,
+                tool_metadata=latest_workflow.tool_metadata,
+                answer=answer,
+                confidence="high",
+                artifact_type=workflow_result.artifact_type,
+                structured_payload=workflow_result.structured_payload,
+                citations=workflow_result.citations,
+                refusal_reason=None,
+                agent_run_trace=runner_result.run_trace,
+            )
+
+        if latest_compare and latest_compare.version_compare_result:
+            compare_result = latest_compare.version_compare_result
+            summary = compare_result.summary
+            requested_name = (
+                compare_result.document_title
+                or router_result.decision.target_document_title
+                or router_result.decision.requested_document_name
+                or "该文档"
+            )
+            answer = "当前无法完成版本差异比较。"
+            if compare_result.refusal_reason == "target_document_not_accessible_or_not_found":
+                answer = "当前可访问范围内未找到相关文档内容，因此暂时无法进行版本对比。"
+            elif compare_result.refusal_reason == "insufficient_versions_for_compare":
+                answer = f"“{requested_name}”当前可访问范围内不足两个版本，暂时无法比较差异。"
+            elif summary is not None:
+                answer = f"“{compare_result.document_title}”版本差异摘要：{summary.summary}"
+            return self._build_version_compare_result(
+                question=question,
+                router_result=router_result,
+                conversation_memory=conversation_memory,
+                tool_metadata=latest_compare.tool_metadata,
+                answer=answer,
+                confidence="insufficient" if compare_result.refusal_reason else "high",
+                target_document=requested_name if compare_result.refusal_reason else compare_result.document_title,
+                refusal_reason=compare_result.refusal_reason,
+                summary=summary,
+                agent_run_trace=runner_result.run_trace,
+            )
+
+        if latest_search and latest_search.retrieval_response is not None:
+            if latest_search.refusal_reason == "target_document_not_accessible_or_not_found":
+                return self._build_refusal_result(
+                    question=question,
+                    router_result=router_result,
+                    answer="当前可访问范围内未找到相关文档内容。该文档可能不存在，或你当前没有访问权限。",
+                    refusal_reason="target_document_not_accessible_or_not_found",
+                    conversation_memory=conversation_memory,
+                    tool_name=latest_search.tool_metadata.tool_name,
+                    tool_input=latest_search.tool_metadata.tool_input,
+                    tool_output_summary=latest_search.tool_metadata.tool_output_summary,
+                    retrieval_response=latest_search.retrieval_response,
+                    target_document=router_result.decision.requested_document_name,
+                    intent=router_result.decision.intent,
+                    agent_run_trace=runner_result.run_trace,
+                )
+            if latest_search.refusal_reason == "no_relevant_evidence_in_target_document" or not latest_search.candidate_chunks:
+                target_name = latest_search.target_document or router_result.decision.requested_document_name or "该文档"
+                return self._build_refusal_result(
+                    question=question,
+                    router_result=router_result,
+                    answer=f"在“{target_name}”当前可访问的内容中，未找到足够相关的证据来回答这个问题。",
+                    refusal_reason=latest_search.refusal_reason or "insufficient_relevant_evidence",
+                    conversation_memory=conversation_memory,
+                    tool_name=latest_search.tool_metadata.tool_name,
+                    tool_input=latest_search.tool_metadata.tool_input,
+                    tool_output_summary=latest_search.tool_metadata.tool_output_summary,
+                    retrieval_response=latest_search.retrieval_response,
+                    target_document=target_name,
+                    intent=router_result.decision.intent,
+                    agent_run_trace=runner_result.run_trace,
+                )
+            return self._generate_grounded_qa(
+                question=question,
+                existing_messages=existing_messages,
+                conversation_memory=conversation_memory,
+                router_result=router_result,
+                retrieval_response=latest_search.retrieval_response,
+                candidate_chunks=latest_search.candidate_chunks,
+                tool_metadata=latest_search.tool_metadata,
+                target_document=latest_search.target_document,
+                allow_low_score=router_result.decision.intent == "document_qa",
+                agent_run_trace=runner_result.run_trace,
+            )
+
+        refusal_reason = _resolve_runner_refusal_reason(runner_result)
+        if router_result.decision.intent == "workflow_generation" or router_result.decision.artifact_type is not None:
+            if refusal_reason == "insufficient_context":
+                refusal_reason = "insufficient_session_context_for_workflow"
+            tool_name = latest_execution.tool_metadata.tool_name if latest_execution else _workflow_tool_name(router_result.decision.artifact_type)
+            tool_input = latest_execution.tool_metadata.tool_input if latest_execution else {"session_id": str(session_id)}
+            tool_output_summary = latest_execution.tool_metadata.tool_output_summary if latest_execution else {"status": "not_executed"}
+            return self._build_workflow_result(
+                question=question,
+                router_result=router_result,
+                conversation_memory=conversation_memory,
+                tool_metadata=CopilotExecutionMetadata(
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    tool_output_summary=tool_output_summary,
+                ),
+                answer=latest_execution.observation.output_summary if latest_execution else "当前请求未形成可用 observation，暂不生成结构化结果。",
+                confidence="insufficient",
+                artifact_type=None,
+                structured_payload=None,
+                citations=[],
+                refusal_reason=refusal_reason,
+                agent_run_trace=runner_result.run_trace,
+            )
+
+        return self._build_refusal_result(
+            question=question,
+            router_result=router_result,
+            answer="当前请求未形成足够稳定的 observation，暂时无法生成可靠回答。",
+            refusal_reason=refusal_reason,
+            conversation_memory=conversation_memory,
+            tool_name=latest_execution.tool_metadata.tool_name if latest_execution else "none",
+            tool_input=latest_execution.tool_metadata.tool_input if latest_execution else {"question": question},
+            tool_output_summary=latest_execution.tool_metadata.tool_output_summary if latest_execution else {"status": "not_executed"},
+            retrieval_response=latest_execution.retrieval_response if latest_execution and latest_execution.retrieval_response else _empty_search_response(question),
+            intent=router_result.decision.intent,
+            agent_run_trace=runner_result.run_trace,
+        )
+
     def _generate_grounded_qa(
         self,
         *,
@@ -354,6 +612,7 @@ class CopilotOrchestrator:
         tool_metadata: CopilotExecutionMetadata,
         target_document: str | None,
         allow_low_score: bool,
+        agent_run_trace: AgentRunTrace | None = None,
     ) -> CopilotRunResult:
         generation = self.answer_generator.generate(
             question=question,
@@ -411,6 +670,7 @@ class CopilotOrchestrator:
             selected_chunks=selected_chunks,
             answer_result=generation,
             structured_result=qa_result,
+            agent_run_trace=agent_run_trace,
         )
         return CopilotRunResult(
             router_result=router_result,
@@ -422,6 +682,7 @@ class CopilotOrchestrator:
             confidence=confidence,
             structured_result=qa_result,
             agent_steps=agent_steps,
+            agent_run_trace=agent_run_trace,
         )
 
     def _build_refusal_result(
@@ -438,6 +699,7 @@ class CopilotOrchestrator:
         retrieval_response: SearchResponse | None = None,
         target_document: str | None = None,
         intent: str | None = None,
+        agent_run_trace: AgentRunTrace | None = None,
     ) -> CopilotRunResult:
         generation = self._refusal_generation_result(answer=answer, refusal_reason=refusal_reason, router_result=router_result)
         if retrieval_response is None:
@@ -467,6 +729,7 @@ class CopilotOrchestrator:
             selected_chunks=[],
             answer_result=generation,
             structured_result=qa_result,
+            agent_run_trace=agent_run_trace,
         )
         return CopilotRunResult(
             router_result=router_result,
@@ -478,6 +741,7 @@ class CopilotOrchestrator:
             confidence="insufficient",
             structured_result=qa_result,
             agent_steps=agent_steps,
+            agent_run_trace=agent_run_trace,
         )
 
     def _build_version_compare_result(
@@ -492,6 +756,7 @@ class CopilotOrchestrator:
         target_document: str | None,
         refusal_reason: str | None,
         summary: Any,
+        agent_run_trace: AgentRunTrace | None = None,
     ) -> CopilotRunResult:
         answer_result = self._tool_answer_generation_result(
             answer=answer,
@@ -525,6 +790,7 @@ class CopilotOrchestrator:
             selected_chunks=[],
             answer_result=answer_result,
             structured_result=structured_result,
+            agent_run_trace=agent_run_trace,
         )
         return CopilotRunResult(
             router_result=router_result,
@@ -536,6 +802,7 @@ class CopilotOrchestrator:
             confidence=confidence,
             structured_result=structured_result,
             agent_steps=agent_steps,
+            agent_run_trace=agent_run_trace,
         )
 
     def _build_workflow_result(
@@ -551,6 +818,7 @@ class CopilotOrchestrator:
         structured_payload: dict[str, Any] | None,
         citations,
         refusal_reason: str | None,
+        agent_run_trace: AgentRunTrace | None = None,
     ) -> CopilotRunResult:
         answer_result = self._tool_answer_generation_result(
             answer=answer,
@@ -579,6 +847,7 @@ class CopilotOrchestrator:
             selected_chunks=[],
             answer_result=answer_result,
             structured_result=structured_result,
+            agent_run_trace=agent_run_trace,
         )
         return CopilotRunResult(
             router_result=router_result,
@@ -590,6 +859,7 @@ class CopilotOrchestrator:
             confidence=confidence,
             structured_result=structured_result,
             agent_steps=agent_steps,
+            agent_run_trace=agent_run_trace,
         )
 
     def _build_agent_steps(
@@ -604,6 +874,7 @@ class CopilotOrchestrator:
         selected_chunks: list[SearchResultChunk],
         answer_result: AnswerGenerationResult,
         structured_result: QAAnswerResult | VersionCompareResult | WorkflowGenerationResult,
+        agent_run_trace: AgentRunTrace | None = None,
     ) -> list[AgentStep]:
         intent = router_result.decision.intent
         target_document = self._resolve_target_document(router_result.decision, structured_result)
@@ -617,14 +888,32 @@ class CopilotOrchestrator:
             query_output += "，并复用了上一轮对话上下文"
 
         tool_selection_output = "未选择工具，直接返回拒答。"
-        if tool_name:
+        if agent_run_trace and agent_run_trace.actions:
+            plan_parts = []
+            for action in agent_run_trace.actions:
+                action_label = action.tool_name if action.action_type == "tool_call" and action.tool_name else action.action_type
+                plan_parts.append(f"{action_label}({action.evidence_state})")
+            tool_selection_output = f"规划动作：{' -> '.join(plan_parts)}"
+        elif tool_name:
             tool_selection_output = f"选择工具 {tool_name}。"
 
         tool_execution_status = "skipped" if tool_name is None else "completed"
         if str(tool_metadata.tool_output_summary.get("status") or "").startswith("skipped"):
             tool_execution_status = "skipped"
+        if agent_run_trace and not agent_run_trace.observations and agent_run_trace.final_status in {"refused", "clarification_required"}:
+            tool_execution_status = "skipped"
+        if agent_run_trace and any(item.status == "failed" for item in agent_run_trace.observations):
+            tool_execution_status = "refused"
+        elif agent_run_trace and any(item.status == "insufficient_context" for item in agent_run_trace.observations):
+            tool_execution_status = "skipped"
         tool_execution_output = "未执行工具。"
-        if tool_name:
+        if agent_run_trace and agent_run_trace.observations:
+            tool_execution_output = "；".join(
+                f"step {item.step_index}: {item.tool_name} -> {item.output_summary}" for item in agent_run_trace.observations
+            )
+        elif agent_run_trace and not agent_run_trace.observations and agent_run_trace.final_status in {"refused", "clarification_required"}:
+            tool_execution_output = "planner 在执行前判定当前上下文不足，因此未继续调用工具。"
+        elif tool_name:
             tool_execution_output = self._summarize_tool_execution(tool_metadata)
 
         evidence_status = "completed"
@@ -634,6 +923,9 @@ class CopilotOrchestrator:
             evidence_output = "当前请求未进入检索或工具结果校验。"
         elif intent == "workflow_generation" and is_refusal:
             evidence_status = "refused"
+        elif agent_run_trace and any(item.status == "insufficient_context" for item in agent_run_trace.observations):
+            evidence_status = "refused"
+            evidence_output = "planner 检测到上下文证据不足，未继续生成结构化结果。"
 
         answer_status = "refused" if is_refusal else "completed"
         answer_output = self._summarize_answer_generation(structured_result, answer_result)
@@ -651,6 +943,7 @@ class CopilotOrchestrator:
                     "previous_artifact_type": conversation_memory.previous_artifact_type,
                     "previous_intent": conversation_memory.previous_intent,
                     "older_message_count": conversation_memory.older_message_count,
+                    "agent_run_trace_available": agent_run_trace is not None,
                 },
             ),
             AgentStep(
@@ -659,7 +952,11 @@ class CopilotOrchestrator:
                 output_summary=tool_selection_output,
                 status="completed",
                 tool_name=tool_name,
-                metadata={"reasoning_brief": router_result.decision.reasoning_brief},
+                metadata={
+                    "reasoning_brief": router_result.decision.reasoning_brief,
+                    "planned_actions": [item.model_dump(mode="json") for item in agent_run_trace.actions] if agent_run_trace else [],
+                    "planner_name": agent_run_trace.tool_plan.planner_name if agent_run_trace else None,
+                },
             ),
             AgentStep(
                 name="tool_execution",
@@ -667,7 +964,10 @@ class CopilotOrchestrator:
                 output_summary=tool_execution_output,
                 status=tool_execution_status,  # type: ignore[arg-type]
                 tool_name=tool_name,
-                metadata=tool_metadata.tool_output_summary,
+                metadata={
+                    **tool_metadata.tool_output_summary,
+                    "observations": [item.model_dump(mode="json") for item in agent_run_trace.observations] if agent_run_trace else [],
+                },
             ),
             AgentStep(
                 name="evidence_review",
@@ -678,6 +978,8 @@ class CopilotOrchestrator:
                 metadata={
                     "selected_citations": len(selected_chunks),
                     "retrieval_debug": retrieval_response.debug.model_dump(),
+                    "final_status": agent_run_trace.final_status if agent_run_trace else None,
+                    "final_reason": agent_run_trace.final_reason if agent_run_trace else None,
                 },
             ),
             AgentStep(
@@ -746,6 +1048,13 @@ class CopilotOrchestrator:
                 return f"候选分块 {len(candidate_chunks)} 个，但证据不足，未确认正式引用。"
             return f"候选分块 {len(candidate_chunks)} 个，最终选中 {len(selected_chunks)} 条引用。"
         if intent == "version_compare":
+            refusal_reason = getattr(structured_result, "refusal_reason", None)
+            if refusal_reason == "insufficient_versions_for_compare":
+                return "当前可访问范围内版本数量不足，未形成可用 diff 结果。"
+            if refusal_reason == "unable_to_resolve_version_pair":
+                return "待比较的版本范围不明确，未执行有效版本对比。"
+            if refusal_reason == "target_document_not_accessible_or_not_found":
+                return "目标文档不可访问，未执行有效版本对比。"
             return "基于版本 diff 与摘要结果完成证据校验。"
         if intent == "workflow_generation":
             if getattr(structured_result, "refusal_reason", None):
@@ -874,6 +1183,38 @@ def _workflow_tool_name(artifact_type: str | None) -> str:
     if artifact_type == "faq":
         return TOOL_GENERATE_FAQ
     return "none"
+
+
+def _workflow_success_answer(workflow_result) -> str:
+    if workflow_result.artifact_type == "tasks":
+        return f"已根据当前上下文提取 {len((workflow_result.structured_payload or {}).get('items', []))} 条待办事项。"
+    if workflow_result.artifact_type == "weekly_report":
+        report_title = ((workflow_result.structured_payload or {}).get("report") or {}).get("title") or "周报草稿"
+        return f"已根据当前上下文生成周报草稿《{report_title}》。"
+    if workflow_result.artifact_type == "faq":
+        return f"已根据当前上下文生成 {len((workflow_result.structured_payload or {}).get('entries', []))} 条 FAQ 草稿。"
+    return "已生成结构化结果。"
+
+
+def _resolve_runner_refusal_reason(runner_result) -> str:
+    if runner_result.run_trace.final_status == "max_steps_reached":
+        return "max_steps_reached"
+    if runner_result.run_trace.final_status == "clarification_required":
+        return "clarification_required"
+    if runner_result.run_trace.final_status == "refused" and not runner_result.execution_results:
+        final_reason = runner_result.final_action.reason or runner_result.run_trace.final_reason or ""
+        if any(marker in final_reason for marker in ("证据不足", "上下文", "有证据支撑的问答")):
+            return "insufficient_session_context_for_workflow"
+    if runner_result.execution_results:
+        last_result = runner_result.execution_results[-1]
+        if last_result.refusal_reason:
+            return last_result.refusal_reason
+        raw_output = last_result.observation.raw_output
+        if isinstance(raw_output, dict):
+            refusal_reason = raw_output.get("refusal_reason")
+            if refusal_reason:
+                return str(refusal_reason)
+    return "agent_runner_no_final_result"
 
 
 def _looks_like_followup_question(question: str) -> bool:

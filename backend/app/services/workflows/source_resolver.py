@@ -42,7 +42,7 @@ class SourceMaterialResolver:
 
 def serialize_message_citation(citation: MessageCitation) -> dict:
     return {
-        "message_citation_id": str(citation.id),
+        "message_citation_id": str(citation.id) if citation.id else None,
         "chunk_id": str(citation.chunk_id) if citation.chunk_id else None,
         "document_id": str(citation.document_id) if citation.document_id else None,
         "document_title": citation.document_title,

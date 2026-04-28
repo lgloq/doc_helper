@@ -476,6 +476,26 @@ h4 {
   margin-top: 0.7rem;
 }
 
+.execution-trace-secondary {
+  border-radius: 12px;
+  background: rgba(17, 77, 99, 0.04);
+  border: 1px dashed rgba(19, 33, 39, 0.1);
+  padding: 0.55rem 0.65rem;
+}
+
+.execution-trace-secondary summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+.execution-trace-secondary-list {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.65rem;
+}
+
 .execution-trace-item {
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.6);

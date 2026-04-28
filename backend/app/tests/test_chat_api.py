@@ -9,6 +9,11 @@ from app.core.security import hash_password
 from app.models.enums import RoleName
 from app.models.role import Role
 from app.models.user import User
+from app.schemas.llm import PlannerDecision, RouterDecision, RouterDecisionResult
+from app.services.chat.memory import build_conversation_memory
+from app.services.llm.agent_runner import AgentRunner
+from app.services.llm.tool_executor import ToolExecutor
+from app.services.llm.tools import CopilotToolService
 
 
 def _create_user(db_session: Session, role: Role, email: str, team_name: str | None, password: str) -> User:
@@ -118,6 +123,46 @@ def _find_step(payload: dict, name: str) -> dict:
     raise AssertionError(f"missing agent step: {name}")
 
 
+def _agent_run_trace(payload: dict) -> dict:
+    metadata = payload["assistant_message"]["message_metadata"]
+    trace = metadata.get("agent_run_trace")
+    assert isinstance(trace, dict)
+    return trace
+
+
+def _get_user(db_session: Session, email: str) -> User:
+    user = db_session.query(User).filter(User.email == email).one_or_none()
+    assert user is not None
+    return user
+
+
+def _build_router_result(
+    *,
+    intent: str,
+    artifact_type: str | None = None,
+    target_document_title: str | None = None,
+    requested_document_name: str | None = None,
+    from_version_ref: str | None = None,
+    to_version_ref: str | None = None,
+) -> RouterDecisionResult:
+    return RouterDecisionResult(
+        decision=RouterDecision(
+            intent=intent,  # type: ignore[arg-type]
+            artifact_type=artifact_type,  # type: ignore[arg-type]
+            target_document_title=target_document_title,
+            requested_document_name=requested_document_name,
+            from_version_ref=from_version_ref,
+            to_version_ref=to_version_ref,
+            needs_citations=intent in {"document_qa", "topic_qa"},
+            should_refuse_if_inaccessible=bool(requested_document_name and not target_document_title),
+            reasoning_brief="test router result",
+        ),
+        provider_name="test-router",
+        model_name="test-router-model",
+        raw_payload={"source": "unit-test"},
+    )
+
+
 
 def _seed_roles_and_users(db_session: Session) -> tuple[Role, Role, Role]:
     viewer_role = Role(name=RoleName.VIEWER, description="Viewer")
@@ -158,10 +203,13 @@ def test_chat_roundtrip_persists_history_and_targeted_citations(client: TestClie
     assert payload["citations"][0]["document_title"] == "客户事故响应指南"
     metadata = payload["assistant_message"]["message_metadata"]
     steps = _agent_steps(payload)
+    trace = _agent_run_trace(payload)
     assert metadata["router_decision"]["intent"] == "document_qa"
     assert metadata["router_decision"]["target_document_title"] == "客户事故响应指南"
     assert metadata["tool_execution"]["tool_name"] == "search_docs"
     assert metadata["structured_result"]["answer_type"] == "grounded_answer"
+    assert trace["tool_plan"]["initial_intent"] == "document_qa"
+    assert [action["tool_name"] for action in trace["actions"] if action["action_type"] == "tool_call"] == ["search_docs"]
     assert [step["name"] for step in steps] == [
         "query_analysis",
         "tool_selection",
@@ -268,6 +316,7 @@ def test_topic_qa_uses_accessible_search_without_explicit_title(client: TestClie
     session_id = _create_session(client, viewer_token)
     payload = _send_question(client, viewer_token, session_id, "节假日值班需要提前登记吗？")
     metadata = payload["assistant_message"]["message_metadata"]
+    trace = _agent_run_trace(payload)
 
     assert payload["assistant_message"]["insufficient_evidence"] is False
     assert payload["citations"]
@@ -275,6 +324,8 @@ def test_topic_qa_uses_accessible_search_without_explicit_title(client: TestClie
     assert "登记" in payload["assistant_message"]["content"]
     assert metadata["router_decision"]["intent"] in {"topic_qa", "document_qa"}
     assert metadata["tool_execution"]["tool_name"] == "search_docs"
+    assert trace["tool_plan"]["initial_intent"] in {"topic_qa", "document_qa"}
+    assert [action["tool_name"] for action in trace["actions"] if action["action_type"] == "tool_call"] == ["search_docs"]
 
 
 
@@ -315,6 +366,417 @@ def test_version_compare_routes_to_compare_tool(client: TestClient, db_session: 
         "answer_generation",
     ]
     assert _find_step(payload, "tool_execution")["tool_name"] == "compare_versions"
+
+
+def test_single_turn_multi_tool_search_then_extract_todos(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+
+    _upload_and_ingest(
+        client,
+        admin_token,
+        "员工手册",
+        "请假规定：员工请事假前需要先提交申请单，并同步直属主管审批；跨三天以上的请假需补充交接安排。",
+    )
+
+    session_id = _create_session(client, admin_token)
+    payload = _send_question(client, admin_token, session_id, "查看员工手册里关于请假的规定，并帮我整理成待办事项。")
+    metadata = payload["assistant_message"]["message_metadata"]
+    trace = _agent_run_trace(payload)
+
+    assert metadata["router_decision"]["intent"] == "document_qa"
+    assert metadata["router_decision"]["artifact_type"] == "tasks"
+    assert metadata["tool_execution"]["tool_name"] == "extract_todos"
+    assert metadata["structured_result"]["artifact_type"] == "tasks"
+    assert [action["tool_name"] for action in trace["actions"] if action["action_type"] == "tool_call"] == [
+        "search_docs",
+        "extract_todos",
+    ]
+    assert trace["final_status"] == "completed"
+    assert trace["observations"][0]["tool_name"] == "search_docs"
+    assert trace["observations"][1]["tool_name"] == "extract_todos"
+
+
+def test_version_compare_then_extract_todos(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+
+    document_id, _ = _upload_and_ingest(
+        client,
+        admin_token,
+        "员工手册",
+        "请假规则：员工请假需先提交申请。加班调休由直属主管审批。",
+    )
+    _upload_new_version_and_ingest(
+        client,
+        admin_token,
+        document_id,
+        "employee_handbook_v2.txt",
+        "请假规则：员工请假需先提交申请并同步交接安排。加班调休由直属主管审批；连续请假超过三天需登记备份联系人。",
+    )
+
+    session_id = _create_session(client, admin_token)
+    payload = _send_question(client, admin_token, session_id, "对比员工手册最新版和上一版，把新增的员工需要处理的事项整理出来。")
+    metadata = payload["assistant_message"]["message_metadata"]
+    trace = _agent_run_trace(payload)
+
+    assert metadata["router_decision"]["intent"] == "version_compare"
+    assert metadata["router_decision"]["artifact_type"] == "tasks"
+    assert metadata["tool_execution"]["tool_name"] == "extract_todos"
+    assert metadata["structured_result"]["artifact_type"] == "tasks"
+    assert [action["tool_name"] for action in trace["actions"] if action["action_type"] == "tool_call"] == [
+        "compare_versions",
+        "extract_todos",
+    ]
+
+
+def test_version_compare_with_insufficient_versions_stops_after_compare(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+
+    _upload_and_ingest(
+        client,
+        admin_token,
+        "员工手册",
+        "请假规则：员工请假需先提交申请。加班调休由直属主管审批。",
+    )
+
+    session_id = _create_session(client, admin_token)
+    payload = _send_question(client, admin_token, session_id, "对比员工手册最新版和上一版，把新增的员工需要处理的事项整理出来。")
+    metadata = payload["assistant_message"]["message_metadata"]
+    trace = _agent_run_trace(payload)
+
+    assert payload["assistant_message"]["insufficient_evidence"] is True
+    assert metadata["router_decision"]["intent"] == "version_compare"
+    assert metadata["structured_result"]["answer_type"] == "refusal"
+    assert metadata["structured_result"]["refusal_reason"] == "insufficient_versions_for_compare"
+    assert [action["tool_name"] for action in trace["actions"] if action["action_type"] == "tool_call"] == ["compare_versions"]
+    assert trace["final_status"] == "refused"
+    assert trace["observations"][0]["raw_output"]["refusal_reason"] == "insufficient_versions_for_compare"
+
+
+def test_generate_faq_from_previous_context(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+
+    _upload_and_ingest(
+        client,
+        admin_token,
+        "权限管理说明",
+        "权限管理要求：新增账号前需确认角色范围；离职账号需当天停用；高权限变更必须保留审批记录。",
+    )
+
+    session_id = _create_session(client, admin_token)
+    first_payload = _send_question(client, admin_token, session_id, "权限管理说明里对高权限变更有什么要求？")
+    assert first_payload["assistant_message"]["insufficient_evidence"] is False
+
+    faq_payload = _send_question(client, admin_token, session_id, "根据刚才检索到的权限管理说明，整理一份 FAQ。")
+    faq_metadata = faq_payload["assistant_message"]["message_metadata"]
+    trace = _agent_run_trace(faq_payload)
+
+    assert faq_metadata["router_decision"]["intent"] == "workflow_generation"
+    assert faq_metadata["tool_execution"]["tool_name"] == "generate_faq"
+    assert faq_metadata["structured_result"]["artifact_type"] == "faq"
+    assert [action["tool_name"] for action in trace["actions"] if action["action_type"] == "tool_call"] == ["generate_faq"]
+
+
+def test_agent_runner_replans_based_on_observation_with_mock_planner(client: TestClient, db_session: Session) -> None:
+    class ObservationAwarePlanner:
+        def plan_next_action(self, **kwargs) -> PlannerDecision:
+            observations = kwargs["previous_observations"]
+            if not observations:
+                return PlannerDecision(
+                    action_type="tool_call",
+                    tool_name="search_docs",
+                    tool_args={"query": kwargs["user_query"], "target_document": "员工手册"},
+                    reason="需要先检索员工手册中的请假规定。",
+                    evidence_state="none",
+                    expected_next="如果检索到足够证据，再提取待办。",
+                )
+            if observations[-1].status == "completed" and observations[-1].tool_name == "search_docs":
+                return PlannerDecision(
+                    action_type="tool_call",
+                    tool_name="extract_todos",
+                    tool_args={},
+                    reason="已有请假规定证据，可以继续提取待办事项。",
+                    evidence_state="sufficient",
+                    expected_next="提取待办后生成最终回答。",
+                )
+            return PlannerDecision(
+                action_type="final_answer",
+                reason="已有检索证据和待办结果，可以生成最终回答。",
+                evidence_state="sufficient",
+                expected_next=None,
+            )
+
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    _upload_and_ingest(
+        client,
+        admin_token,
+        "员工手册",
+        "请假规定：员工请事假前需要先提交申请单，并同步直属主管审批；跨三天以上的请假需补充交接安排。",
+    )
+    admin_user = _get_user(db_session, "admin@example.com")
+
+    runner = AgentRunner(
+        tool_executor=ToolExecutor(CopilotToolService(db_session)),
+        planner=ObservationAwarePlanner(),
+        max_steps=3,
+    )
+    result = runner.run(
+        actor=admin_user,
+        user_query="查看员工手册里关于请假的规定，并整理成待办。",
+        session_id=None,
+        top_k=5,
+        chat_context=build_conversation_memory([]),
+        router_result=_build_router_result(
+            intent="document_qa",
+            artifact_type="tasks",
+            target_document_title="员工手册",
+            requested_document_name="员工手册",
+        ),
+        existing_messages=[],
+    )
+
+    assert [action.tool_name for action in result.run_trace.actions if action.action_type == "tool_call"] == [
+        "search_docs",
+        "extract_todos",
+    ]
+    assert result.run_trace.observations[0].tool_name == "search_docs"
+    assert result.run_trace.observations[1].tool_name == "extract_todos"
+    assert result.final_action.action_type == "final_answer"
+
+
+def test_agent_runner_same_request_can_choose_different_next_step_based_on_observation(client: TestClient, db_session: Session) -> None:
+    class ObservationAwarePlanner:
+        def plan_next_action(self, **kwargs) -> PlannerDecision:
+            observations = kwargs["previous_observations"]
+            if not observations:
+                return PlannerDecision(
+                    action_type="tool_call",
+                    tool_name="search_docs",
+                    tool_args={"query": kwargs["user_query"], "target_document": "安全例外登记"},
+                    reason="需要先检索目标文档中的补偿控制要求。",
+                    evidence_state="none",
+                    expected_next="若有证据则提取待办，否则拒绝。",
+                )
+            if observations[-1].status == "completed":
+                return PlannerDecision(
+                    action_type="tool_call",
+                    tool_name="extract_todos",
+                    tool_args={},
+                    reason="已有 grounded 证据，继续整理待办。",
+                    evidence_state="sufficient",
+                    expected_next="待办提取后结束。",
+                )
+            return PlannerDecision(
+                action_type="refuse",
+                reason="目标文档不可访问或证据不足，停止继续生成待办。",
+                evidence_state="insufficient",
+                expected_next=None,
+            )
+
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    _upload_and_ingest(
+        client,
+        admin_token,
+        "安全例外登记",
+        "安全例外登记要求：必须记录例外原因、补偿控制、审批人和到期时间。",
+    )
+    viewer_user = _get_user(db_session, "viewer@example.com")
+
+    runner = AgentRunner(
+        tool_executor=ToolExecutor(CopilotToolService(db_session)),
+        planner=ObservationAwarePlanner(),
+        max_steps=3,
+    )
+    result = runner.run(
+        actor=viewer_user,
+        user_query="查看安全例外登记里关于补偿控制的要求，并帮我整理成待办事项。",
+        session_id=None,
+        top_k=5,
+        chat_context=build_conversation_memory([]),
+        router_result=_build_router_result(
+            intent="document_qa",
+            artifact_type="tasks",
+            requested_document_name="安全例外登记",
+        ),
+        existing_messages=[],
+    )
+
+    assert [action.tool_name for action in result.run_trace.actions if action.action_type == "tool_call"] == ["search_docs"]
+    assert result.run_trace.observations[0].status == "failed"
+    assert result.final_action.action_type == "refuse"
+    assert "停止继续生成待办" in result.final_action.reason
+
+
+def test_unknown_tool_name_is_rejected(client: TestClient, db_session: Session) -> None:
+    class UnknownToolPlanner:
+        def plan_next_action(self, **kwargs) -> PlannerDecision:
+            if not kwargs["previous_observations"]:
+                return PlannerDecision(
+                    action_type="tool_call",
+                    tool_name="unknown_tool",
+                    tool_args={},
+                    reason="test unknown tool",
+                    evidence_state="none",
+                    expected_next=None,
+                )
+            return PlannerDecision(
+                action_type="refuse",
+                reason="planner 输出了未知工具，停止执行。",
+                evidence_state="insufficient",
+                expected_next=None,
+            )
+
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    _upload_and_ingest(
+        client,
+        admin_token,
+        "员工手册",
+        "请假规定：员工请假前需提交申请并同步主管审批。",
+    )
+    admin_user = _get_user(db_session, "admin@example.com")
+
+    runner = AgentRunner(
+        tool_executor=ToolExecutor(CopilotToolService(db_session)),
+        planner=UnknownToolPlanner(),
+        max_steps=3,
+    )
+    result = runner.run(
+        actor=admin_user,
+        user_query="查看员工手册里关于请假的规定，并帮我整理成待办事项。",
+        session_id=None,
+        top_k=5,
+        chat_context=build_conversation_memory([]),
+        router_result=_build_router_result(
+            intent="document_qa",
+            artifact_type="tasks",
+            target_document_title="员工手册",
+            requested_document_name="员工手册",
+        ),
+        existing_messages=[],
+    )
+
+    assert result.run_trace.actions[0].tool_name == "unknown_tool"
+    assert result.run_trace.observations[0].status == "failed"
+    assert result.run_trace.observations[0].raw_output["refusal_reason"] == "unknown_tool_name"
+    assert result.final_action.action_type == "refuse"
+
+
+def test_agent_runner_respects_max_steps(client: TestClient, db_session: Session) -> None:
+    class RepeatingPlanner:
+        def plan_next_action(self, **kwargs) -> PlannerDecision:
+            return PlannerDecision(
+                action_type="tool_call",
+                tool_name="search_docs",
+                tool_args={"query": kwargs["user_query"], "target_document": "员工手册"},
+                reason="force repeated tool call for max-step test",
+                evidence_state="partial",
+                expected_next="继续观察下一轮结果。",
+            )
+
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    _upload_and_ingest(
+        client,
+        admin_token,
+        "员工手册",
+        "请假规定：员工请假前需提交申请并同步主管审批。",
+    )
+    admin_user = _get_user(db_session, "admin@example.com")
+
+    runner = AgentRunner(
+        tool_executor=ToolExecutor(CopilotToolService(db_session)),
+        planner=RepeatingPlanner(),
+        max_steps=3,
+    )
+    result = runner.run(
+        actor=admin_user,
+        user_query="查看员工手册里关于请假的规定，并帮我整理成待办事项。",
+        session_id=None,
+        top_k=5,
+        chat_context=build_conversation_memory([]),
+        router_result=_build_router_result(
+            intent="document_qa",
+            artifact_type="tasks",
+            target_document_title="员工手册",
+            requested_document_name="员工手册",
+        ),
+        existing_messages=[],
+    )
+
+    assert result.run_trace.final_status == "max_steps_reached"
+    assert len([action for action in result.run_trace.actions if action.action_type == "tool_call"]) == 3
+    assert result.run_trace.actions[-1].action_type == "final_answer"
+
+
+def test_agent_runner_can_refuse_weekly_report_when_context_is_insufficient(db_session: Session) -> None:
+    class InsufficientContextPlanner:
+        def plan_next_action(self, **kwargs) -> PlannerDecision:
+            if kwargs["chat_context"].previous_insufficient_evidence:
+                return PlannerDecision(
+                    action_type="refuse",
+                    reason="当前上下文证据不足，先不要生成周报。",
+                    evidence_state="insufficient",
+                    expected_next="请先完成一次有证据支撑的问答。",
+                )
+            return PlannerDecision(
+                action_type="ask_clarification",
+                reason="需要先有 grounded 问答结果，才能生成周报。",
+                evidence_state="insufficient",
+                expected_next=None,
+            )
+
+    _seed_roles_and_users(db_session)
+    admin_user = _get_user(db_session, "admin@example.com")
+    runner = AgentRunner(
+        tool_executor=ToolExecutor(CopilotToolService(db_session)),
+        planner=InsufficientContextPlanner(),
+        max_steps=3,
+    )
+    memory = build_conversation_memory([])
+    memory.previous_insufficient_evidence = True
+    result = runner.run(
+        actor=admin_user,
+        user_query="根据刚才内容生成本周项目周报。",
+        session_id=None,
+        top_k=5,
+        chat_context=memory,
+        router_result=_build_router_result(intent="workflow_generation", artifact_type="weekly_report"),
+        existing_messages=[],
+    )
+
+    assert result.final_action.action_type == "refuse"
+    assert result.run_trace.observations == []
+    assert all(action.tool_name != "generate_weekly_report" for action in result.run_trace.actions if action.tool_name)
+
+
+def test_agent_runner_does_not_bypass_acl_for_compound_request(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    viewer_token = _login(client, "viewer@example.com", "viewer-pass")
+
+    _upload_and_ingest(
+        client,
+        admin_token,
+        "安全例外登记",
+        "安全例外登记要求：必须记录例外原因、补偿控制、审批人和到期时间。",
+    )
+
+    session_id = _create_session(client, viewer_token)
+    payload = _send_question(client, viewer_token, session_id, "查看安全例外登记里关于补偿控制的要求，并帮我整理成待办事项。")
+    metadata = payload["assistant_message"]["message_metadata"]
+    trace = _agent_run_trace(payload)
+
+    assert payload["assistant_message"]["insufficient_evidence"] is True
+    assert metadata["structured_result"]["refusal_reason"] == "target_document_not_accessible_or_not_found"
+    assert [action["tool_name"] for action in trace["actions"] if action["action_type"] == "tool_call"] == ["search_docs"]
+    assert trace["observations"][0]["status"] == "failed"
+    assert all((action.get("tool_name") != "extract_todos") for action in trace["actions"])
 
 
 
@@ -441,6 +903,7 @@ def test_insufficient_evidence_does_not_force_workflow_generation(client: TestCl
 
     workflow_payload = _send_question(client, viewer_token, session_id, "生成周报")
     workflow_metadata = workflow_payload["assistant_message"]["message_metadata"]
+    trace = _agent_run_trace(workflow_payload)
     tool_step = _find_step(workflow_payload, "tool_execution")
     evidence_step = _find_step(workflow_payload, "evidence_review")
 
@@ -452,4 +915,5 @@ def test_insufficient_evidence_does_not_force_workflow_generation(client: TestCl
     assert workflow_metadata["structured_result"]["refusal_reason"] == "insufficient_session_context_for_workflow"
     assert tool_step["status"] == "skipped"
     assert evidence_step["status"] == "refused"
+    assert trace["observations"] == []
 

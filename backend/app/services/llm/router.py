@@ -28,7 +28,8 @@ Rules:
 - If the user appears to reference a specific document that is not in the accessible list, keep requested_document_name, leave target_document_title and target_document_id null, and set should_refuse_if_inaccessible=true.
 - If the user asks to compare versions or asks what changed between versions, use version_compare.
 - Extract version refs such as v1, v2, latest, newest, current, previous, 最新, 上一版, 前一版 when present.
-- If the user asks to generate tasks, a weekly report, or FAQ from the conversation, use workflow_generation and set artifact_type to tasks, weekly_report, or faq.
+- artifact_type may be set together with document_qa, topic_qa, or version_compare when the user wants to search/compare first and then generate tasks, a weekly report, or FAQ.
+- Use workflow_generation only when the user is mainly asking to generate tasks, a weekly report, or FAQ from existing conversation context.
 - If the request is vague or unsupported, use unsupported_or_unclear.
 - needs_citations should usually be true for document_qa and topic_qa, false otherwise.
 """
@@ -37,15 +38,15 @@ DOCUMENT_HINT_TOKENS = ("手册", "指南", "登记", "文档", "document", "doc
 UNSUPPORTED_PATTERNS = re.compile(r"^[\s\W_。？?！!…]+$")
 VERSION_COMPARE_PATTERNS = (
     "比较",
+    "对比",
     "差异",
     "改了什么",
-    "变更",
     "compare",
     "diff",
     "changed",
 )
 WORKFLOW_PATTERNS = {
-    "tasks": ("待办", "任务", "todo", "action item"),
+    "tasks": ("待办", "任务", "待办事项", "整理成待办", "todo", "action item"),
     "weekly_report": ("周报", "weekly report", "status report"),
     "faq": ("faq", "常见问题"),
 }
@@ -110,13 +111,6 @@ class DeterministicRouterProvider:
             )
 
         artifact_type = _infer_artifact_type(lowered)
-        if artifact_type:
-            return RouterDecision(
-                intent="workflow_generation",
-                artifact_type=artifact_type,
-                needs_citations=False,
-                reasoning_brief="用户希望基于当前会话生成结构化产物。",
-            )
 
         if any(pattern in lowered for pattern in VERSION_COMPARE_PATTERNS):
             matched_document = _match_accessible_document(question, accessible_documents) or _match_context_document(
@@ -129,11 +123,20 @@ class DeterministicRouterProvider:
                 target_document_id=matched_document.document_id if matched_document else None,
                 target_document_title=matched_document.title if matched_document else None,
                 requested_document_name=_resolve_requested_document_name(question, conversation_context),
+                artifact_type=artifact_type,  # type: ignore[arg-type]
                 from_version_ref=_extract_version_ref(question, prefer="from"),
                 to_version_ref=_extract_version_ref(question, prefer="to"),
                 needs_citations=False,
                 should_refuse_if_inaccessible=matched_document is None and _looks_like_document_request(question, conversation_context),
                 reasoning_brief="问题询问版本变化或差异，适合进入版本对比工具。",
+            )
+
+        if artifact_type and _looks_like_context_workflow_request(question, conversation_context):
+            return RouterDecision(
+                intent="workflow_generation",
+                artifact_type=artifact_type,  # type: ignore[arg-type]
+                needs_citations=False,
+                reasoning_brief="用户希望基于已有会话上下文生成结构化产物。",
             )
 
         matched_document = _match_accessible_document(question, accessible_documents) or _match_context_document(
@@ -147,6 +150,7 @@ class DeterministicRouterProvider:
                 target_document_id=matched_document.document_id,
                 target_document_title=matched_document.title,
                 requested_document_name=matched_document.title,
+                artifact_type=artifact_type,  # type: ignore[arg-type]
                 needs_citations=True,
                 should_refuse_if_inaccessible=True,
                 reasoning_brief="问题明确指向一个当前可访问的具体文档。",
@@ -157,6 +161,7 @@ class DeterministicRouterProvider:
             return RouterDecision(
                 intent="document_qa",
                 requested_document_name=requested_document_name,
+                artifact_type=artifact_type,  # type: ignore[arg-type]
                 needs_citations=True,
                 should_refuse_if_inaccessible=True,
                 reasoning_brief="问题看起来在询问特定文档，但该文档不在当前可访问范围内。",
@@ -165,8 +170,9 @@ class DeterministicRouterProvider:
         return RouterDecision(
             intent="topic_qa",
             topic=question.strip(),
+            artifact_type=artifact_type,  # type: ignore[arg-type]
             needs_citations=True,
-            reasoning_brief="问题围绕一个主题展开，但没有明确点名某个文档。",
+            reasoning_brief="问题围绕一个主题展开，必要时可先检索再生成结构化结果。",
         )
 
 
@@ -326,7 +332,13 @@ def _string_or_none(value: Any) -> str | None:
 
 
 def _infer_artifact_type(lowered_question: str) -> str | None:
-    for artifact_type, patterns in WORKFLOW_PATTERNS.items():
+    task_patterns = WORKFLOW_PATTERNS["tasks"]
+    if any(pattern in lowered_question for pattern in task_patterns):
+        return "tasks"
+    if "整理" in lowered_question and "事项" in lowered_question:
+        return "tasks"
+    for artifact_type in ("weekly_report", "faq"):
+        patterns = WORKFLOW_PATTERNS[artifact_type]
         if any(pattern in lowered_question for pattern in patterns):
             return artifact_type
     return None
@@ -373,8 +385,9 @@ def _match_context_document(
 
 def _extract_requested_document_name(question: str) -> str | None:
     patterns = [
+        r"《(?P<name>[^》]{1,60})》",
         r"(?P<name>[\u4e00-\u9fa5A-Za-z0-9《》\-\s]{2,40}?)(?:里|中)关于",
-        r"(?P<name>[\u4e00-\u9fa5A-Za-z0-9《》\-\s]{2,40}?)(?:里|中)(?:写了什么|说了什么|怎么说|要求什么|改了什么)",
+        r"(?P<name>[\u4e00-\u9fa5A-Za-z0-9《》\-\s]{2,40}?)(?:里|中)(?:[^？?。！!]{0,24})?(?:怎么说|写了什么|说了什么|讲了什么|要求什么|提到什么|内容是什么|写了哪些|是什么|是谁)",
         r"(?:what does|compare|show|summarize)\s+(?P<name>[A-Za-z0-9\-\s]{2,60}?)\s+(?:document|doc|guide|handbook|runbook|say|show)",
     ]
     for pattern in patterns:
@@ -383,9 +396,6 @@ def _extract_requested_document_name(question: str) -> str | None:
             candidate = match.group("name").strip(" 《》")
             if candidate:
                 return candidate
-    if _looks_like_document_request(question):
-        compact = question.strip().strip("？?。.! ")
-        return compact[:40]
     return None
 
 
@@ -445,6 +455,29 @@ def _looks_like_followup_document_reference(question: str) -> bool:
         "那份手册",
     )
     return any(marker in lowered for marker in markers)
+
+
+def _looks_like_context_workflow_request(question: str, conversation_context: ConversationMemory | None) -> bool:
+    lowered = question.casefold()
+    direct_context_markers = (
+        "刚才",
+        "上面",
+        "上一轮",
+        "刚刚",
+        "当前会话",
+        "这次会话",
+        "根据刚才",
+        "把刚才",
+        "根据上文",
+        "把上文",
+    )
+    if any(marker in lowered for marker in direct_context_markers):
+        return True
+    if conversation_context and conversation_context.previous_tool_name and any(
+        marker in lowered for marker in ("整理一份", "生成", "提取", "沉淀成")
+    ):
+        return True
+    return False
 
 
 

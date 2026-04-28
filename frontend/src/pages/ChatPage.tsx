@@ -10,7 +10,7 @@ import { useAppContext } from "../context/AppContext";
 import { api } from "../lib/api";
 import { formatArtifactType, formatConfidence, formatCopilotIntent, formatMessageRole, formatRefusalReason } from "../lib/display";
 import { formatDateTime, locationLabel } from "../lib/format";
-import type { AgentStepRead, ChatCitationRead, ChatMessageRead, ChatSessionDetailRead, ChatSessionRead } from "../types/api";
+import type { AgentRunTraceRead, AgentStepRead, ChatCitationRead, ChatMessageRead, ChatSessionDetailRead, ChatSessionRead } from "../types/api";
 
 export function ChatPage() {
   const { token, selectedSessionId, setSelectedSessionId } = useAppContext();
@@ -338,6 +338,22 @@ function readAgentSteps(message: ChatMessageRead): AgentStepRead[] {
   });
 }
 
+function readAgentRunTrace(message: ChatMessageRead): AgentRunTraceRead | null {
+  const metadata = message.message_metadata;
+  if (!metadata || typeof metadata !== "object") {
+    return null;
+  }
+  const trace = (metadata as Record<string, unknown>).agent_run_trace;
+  if (!trace || typeof trace !== "object") {
+    return null;
+  }
+  const traceRecord = trace as Record<string, unknown>;
+  if (!traceRecord.tool_plan || !Array.isArray(traceRecord.actions) || !Array.isArray(traceRecord.observations)) {
+    return null;
+  }
+  return trace as AgentRunTraceRead;
+}
+
 function readMessageDebugInfo(message: ChatMessageRead): MessageDebugInfo | null {
   const metadata = message.message_metadata;
   if (!metadata || typeof metadata !== "object") {
@@ -383,6 +399,7 @@ function MessageBubble({ message, onSelectCitation }: MessageBubbleProps) {
   const tone = message.role === "assistant" ? "assistant" : "user";
   const debugInfo = message.role === "assistant" ? readMessageDebugInfo(message) : null;
   const agentSteps = message.role === "assistant" ? readAgentSteps(message) : [];
+  const agentRunTrace = message.role === "assistant" ? readAgentRunTrace(message) : null;
   return (
     <article className={`message-bubble ${tone}`}>
       <div className="message-meta">
@@ -403,7 +420,7 @@ function MessageBubble({ message, onSelectCitation }: MessageBubbleProps) {
           {debugInfo.refusalReason ? <span>拒答原因：{formatRefusalReason(debugInfo.refusalReason)}</span> : null}
         </div>
       ) : null}
-      {agentSteps.length ? <ExecutionTrace steps={agentSteps} /> : null}
+      {agentSteps.length || agentRunTrace ? <ExecutionTrace steps={agentSteps} runTrace={agentRunTrace} /> : null}
       {message.citations.length ? (
         <div className="message-citations">
           {message.citations.map((citation) => (

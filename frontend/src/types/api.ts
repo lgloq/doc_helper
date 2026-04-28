@@ -161,6 +161,43 @@ export interface AgentStepRead {
   metadata: Record<string, unknown>;
 }
 
+export interface ToolPlanRead {
+  planner_name: string;
+  available_tools: string[];
+  max_steps: number;
+  initial_intent: string;
+  requested_artifact_type: string | null;
+  context_summary: string | null;
+}
+
+export interface ToolActionRead {
+  step_index: number;
+  action_type: "tool_call" | "final_answer" | "refuse" | "ask_clarification" | string;
+  tool_name: string | null;
+  tool_args: Record<string, unknown>;
+  reason: string;
+  evidence_state: "none" | "partial" | "sufficient" | "insufficient" | string;
+  expected_next: string | null;
+  depends_on: number[];
+}
+
+export interface ToolObservationRead {
+  step_index: number;
+  tool_name: string;
+  status: "completed" | "failed" | "skipped" | "insufficient_context" | string;
+  output_summary: string;
+  evidence_refs: string[];
+  raw_output: Record<string, unknown> | null;
+}
+
+export interface AgentRunTraceRead {
+  tool_plan: ToolPlanRead;
+  actions: ToolActionRead[];
+  observations: ToolObservationRead[];
+  final_status: string;
+  final_reason: string | null;
+}
+
 export interface ChatCitationRead {
   id: string;
   message_id: string;
