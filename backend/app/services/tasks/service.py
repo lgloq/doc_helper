@@ -9,7 +9,7 @@ from app.models.user import User
 from app.models.workflow import TaskItem
 from app.repositories.artifact_repository import ArtifactRepository
 from app.schemas.workflow import TaskExtractRequest, TaskExtractResponse, TaskItemRead
-from app.services.workflows.source_resolver import SourceMaterialResolver, serialize_message_citation
+from app.services.workflows.source_resolver import SourceMaterialResolver, serialize_message_citation, unique_source_citations
 from app.services.workflows.utils import compact_text, infer_priority, is_actionable_sentence, normalize_title, split_into_sentences
 
 
@@ -75,8 +75,23 @@ class TaskService:
 
         if not task_items:
             latest_user_message = next((message for message in reversed(messages) if message.role == MessageRole.USER), None)
+            latest_grounded_assistant = next(
+                (
+                    message
+                    for message in reversed(messages)
+                    if message.role == MessageRole.ASSISTANT and not message.insufficient_evidence and getattr(message, "citations", [])
+                ),
+                None,
+            )
             if latest_user_message is None:
                 return []
+            fallback_citations = (
+                unique_source_citations(
+                    [serialize_message_citation(citation) for citation in getattr(latest_grounded_assistant, "citations", [])[:3]]
+                )
+                if latest_grounded_assistant is not None
+                else None
+            )
             fallback_title = normalize_title(f"Review follow-up for: {latest_user_message.content}")
             task_items.append(
                 TaskItem(
@@ -89,7 +104,7 @@ class TaskService:
                     priority="low",
                     due_date=None,
                     status="open",
-                    source_citations=None,
+                    source_citations=fallback_citations or None,
                 )
             )
         return task_items

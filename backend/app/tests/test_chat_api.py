@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -9,11 +10,15 @@ from app.core.security import hash_password
 from app.models.enums import RoleName
 from app.models.role import Role
 from app.models.user import User
-from app.schemas.llm import PlannerDecision, RouterDecision, RouterDecisionResult
+from app.schemas.llm import PlannerDecision, RouterDecision, RouterDecisionResult, ToolAction, ToolObservation
 from app.services.chat.memory import build_conversation_memory
 from app.services.llm.agent_runner import AgentRunner
+from app.services.llm.planner import _avoid_redundant_repeated_tool_call
+from app.services.llm.router import _stabilize_router_decision
+from app.services.llm.tool_registry import DEFAULT_TOOL_REGISTRY
 from app.services.llm.tool_executor import ToolExecutor
 from app.services.llm.tools import CopilotToolService
+from app.schemas.llm import RouterAccessibleDocument
 
 
 def _create_user(db_session: Session, role: Role, email: str, team_name: str | None, password: str) -> User:
@@ -218,14 +223,67 @@ def test_chat_roundtrip_persists_history_and_targeted_citations(client: TestClie
         "answer_generation",
     ]
 
-    detail_response = client.get(
+
+def test_delete_chat_session_removes_session_and_messages(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    document_id, _ = _upload_and_ingest(
+        client,
+        admin_token,
+        "客户事故响应指南",
+        "客户事故响应流程：经理需要在五分钟内建立事故沟通渠道，并同步客户影响范围与恢复进展。",
+    )
+    _grant_acl(
+        client,
+        admin_token,
+        document_id,
+        {"principal_type": "public", "can_view": True, "can_manage": False},
+    )
+
+    session_id = _create_session(client, admin_token, "待删除会话")
+    _send_question(client, admin_token, session_id, "客户事故响应指南里对经理的要求是什么？")
+
+    delete_response = client.delete(
         f"/api/v1/chat/sessions/{session_id}",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
-    assert detail_response.status_code == 200
-    detail_payload = detail_response.json()
-    assert len(detail_payload["messages"]) == 2
-    assert detail_payload["messages"][1]["citations"]
+    assert delete_response.status_code == 204
+
+    get_response = client.get(
+        f"/api/v1/chat/sessions/{session_id}",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert get_response.status_code == 404
+
+    list_response = client.get(
+        "/api/v1/chat/sessions",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert list_response.status_code == 200
+    assert all(item["id"] != session_id for item in list_response.json())
+
+
+def test_delete_chat_session_is_scoped_to_owner(client: TestClient, db_session: Session) -> None:
+    _, manager_role, _ = _seed_roles_and_users(db_session)
+    outsider = _create_user(db_session, manager_role, "outsider@example.com", "platform", "outsider-pass")
+    db_session.commit()
+
+    viewer_token = _login(client, "viewer@example.com", "viewer-pass")
+    outsider_token = _login(client, outsider.email, "outsider-pass")
+
+    session_id = _create_session(client, viewer_token, "viewer private session")
+
+    delete_response = client.delete(
+        f"/api/v1/chat/sessions/{session_id}",
+        headers={"Authorization": f"Bearer {outsider_token}"},
+    )
+    assert delete_response.status_code == 404
+
+    get_response = client.get(
+        f"/api/v1/chat/sessions/{session_id}",
+        headers={"Authorization": f"Bearer {viewer_token}"},
+    )
+    assert get_response.status_code == 200
 
 
 
@@ -329,6 +387,79 @@ def test_topic_qa_uses_accessible_search_without_explicit_title(client: TestClie
 
 
 
+def test_router_downgrades_non_explicit_document_guess_to_topic_qa() -> None:
+    accessible_documents = [
+        RouterAccessibleDocument(document_id=uuid4(), title="客户事故响应指南"),
+        RouterAccessibleDocument(document_id=uuid4(), title="客户支持、数据导出与知识库维护协作规范"),
+    ]
+    guessed = RouterDecision(
+        intent="document_qa",
+        target_document_id=accessible_documents[0].document_id,
+        target_document_title=accessible_documents[0].title,
+        needs_citations=True,
+        reasoning_brief="llm guessed a document",
+    )
+
+    stabilized = _stabilize_router_decision(
+        question="客服接到高优先级工单后，首次响应时间要求是多少？",
+        accessible_documents=accessible_documents,
+        conversation_context=None,
+        decision=guessed,
+    )
+
+    assert stabilized.intent == "topic_qa"
+    assert stabilized.target_document_id is None
+    assert stabilized.target_document_title is None
+    assert stabilized.topic == "客服接到高优先级工单后，首次响应时间要求是多少？"
+
+
+def test_topic_qa_prefers_support_manual_for_first_response_time_question(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+
+    incident_id, _ = _upload_and_ingest(
+        client,
+        admin_token,
+        "客户事故响应指南",
+        "当事故被确认后，经理需要在五分钟内建立事故沟通渠道，并明确事故 owner。这里没有定义客服对工单的首次响应时间。",
+    )
+    _grant_acl(
+        client,
+        admin_token,
+        incident_id,
+        {"principal_type": "public", "can_view": True, "can_manage": False},
+    )
+
+    support_id, _ = _upload_and_ingest(
+        client,
+        admin_token,
+        "客户支持、数据导出与知识库维护协作规范",
+        (
+            "客户工单按照影响范围、业务紧迫程度和处理复杂度分为 P1、P2、P3、P4。"
+            "P1 工单：五分钟内完成首次响应，十分钟内完成内部升级。"
+            "首次响应至少要包含三项信息：已收到问题、当前处理状态、下一次同步时间点。"
+        ),
+    )
+    _grant_acl(
+        client,
+        admin_token,
+        support_id,
+        {"principal_type": "public", "can_view": True, "can_manage": False},
+    )
+
+    session_id = _create_session(client, admin_token)
+    payload = _send_question(client, admin_token, session_id, "客服接到高优先级工单后，首次响应时间要求是多少？")
+    metadata = payload["assistant_message"]["message_metadata"]
+
+    assert payload["assistant_message"]["insufficient_evidence"] is False
+    assert "五分钟" in payload["assistant_message"]["content"]
+    assert payload["citations"]
+    assert payload["citations"][0]["document_title"] == "客户支持、数据导出与知识库维护协作规范"
+    assert all(item["document_title"] != "客户事故响应指南" for item in payload["citations"])
+    assert metadata["router_decision"]["intent"] == "topic_qa"
+    assert metadata["tool_execution"]["tool_name"] == "search_docs"
+
+
 def test_version_compare_routes_to_compare_tool(client: TestClient, db_session: Session) -> None:
     _seed_roles_and_users(db_session)
     admin_token = _login(client, "admin@example.com", "admin-pass")
@@ -395,6 +526,9 @@ def test_single_turn_multi_tool_search_then_extract_todos(client: TestClient, db
     assert trace["final_status"] == "completed"
     assert trace["observations"][0]["tool_name"] == "search_docs"
     assert trace["observations"][1]["tool_name"] == "extract_todos"
+    assert payload["citations"]
+    assert len({item["chunk_id"] or item["preview"] for item in payload["citations"]}) == len(payload["citations"])
+    assert "检索候选分块" in _find_step(payload, "evidence_review")["output_summary"]
 
 
 def test_version_compare_then_extract_todos(client: TestClient, db_session: Session) -> None:
@@ -612,6 +746,48 @@ def test_agent_runner_same_request_can_choose_different_next_step_based_on_obser
     assert "停止继续生成待办" in result.final_action.reason
 
 
+def test_redundant_search_docs_plan_is_collapsed_to_final_answer() -> None:
+    previous_action = ToolAction(
+        step_index=1,
+        action_type="tool_call",
+        tool_name="search_docs",
+        tool_args={"query": "高优先级工单首次响应时间要求", "target_document": "客户事故响应指南"},
+        reason="先检索目标文档。",
+        evidence_state="none",
+        expected_next="根据检索结果继续。",
+        depends_on=[],
+    )
+    repeated_decision = PlannerDecision(
+        action_type="tool_call",
+        tool_name="search_docs",
+        tool_args={"query": "高优先级工单首次响应时间要求", "target_document": "客户事故响应指南"},
+        reason="再次检索同一文档。",
+        evidence_state="none",
+        expected_next="继续检索。",
+    )
+
+    sanitized = _avoid_redundant_repeated_tool_call(
+        decision=repeated_decision,
+        available_tools=DEFAULT_TOOL_REGISTRY.list_definitions(DEFAULT_TOOL_REGISTRY.names()),
+        previous_actions=[previous_action],
+        previous_observations=[
+            ToolObservation(
+                step_index=1,
+                tool_name="search_docs",
+                status="completed",
+                output_summary="目标文档=客户事故响应指南；命中 5 个候选分块。",
+                evidence_refs=["客户事故响应指南 · 第 1 段"],
+                raw_output={"matched_chunks": 5},
+            )
+        ],
+        artifact_type=None,
+    )
+
+    assert sanitized.action_type == "final_answer"
+    assert sanitized.tool_name is None
+    assert "无需重复调用相同工具" in sanitized.reason
+
+
 def test_unknown_tool_name_is_rejected(client: TestClient, db_session: Session) -> None:
     class UnknownToolPlanner:
         def plan_next_action(self, **kwargs) -> PlannerDecision:
@@ -797,9 +973,13 @@ def test_workflow_generation_routes_to_session_artifact_tools(client: TestClient
 
     task_payload = _send_question(client, admin_token, session_id, "把刚才整理成待办")
     task_metadata = task_payload["assistant_message"]["message_metadata"]
+    task_evidence_step = _find_step(task_payload, "evidence_review")
     assert task_metadata["router_decision"]["intent"] == "workflow_generation"
     assert task_metadata["tool_execution"]["tool_name"] == "extract_todos"
     assert task_metadata["structured_result"]["artifact_type"] == "tasks"
+    assert task_payload["citations"]
+    assert len({item["chunk_id"] or item["preview"] for item in task_payload["citations"]}) == len(task_payload["citations"])
+    assert "结构化结果生成前检查" in task_evidence_step["output_summary"]
     assert _find_step(task_payload, "tool_execution")["tool_name"] == "extract_todos"
 
     report_payload = _send_question(client, admin_token, session_id, "生成周报")

@@ -352,6 +352,35 @@ h4 {
   background: rgba(255, 255, 255, 0.65);
 }
 
+.citation-panel .panel-header {
+  align-items: center;
+  margin-bottom: 1.18rem;
+}
+
+.citation-panel .citation-list {
+  gap: 0.9rem;
+  padding-top: 0.28rem;
+}
+
+.citation-card-topline {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin-bottom: 0.42rem;
+}
+
+.citation-card-topline strong,
+.citation-card-topline span {
+  min-width: 0;
+}
+
+.citation-card-topline span {
+  color: var(--muted);
+  font-size: 0.88rem;
+  white-space: nowrap;
+}
+
 .list-card,
 .citation-card {
   text-align: left;
@@ -430,6 +459,8 @@ h4 {
   max-height: 62vh;
   overflow: auto;
   padding-right: 0.25rem;
+  align-content: start;
+  grid-auto-rows: max-content;
 }
 
 .message-bubble.user {
@@ -642,13 +673,90 @@ h4 {
   align-items: start;
   grid-auto-rows: max-content;
   max-height: min(70vh, calc(100vh - 15rem));
-  overflow: auto;
-  padding-right: 0.25rem;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 0.6rem;
+  scrollbar-gutter: stable;
 }
 
 .session-list .list-card {
   align-self: start;
   height: auto;
+  margin-right: 0.2rem;
+}
+
+.session-list-card {
+  position: relative;
+  padding: 0;
+  overflow: hidden;
+}
+
+.session-select-button {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 0.86rem 2.75rem 0.82rem 0.92rem;
+  color: inherit;
+  display: grid;
+  align-content: start;
+  gap: 0.5rem;
+}
+
+.session-select-button:disabled {
+  cursor: not-allowed;
+}
+
+.session-delete-button {
+  position: absolute;
+  top: 0.98rem;
+  right: 0.88rem;
+  border: 0;
+  background: rgba(166, 64, 49, 0.06);
+  color: var(--danger);
+  font-size: 0.92rem;
+  font-weight: 600;
+  width: 1.58rem;
+  height: 1.58rem;
+  padding: 0;
+  border-radius: 999px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 120ms ease, background-color 120ms ease;
+}
+
+.session-list-card.is-selected .session-delete-button,
+.session-list-card:hover .session-delete-button,
+.session-delete-button:focus-visible {
+  opacity: 1;
+}
+
+.session-delete-button:hover:not(:disabled) {
+  background: rgba(166, 64, 49, 0.14);
+}
+
+.session-delete-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.session-list .list-card strong {
+  display: block;
+  line-height: 1.2;
+  padding-right: 1.85rem;
+}
+
+.session-list .list-card p {
+  font-size: 0.96rem;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.session-list .list-card .list-card-topline {
+  align-items: flex-start;
 }
 
 .chat-thread {

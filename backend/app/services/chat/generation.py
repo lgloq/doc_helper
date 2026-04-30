@@ -88,7 +88,7 @@ class DeterministicAnswerGenerator:
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
 
-        top_score = selected_chunks[0].score.fused if selected_chunks else 0.0
+        top_score = _candidate_signal_score(selected_chunks[0]) if selected_chunks else 0.0
         top_lexical = selected_chunks[0].score.lexical_raw if selected_chunks else 0.0
         evidence_conflict = _detect_evidence_conflict(retrieved_chunks)
         if not allow_low_score and top_score < 0.08 and top_lexical <= 0:
@@ -221,7 +221,10 @@ def _select_grounded_chunks(retrieved_chunks: list[SearchResultChunk], *, allow_
         return []
     top_document_id = retrieved_chunks[0].document_id
     same_document_chunks = [
-        chunk for chunk in retrieved_chunks if chunk.document_id == top_document_id and (chunk.score.fused > 0.0 or chunk.score.lexical_raw > 0.0)
+        chunk
+        for chunk in retrieved_chunks
+        if chunk.document_id == top_document_id
+        and (_candidate_signal_score(chunk) > 0.0 or chunk.score.lexical_raw > 0.0)
     ]
     if same_document_chunks:
         return same_document_chunks[:2]
@@ -229,7 +232,15 @@ def _select_grounded_chunks(retrieved_chunks: list[SearchResultChunk], *, allow_
         fallback_chunks = [chunk for chunk in retrieved_chunks if chunk.document_id == top_document_id]
         if fallback_chunks:
             return fallback_chunks[:2]
-    return [chunk for chunk in retrieved_chunks[:2] if chunk.score.fused > 0.0 or chunk.score.lexical_raw > 0.0]
+    return [
+        chunk
+        for chunk in retrieved_chunks[:2]
+        if _candidate_signal_score(chunk) > 0.0 or chunk.score.lexical_raw > 0.0
+    ]
+
+
+def _candidate_signal_score(chunk: SearchResultChunk) -> float:
+    return max(chunk.score.fused, chunk.score.rerank or 0.0)
 
 
 

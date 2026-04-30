@@ -289,6 +289,9 @@ class LLMActionPlanner:
             decision = decision.model_copy(update={"tool_args": tool_args})
         decision = _sanitize_planner_decision(
             decision=decision,
+            available_tools=available_tools,
+            previous_actions=previous_actions,
+            previous_observations=previous_observations,
             last_observation=last_observation,
             last_refusal_reason=last_refusal_reason,
             artifact_type=artifact_type,
@@ -400,6 +403,9 @@ def _terminal_decision_from_observation(
 def _sanitize_planner_decision(
     *,
     decision: PlannerDecision,
+    available_tools: list[ToolDefinition],
+    previous_actions: list[ToolAction],
+    previous_observations: list[ToolObservation],
     last_observation: ToolObservation | None,
     last_refusal_reason: str | None,
     artifact_type: str | None,
@@ -411,4 +417,59 @@ def _sanitize_planner_decision(
     )
     if terminal_decision is not None and decision.action_type == "tool_call":
         return terminal_decision
+    return _avoid_redundant_repeated_tool_call(
+        decision=decision,
+        available_tools=available_tools,
+        previous_actions=previous_actions,
+        previous_observations=previous_observations,
+        artifact_type=artifact_type,
+    )
+
+
+def _avoid_redundant_repeated_tool_call(
+    *,
+    decision: PlannerDecision,
+    available_tools: list[ToolDefinition],
+    previous_actions: list[ToolAction],
+    previous_observations: list[ToolObservation],
+    artifact_type: str | None,
+) -> PlannerDecision:
+    if decision.action_type != "tool_call" or not previous_actions or not previous_observations:
+        return decision
+
+    previous_action = previous_actions[-1]
+    last_observation = previous_observations[-1]
+    if previous_action.action_type != "tool_call":
+        return decision
+    if previous_action.tool_name != decision.tool_name or previous_action.tool_args != decision.tool_args:
+        return decision
+    if last_observation.tool_name != decision.tool_name:
+        return decision
+
+    if last_observation.status == "completed":
+        allowed_tools = {tool.name for tool in available_tools}
+        workflow_tool = _artifact_tool_name(artifact_type, allowed_tools)
+        if workflow_tool and workflow_tool != decision.tool_name:
+            return PlannerDecision(
+                action_type="tool_call",
+                tool_name=workflow_tool,
+                tool_args={},
+                reason="已有同一轮检索或对比结果，继续执行结构化结果工具即可。",
+                evidence_state="sufficient",
+                expected_next="结构化结果生成后返回最终答复。",
+            )
+        return PlannerDecision(
+            action_type="final_answer",
+            reason="已有同一工具的有效 observation，无需重复调用相同工具。",
+            evidence_state="sufficient",
+            expected_next=None,
+        )
+
+    if last_observation.status in {"failed", "insufficient_context"}:
+        return PlannerDecision(
+            action_type="refuse",
+            reason="上一轮同一工具未获得新证据，停止重复调用。",
+            evidence_state="insufficient",
+            expected_next=None,
+        )
     return decision

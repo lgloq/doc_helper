@@ -72,3 +72,33 @@ def unique_serialized_citations(messages: list[ChatMessage], limit: int | None =
             if limit is not None and len(items) >= limit:
                 return items
     return items
+
+
+def citation_identity(payload: dict) -> str:
+    chunk_id = payload.get("chunk_id")
+    if chunk_id:
+        return f"chunk:{chunk_id}"
+    return "|".join(
+        [
+            str(payload.get("document_id") or ""),
+            str(payload.get("document_version_id") or ""),
+            str(payload.get("chunk_index") or ""),
+            str(payload.get("page_number_start") or ""),
+            str(payload.get("paragraph_start") or ""),
+            str(payload.get("preview") or ""),
+        ]
+    )
+
+
+def unique_source_citations(citations: list[dict], limit: int | None = None) -> list[dict]:
+    seen: set[str] = set()
+    items: list[dict] = []
+    for citation in citations:
+        identity = citation_identity(citation)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        items.append(citation)
+        if limit is not None and len(items) >= limit:
+            break
+    return items

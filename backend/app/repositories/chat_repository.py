@@ -17,6 +17,9 @@ class ChatRepository:
         self.session.add(chat_session)
         return chat_session
 
+    def delete_session(self, chat_session: ChatSession) -> None:
+        self.session.delete(chat_session)
+
     def list_sessions_for_user(self, user_id: UUID) -> list[ChatSession]:
         statement = (
             select(ChatSession)

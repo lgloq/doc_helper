@@ -1,6 +1,6 @@
 # 权限感知的 RAG 企业文档知识助手
 
-面向企业知识库的权限感知 RAG 应用，支持多角色访问控制、引用溯源、版本对比、受控工具调用与结构化工作流生成。
+面向企业知识库的权限感知 RAG 应用，支持多角色访问控制、引用溯源、版本对比、多步骤处理与结构化结果生成。
 
 ## 界面预览
 <p align="center">
@@ -26,10 +26,10 @@
 - 权限感知检索：无权限文档不会进入候选集
 - 候选重排：混合召回后的安全候选会进入轻量 rerank 阶段，再选出最终 `top_k`
 - 引用式问答：回答与引用来源分开返回
-- 受控工具规划与处理轨迹：前端可展开查看 `Tool Plan / Step / Observation / Final Trace`
+- 多步骤处理与轨迹回看：前端可展开查看每一步处理过程和最终结果
 - 轻量上下文复用：保留最近多轮消息，并复用上一轮目标文档、工具、结果类型与 observation 摘要
 - 版本对比：支持原始 diff、差异摘要和影响提示
-- 结构化工作流：支持待办、周报草稿、FAQ 草稿生成
+- 结构化结果生成：支持待办、周报草稿、FAQ 草稿生成
 - 评测与链路追踪：支持效果验证与 trace 记录
 
 ## 主要功能
@@ -39,7 +39,7 @@
 - 文档级 ACL：支持 `public / user / role / team`
 - 基于 PostgreSQL FTS + pgvector 的权限感知混合检索与候选重排
 - 引用式问答：回答、citation、confidence、证据不足兜底
-- LLM 驱动的受控工具规划：planner 基于问题、上下文和 observation 决定下一步 action
+- 基于上下文的多步骤处理：系统会结合问题、会话内容和已有结果决定下一步处理
 - 派生工作流：
   - 待办提取
   - 周报草稿生成
@@ -57,8 +57,8 @@
 - 权限过滤在检索阶段生效，候选集、citation 和 prompt 都只基于可访问文档
 - 检索链路采用 `ACL -> hybrid retrieval -> heuristic rerank -> grounded answer`
 - 回答与 citation 分开返回，前端可以单独展示来源片段和定位信息
-- router 只做粗分类，真正的下一步工具由 LLM planner 基于上下文和 observation 结构化决定
-- 工具调用采用受控 observe -> decide -> act 循环，最多执行 3 步，未知工具会被拒绝执行
+- 系统会先判断问题类型，再结合当前上下文和已有结果决定下一步处理
+- 多步骤处理按 `observe -> decide -> act` 方式执行，最多执行 3 步，未知工具不会被执行
 - 多轮追问可复用上一轮目标文档、上一轮工具、结果类型和 observation 摘要，但不引入长期 memory 或额外状态表
 - 会话结果可以继续派生成待办、周报草稿和 FAQ 草稿
 - 版本对比同时保留原始 diff、摘要和影响提示
@@ -66,31 +66,32 @@
 
 ## 系统架构
 ```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}}}%%
 flowchart LR
     U["用户"] --> FE["React 前端"]
-    FE --> API["FastAPI 后端"]
+    FE --> API["FastAPI API"]
     API --> AUTH["认证 / ACL"]
     API --> INGEST["文档摄取"]
-    API --> ROUTER["粗粒度意图路由 / 上下文复用"]
-    API --> PLANNER["LLM Planner"]
-    PLANNER --> EXEC["Tool Executor"]
-    EXEC --> RET["权限感知检索 / 版本对比 / 结构化结果"]
-    RET --> RERANK["候选重排"]
-    RERANK --> CHAT["Grounded 问答 / Final Answer"]
-    API --> CHAT["Grounded 问答 / Final Answer"]
-    API --> TASKS["待办 / 周报 / FAQ"]
-    API --> DIFF["版本 Diff"]
+    API --> ROUTER["Router / 上下文构建"]
+    ROUTER --> RUNNER["Workflow Runner"]
+    RUNNER --> PLANNER["LLM Planner"]
+    RUNNER --> EXEC["Tool Executor"]
+    EXEC --> REG["Tool Registry"]
+    EXEC --> SEARCH["权限感知检索"]
+    SEARCH --> HYBRID["FTS + pgvector 混合召回"]
+    HYBRID --> RERANK["Heuristic Rerank"]
+    EXEC --> DIFF["版本对比服务"]
+    EXEC --> TASKS["待办 / 周报 / FAQ 服务"]
+    RERANK --> ANSWER["问答 / 结果生成"]
+    DIFF --> ANSWER
+    TASKS --> ANSWER
     API --> EVAL["评测服务"]
     API --> OBS["Trace 服务"]
     AUTH --> PG[("PostgreSQL + pgvector")]
     INGEST --> FILES["本地文件存储"]
     INGEST --> PG
-    ROUTER --> PG
-    RET --> PG
     EXEC --> PG
-    CHAT --> PG
-    TASKS --> PG
-    DIFF --> PG
+    ANSWER --> PG
     EVAL --> PG
     OBS --> PG
     API --> REDIS[("Redis")]
@@ -132,7 +133,7 @@ docker-compose.yml
 - 文档上传、解析、切块、向量化、索引
 - 权限感知混合检索与候选重排
 - citation grounding 问答与会话历史
-- LLM 驱动的受控工具规划、Tool Plan / Observation 轨迹与轻量上下文复用
+- 基于上下文的多步骤处理、处理轨迹与轻量上下文复用
 - 待办提取 / 周报草稿 / FAQ 草稿
 - 文档版本上传、版本对比与摘要
 - Eval 服务与 demo case
@@ -151,28 +152,29 @@ docker-compose.yml
 ## 运行与验证
 - 支持通过 `docker compose up --build` 拉起 PostgreSQL、Redis、FastAPI 和 React 本地环境
 - 提供 `seed_demo_data.py` 用于初始化演示知识库、版本和权限数据
-- 仓库包含 chat、search、ACL、version、workflow、eval、observability 等后端测试用例
+- 仓库包含 chat、search、ACL、version、结构化结果、eval、observability 等后端测试用例
 - 已覆盖 `admin / manager / viewer` 三类角色的演示与回归验证，并补充 `viewer2` 作为团队权限演示账号
 - 当前后端测试已覆盖多工具串联、版本对比后停止、未知工具拒绝、`max_steps` 生效、无权限追问拒答与证据不足阻断结构化生成等场景
 - 检索结果 debug 现已记录 `pre_rerank_count / post_rerank_count / rerank_strategy`，便于回看召回后重排阶段
 
-## 受控工具调用工作流说明
-系统在现有 RAG 链路上增加了一层受控工具调用工作流，用于处理检索、版本对比和结构化结果生成等多步骤请求：
+## 多步骤处理说明
+系统在现有 RAG 链路上补充了一层多步骤处理流程，用于串起检索、版本对比和结构化结果生成等请求：
 
-- `router` 只负责粗分类，`planner` 根据用户问题、轻量上下文、已有 observations 和可用工具描述输出结构化 JSON action
+- 系统会先判断问题属于文档问答、主题问答、版本对比还是结构化结果生成
+- 对于需要分步完成的请求，系统会结合当前问题、会话上下文和已有结果决定下一步处理
 - 允许工具固定为 `search_docs / compare_versions / extract_todos / generate_weekly_report / generate_faq`
-- `agent_runner` 按 `observe -> decide -> act` 循环执行，最多 3 步，超过上限后会基于已有 observation 收束为最终回答或拒答
-- planner 可输出 `tool_call / final_answer / refuse / ask_clarification`，未知工具不会被执行，只会记录 failed observation
-- assistant 消息 metadata 与 trace 中会同时保留新的 `tool_plan / actions / observations / final_status`，以及兼容层 `agent_steps`
-- 前端“处理轨迹”面板主视图展示 `Tool Plan / Step / Final Trace`，旧五步摘要折叠为“兼容摘要”
+- 整个流程最多执行 3 步，超过上限后会基于已有结果收束为最终回答、拒答或补充说明
+- 当前处理结果会保留每一步的工具选择、执行结果和最终处理状态，未知工具不会被执行
+- assistant 消息 metadata 与 trace 中会保留当前处理轨迹，便于前端展示和问题排查
+- 前端“处理轨迹”面板主视图展示当前处理步骤，旧五步摘要折叠为“兼容摘要”
 
 典型链路示例：
 - 文档问答：`search_docs -> final_answer`
 - 检索后提取待办：`search_docs -> extract_todos -> final_answer`
 - 版本对比后整理事项：`compare_versions -> extract_todos -> final_answer`
-- 上下文不足时生成周报：planner 直接 `refuse`，不会强行调用 `generate_weekly_report`
+- 上下文不足时生成周报：会直接拒绝，不强行继续生成
 
-这层工作流聚焦受控执行、上下文复用和轨迹可回看，用于支撑企业知识场景下的问答、版本对比与结构化结果生成。
+这套处理流程的重点是让系统在已有证据和上下文基础上分步完成请求，同时保留可回看的处理轨迹。
 
 ## 评测结果
 

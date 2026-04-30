@@ -180,6 +180,12 @@ export const api = {
   getChatSession(token: string, sessionId: string) {
     return request<ChatSessionDetailRead>(`/api/v1/chat/sessions/${sessionId}`, { token });
   },
+  deleteChatSession(token: string, sessionId: string) {
+    return request<void>(`/api/v1/chat/sessions/${sessionId}`, {
+      method: "DELETE",
+      token,
+    });
+  },
   sendChatMessage(token: string, sessionId: string, content: string, topK = 5) {
     return request<ChatMessageCreateResponse>(`/api/v1/chat/sessions/${sessionId}/messages`, {
       method: "POST",

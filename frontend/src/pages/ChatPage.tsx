@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { CitationList } from "../components/CitationList";
@@ -17,42 +17,83 @@ export function ChatPage() {
   const [sessions, setSessions] = useState<ChatSessionRead[]>([]);
   const [activeSession, setActiveSession] = useState<ChatSessionDetailRead | null>(null);
   const [messageDraft, setMessageDraft] = useState("");
+  const [pendingSubmission, setPendingSubmission] = useState<{ sessionId: string; content: string } | null>(null);
   const [selectedCitation, setSelectedCitation] = useState<ChatCitationRead | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
+  const [creatingSession, setCreatingSession] = useState(false);
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [artifactMessage, setArtifactMessage] = useState<string | null>(null);
   const threadRef = useRef<HTMLDivElement | null>(null);
   const sessionButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const selectedSessionIdRef = useRef<string | null>(selectedSessionId);
+  const sessionListRequestRef = useRef(0);
+  const sessionDetailRequestRef = useRef(0);
+  selectedSessionIdRef.current = selectedSessionId;
+
+  const loadSessions = useCallback(
+    async (preferredSessionId?: string | null) => {
+      if (!token) {
+        setSessions([]);
+        return null;
+      }
+      const requestId = ++sessionListRequestRef.current;
+      const items = await api.listChatSessions(token);
+      if (requestId !== sessionListRequestRef.current) {
+        return null;
+      }
+      setSessions(items);
+      const currentPreferredId = preferredSessionId ?? selectedSessionIdRef.current;
+      const nextSessionId =
+        currentPreferredId && items.some((item) => item.id === currentPreferredId)
+          ? currentPreferredId
+          : items[0]?.id ?? null;
+      if (nextSessionId !== selectedSessionIdRef.current) {
+        selectedSessionIdRef.current = nextSessionId;
+        setSelectedSessionId(nextSessionId);
+      }
+      return items;
+    },
+    [setSelectedSessionId, token],
+  );
 
   useEffect(() => {
     if (!token) {
       return;
     }
     setLoading(true);
-    api
-      .listChatSessions(token)
+    loadSessions()
       .then((items) => {
-        setSessions(items);
-        const nextSessionId = selectedSessionId && items.some((item) => item.id === selectedSessionId)
-          ? selectedSessionId
-          : items[0]?.id ?? null;
-        if (nextSessionId) {
-          setSelectedSessionId(nextSessionId);
+        if (items && !items.length) {
+          setActiveSession(null);
         }
       })
       .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "加载会话列表失败。"))
       .finally(() => setLoading(false));
-  }, [selectedSessionId, setSelectedSessionId, token]);
+  }, [loadSessions, token]);
 
   useEffect(() => {
     if (!token || !selectedSessionId) {
       setActiveSession(null);
+      setSelectedCitation(null);
       return;
     }
+    let cancelled = false;
+    const sessionId = selectedSessionId;
+    const requestId = ++sessionDetailRequestRef.current;
+    setSelectedCitation(null);
     api
-      .getChatSession(token, selectedSessionId)
+      .getChatSession(token, sessionId)
       .then((session) => {
+        if (
+          cancelled ||
+          requestId !== sessionDetailRequestRef.current ||
+          session.id !== sessionId ||
+          selectedSessionIdRef.current !== sessionId
+        ) {
+          return;
+        }
         setActiveSession(session);
         const latestCitation = [...session.messages]
           .reverse()
@@ -60,6 +101,9 @@ export function ChatPage() {
         setSelectedCitation(latestCitation);
       })
       .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "加载会话详情失败。"));
+    return () => {
+      cancelled = true;
+    };
   }, [selectedSessionId, token]);
 
   useEffect(() => {
@@ -73,7 +117,10 @@ export function ChatPage() {
   }, [selectedSessionId, sessions]);
 
   useEffect(() => {
-    if (!activeSession?.messages.length || !threadRef.current) {
+    const hasPendingInActiveSession = Boolean(
+      pendingSubmission && activeSession?.id && pendingSubmission.sessionId === activeSession.id,
+    );
+    if ((!activeSession?.messages.length && !hasPendingInActiveSession) || !threadRef.current) {
       return;
     }
     const nextFrame = window.requestAnimationFrame(() => {
@@ -84,55 +131,70 @@ export function ChatPage() {
       thread.scrollTo({ top: thread.scrollHeight, behavior: "smooth" });
     });
     return () => window.cancelAnimationFrame(nextFrame);
-  }, [activeSession?.id, activeSession?.messages.length]);
+  }, [activeSession?.id, activeSession?.messages.length, pendingSubmission]);
 
   async function handleCreateSession() {
-    if (!token) {
+    if (!token || creatingSession || sending || deletingSessionId) {
       return;
     }
+    setCreatingSession(true);
     try {
       const session = await api.createChatSession(token, "新会话");
-      const nextSessions = await api.listChatSessions(token);
-      setSessions(nextSessions);
+      sessionListRequestRef.current += 1;
+      sessionDetailRequestRef.current += 1;
+      setSessions((current) => [session, ...current.filter((item) => item.id !== session.id)]);
+      setActiveSession({ ...session, messages: [] });
+      selectedSessionIdRef.current = session.id;
       setSelectedSessionId(session.id);
+      setSelectedCitation(null);
       setArtifactMessage(null);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "创建会话失败。");
+    } finally {
+      setCreatingSession(false);
     }
   }
 
   async function handleSendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!token || !selectedSessionId || !messageDraft.trim()) {
+    if (!token || !selectedSessionId || !messageDraft.trim() || creatingSession || deletingSessionId) {
       return;
     }
+    const outgoingContent = messageDraft.trim();
+    const targetSessionId = selectedSessionId;
+    setMessageDraft("");
+    setPendingSubmission({ sessionId: targetSessionId, content: outgoingContent });
+    setSelectedCitation(null);
     setSending(true);
     setError(null);
     try {
-      const response = await api.sendChatMessage(token, selectedSessionId, messageDraft.trim(), 5);
-      setMessageDraft("");
+      await api.sendChatMessage(token, targetSessionId, outgoingContent, 5);
+      const refreshedSession = await api.getChatSession(token, targetSessionId);
       setActiveSession((current) => {
-        if (!current) {
+        if (selectedSessionIdRef.current !== targetSessionId) {
           return current;
         }
-        return {
-          ...current,
-          messages: [...current.messages, response.user_message, response.assistant_message],
-          updated_at: response.assistant_message.created_at,
-        };
+        return refreshedSession;
       });
-      setSelectedCitation(response.citations[0] ?? null);
-      const nextSessions = await api.listChatSessions(token);
-      setSessions(nextSessions);
+      if (selectedSessionIdRef.current === targetSessionId) {
+        const latestCitation =
+          [...refreshedSession.messages]
+            .reverse()
+            .flatMap((message) => message.citations)[0] ?? null;
+        setSelectedCitation(latestCitation);
+      }
+      await loadSessions(targetSessionId);
     } catch (nextError) {
+      setMessageDraft(outgoingContent);
       setError(nextError instanceof Error ? nextError.message : "发送问题失败。");
     } finally {
+      setPendingSubmission((current) => (current?.sessionId === targetSessionId ? null : current));
       setSending(false);
     }
   }
 
   async function handleArtifactAction(action: "tasks" | "report" | "faq") {
-    if (!token || !selectedSessionId) {
+    if (!token || !selectedSessionId || deletingSessionId) {
       return;
     }
     setArtifactMessage(null);
@@ -152,7 +214,74 @@ export function ChatPage() {
     }
   }
 
-  const flattenedCitations = activeSession?.messages.flatMap((message) => message.citations) ?? [];
+  async function handleDeleteSession(sessionId: string) {
+    if (!token || sending || creatingSession || deletingSessionId) {
+      return;
+    }
+    const targetSession = sessions.find((item) => item.id === sessionId);
+    const sessionLabel = targetSession?.title || "这个会话";
+    if (!window.confirm(`确定删除“${sessionLabel}”吗？该会话下的问答记录和引用会一起移除。`)) {
+      return;
+    }
+
+    const remainingSessions = sessions.filter((item) => item.id !== sessionId);
+    const nextSessionId = selectedSessionId === sessionId ? (remainingSessions[0]?.id ?? null) : selectedSessionId;
+
+    setDeletingSessionId(sessionId);
+    setError(null);
+    try {
+      await api.deleteChatSession(token, sessionId);
+      setSessions(remainingSessions);
+      sessionDetailRequestRef.current += 1;
+      if (selectedSessionId === sessionId) {
+        selectedSessionIdRef.current = nextSessionId;
+        setSelectedSessionId(nextSessionId);
+        setSelectedCitation(null);
+        setActiveSession(null);
+      }
+      await loadSessions(nextSessionId);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "删除会话失败。");
+      await loadSessions(selectedSessionIdRef.current);
+    } finally {
+      setDeletingSessionId(null);
+    }
+  }
+
+  const pendingSessionId = pendingSubmission?.sessionId ?? null;
+  const selectedSession = selectedSessionId ? sessions.find((item) => item.id === selectedSessionId) ?? null : null;
+  const activeMessages =
+    activeSession && (!selectedSessionId || activeSession.id === selectedSessionId) ? activeSession.messages : [];
+  const visibleSessionTitle =
+    selectedSession?.title ??
+    (activeSession && (!selectedSessionId || activeSession.id === selectedSessionId) ? activeSession.title : null) ??
+    "当前会话";
+  const pendingDraftContent = pendingSubmission?.content.trim() ?? "";
+  const pendingMatchesSelectedSession = Boolean(
+    pendingSessionId && selectedSessionId && pendingSessionId === selectedSessionId,
+  );
+  const pendingMatchesActiveSession = Boolean(
+    pendingSessionId && activeSession?.id && pendingSessionId === activeSession.id,
+  );
+  const pendingFallbackForFreshSession = Boolean(
+    sending &&
+      pendingSessionId &&
+      activeSession?.id === pendingSessionId &&
+      activeMessages.length === 0 &&
+      activeSession.title === "新会话" &&
+      pendingDraftContent,
+  );
+  const visibleCitations = resolveVisibleCitations(
+    activeSession,
+    selectedCitation,
+    pendingSessionId,
+    selectedSessionId,
+  );
+  const showPending = Boolean(
+    sending &&
+      pendingDraftContent &&
+      (pendingMatchesSelectedSession || pendingMatchesActiveSession || pendingFallbackForFreshSession),
+  );
 
   return (
     <div className="page-stack">
@@ -161,8 +290,8 @@ export function ChatPage() {
         description="围绕可访问的企业文档发起 RAG 问答，查看引用来源，并沉淀为待办、周报或 FAQ。"
         actions={
           <div className="inline-actions">
-            <button className="secondary-button" onClick={handleCreateSession} type="button">
-              新建会话
+            <button className="secondary-button" disabled={creatingSession || sending || Boolean(deletingSessionId)} onClick={handleCreateSession} type="button">
+              {creatingSession ? "创建中..." : "新建会话"}
             </button>
             <Link className="secondary-button link-button" to="/artifacts">
               查看派生结果
@@ -186,20 +315,35 @@ export function ChatPage() {
           <div className="session-list">
             {sessions.length ? (
               sessions.map((session) => (
-                <button
+                <div
                   key={session.id}
-                  className={`list-card ${selectedSessionId === session.id ? "is-selected" : ""}`}
-                  onClick={() => setSelectedSessionId(session.id)}
-                  ref={(element) => {
-                    sessionButtonRefs.current[session.id] = element;
-                  }}
-                  type="button"
+                  className={`list-card session-list-card ${selectedSessionId === session.id ? "is-selected" : ""}`}
                 >
-                  <div className="list-card-topline">
-                    <strong>{session.title}</strong>
-                  </div>
-                  <p>{formatDateTime(session.updated_at)}</p>
-                </button>
+                  <button
+                    className="session-select-button"
+                    onClick={() => setSelectedSessionId(session.id)}
+                    disabled={creatingSession || sending || Boolean(deletingSessionId)}
+                    ref={(element) => {
+                      sessionButtonRefs.current[session.id] = element;
+                    }}
+                    type="button"
+                  >
+                    <div className="list-card-topline">
+                      <strong>{session.title}</strong>
+                    </div>
+                    <p>{formatDateTime(session.updated_at)}</p>
+                  </button>
+                  <button
+                    className="session-delete-button"
+                    disabled={creatingSession || sending || Boolean(deletingSessionId)}
+                    onClick={() => handleDeleteSession(session.id)}
+                    aria-label={`删除会话：${session.title}`}
+                    title={`删除会话：${session.title}`}
+                    type="button"
+                  >
+                    {deletingSessionId === session.id ? "..." : "×"}
+                  </button>
+                </div>
               ))
             ) : (
               <p className="muted">暂无会话，点击右上角“新建会话”开始提问。</p>
@@ -210,22 +354,31 @@ export function ChatPage() {
         <section className="panel stack chat-conversation-panel">
           <div className="panel-header">
             <div className="panel-heading">
-              <h3>{activeSession?.title ?? "当前会话"}</h3>
+              <h3>{visibleSessionTitle}</h3>
               <p>仅基于检索证据作答；证据不足时会提示并保留引用来源。</p>
             </div>
-            {activeSession ? <StatusBadge tone="info">会话已关联</StatusBadge> : null}
+            {selectedSessionId ? <StatusBadge tone="info">会话已关联</StatusBadge> : null}
           </div>
           <div className="chat-thread" ref={threadRef}>
-            {activeSession?.messages.length ? (
+            {activeMessages.length || showPending ? (
               <>
-                {activeSession.messages.map((message) => (
+                {activeMessages.map((message) => (
                   <MessageBubble
                     key={message.id}
                     message={message}
                     onSelectCitation={(citation) => setSelectedCitation(citation)}
                   />
                 ))}
-                {sending ? (
+                {showPending ? (
+                  <article className="message-bubble user is-pending">
+                    <div className="message-meta">
+                      <strong>用户</strong>
+                      <span>正在发送...</span>
+                    </div>
+                    <p>{pendingDraftContent}</p>
+                  </article>
+                ) : null}
+                {showPending ? (
                   <article className="message-bubble assistant is-pending">
                     <div className="message-meta">
                       <strong>助手</strong>
@@ -246,23 +399,24 @@ export function ChatPage() {
             <textarea
               placeholder="请输入一个基于内部文档的引用式问题..."
               rows={4}
-              value={messageDraft}
+              value={sending ? "" : messageDraft}
               onChange={(event) => setMessageDraft(event.target.value)}
+              disabled={sending || creatingSession || Boolean(deletingSessionId)}
             />
             <div className="composer-actions">
               <div className="inline-actions">
-                <button className="secondary-button" onClick={() => handleArtifactAction("tasks")} type="button">
+                <button className="secondary-button" disabled={Boolean(deletingSessionId)} onClick={() => handleArtifactAction("tasks")} type="button">
                   提取待办
                 </button>
-                <button className="secondary-button" onClick={() => handleArtifactAction("report")} type="button">
+                <button className="secondary-button" disabled={Boolean(deletingSessionId)} onClick={() => handleArtifactAction("report")} type="button">
                   周报草稿
                 </button>
-                <button className="secondary-button" onClick={() => handleArtifactAction("faq")} type="button">
+                <button className="secondary-button" disabled={Boolean(deletingSessionId)} onClick={() => handleArtifactAction("faq")} type="button">
                   FAQ 草稿
                 </button>
               </div>
-              <button className="primary-button" disabled={!selectedSessionId || sending} type="submit">
-                {sending ? "回答中..." : "发送"}
+              <button className="primary-button" disabled={!selectedSessionId || sending || creatingSession || Boolean(deletingSessionId)} type="submit">
+                {creatingSession ? "创建中..." : sending ? "回答中..." : "发送"}
               </button>
             </div>
           </form>
@@ -270,7 +424,7 @@ export function ChatPage() {
 
         <div className="stack chat-side-panel">
           <CitationList
-            citations={flattenedCitations}
+            citations={visibleCitations}
             onSelect={(citation) => setSelectedCitation(citation as ChatCitationRead)}
             selectedCitationId={selectedCitation?.id}
             title="引用来源"
@@ -316,6 +470,60 @@ interface MessageDebugInfo {
   targetDocument: string | null;
   refusalReason: string | null;
   artifactType: string | null;
+}
+
+function resolveVisibleCitations(
+  session: ChatSessionDetailRead | null,
+  selectedCitation: ChatCitationRead | null,
+  pendingSessionId: string | null,
+  selectedSessionId: string | null,
+): ChatCitationRead[] {
+  if (pendingSessionId && selectedSessionId && pendingSessionId === selectedSessionId) {
+    return [];
+  }
+
+  if (!session) {
+    return [];
+  }
+
+  if (pendingSessionId && session.id === pendingSessionId) {
+    return [];
+  }
+
+  if (selectedCitation) {
+    const selectedMessage = session.messages.find((message) => message.id === selectedCitation.message_id);
+    if (selectedMessage?.citations.length) {
+      return dedupeCitations(selectedMessage.citations);
+    }
+  }
+
+  const latestMessageWithCitations = [...session.messages]
+    .reverse()
+    .find((message) => message.citations.length);
+  return latestMessageWithCitations ? dedupeCitations(latestMessageWithCitations.citations) : [];
+}
+
+function dedupeCitations(citations: ChatCitationRead[]): ChatCitationRead[] {
+  const seen = new Set<string>();
+  const items: ChatCitationRead[] = [];
+  for (const citation of citations) {
+    const key = citation.chunk_id
+      ? `chunk:${citation.chunk_id}`
+      : [
+          citation.document_id,
+          citation.document_version_id,
+          citation.chunk_index ?? "",
+          citation.page_number_start ?? "",
+          citation.paragraph_start ?? "",
+          citation.preview,
+        ].join("|");
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    items.push(citation);
+  }
+  return items;
 }
 
 function readAgentSteps(message: ChatMessageRead): AgentStepRead[] {

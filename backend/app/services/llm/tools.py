@@ -17,6 +17,7 @@ from app.services.faqs.service import FAQService
 from app.services.reports.service import WeeklyReportService
 from app.services.retrieval.service import RetrievalService
 from app.services.tasks.service import TaskService
+from app.services.workflows.source_resolver import unique_source_citations
 
 
 @dataclass
@@ -141,11 +142,13 @@ class CopilotToolService:
 
     def generate_tasks_from_session(self, actor: User, session_id: UUID) -> WorkflowToolResult:
         response = self.task_service.extract_tasks(actor, TaskExtractRequest(session_id=session_id))
-        citations = [citation for item in response.items for citation in (item.source_citations or [])]
+        citations = unique_source_citations(
+            [citation.model_dump(mode="json") for item in response.items for citation in (item.source_citations or [])]
+        )
         return WorkflowToolResult(
             artifact_type="tasks",
             structured_payload=response.model_dump(mode="json"),
-            citations=citations,
+            citations=[SourceCitationRead.model_validate(item) for item in citations],
         )
 
     def generate_weekly_report_from_session(self, actor: User, session_id: UUID) -> WorkflowToolResult:
@@ -158,11 +161,13 @@ class CopilotToolService:
 
     def generate_faq_from_session(self, actor: User, session_id: UUID) -> WorkflowToolResult:
         response = self.faq_service.generate_faqs(actor, FAQGenerateRequest(session_id=session_id))
-        citations = [citation for entry in response.entries for citation in entry.source_citations]
+        citations = unique_source_citations(
+            [citation.model_dump(mode="json") for entry in response.entries for citation in entry.source_citations]
+        )
         return WorkflowToolResult(
             artifact_type="faq",
             structured_payload=response.model_dump(mode="json"),
-            citations=citations,
+            citations=[SourceCitationRead.model_validate(item) for item in citations],
         )
 
     def generate_tasks_from_messages(
@@ -175,13 +180,13 @@ class CopilotToolService:
         items = self.task_service._build_task_items(actor, messages, source_session_id, max_items)
         self.task_service.artifact_repository.add_task_items(items)
         self.session.flush()
-        citations = [citation for item in items for citation in (item.source_citations or [])]
+        citations = unique_source_citations([citation for item in items for citation in (item.source_citations or [])])
         return WorkflowToolResult(
             artifact_type="tasks",
             structured_payload={
                 "items": [self.task_service._serialize_task_item(item).model_dump(mode="json") for item in items],
             },
-            citations=citations,
+            citations=[SourceCitationRead.model_validate(item) for item in citations],
         )
 
     def generate_weekly_report_from_messages(
@@ -212,13 +217,13 @@ class CopilotToolService:
         entries = self.faq_service._build_entries(actor, messages, source_session_id, max_entries)
         self.faq_service.artifact_repository.add_faq_entries(entries)
         self.session.flush()
-        citations = [citation for entry in entries for citation in entry.source_citations]
+        citations = unique_source_citations([citation for entry in entries for citation in entry.source_citations])
         return WorkflowToolResult(
             artifact_type="faq",
             structured_payload={
                 "entries": [self.faq_service._serialize_entry(entry).model_dump(mode="json") for entry in entries],
             },
-            citations=citations,
+            citations=[SourceCitationRead.model_validate(item) for item in citations],
         )
 
     def _resolve_accessible_document(self, actor: User, document_title_or_id: str | UUID | None) -> RouterAccessibleDocument | None:

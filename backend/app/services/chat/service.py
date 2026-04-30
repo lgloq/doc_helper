@@ -68,6 +68,11 @@ class ChatService:
             }
         )
 
+    def delete_session(self, actor: User, session_id: UUID) -> None:
+        chat_session = self._get_session_or_404(actor, session_id, include_messages=False)
+        self.chat_repository.delete_session(chat_session)
+        self.session.commit()
+
     def preview_answer(self, actor: User, question: str, top_k: int = 5) -> PreparedChatAnswer:
         return self._prepare_answer(actor, question, top_k, existing_messages=[], session_id=None)
 
@@ -121,28 +126,7 @@ class ChatService:
         self.chat_repository.add_message(assistant_message)
         self.session.flush()
 
-        citation_rows = [
-            MessageCitation(
-                message_id=assistant_message.id,
-                chunk_id=item.chunk_id,
-                document_id=item.document_id,
-                document_version_id=item.document_version_id,
-                document_title=item.document_title,
-                version_number=item.version_number,
-                chunk_index=item.chunk_index,
-                page_number_start=item.page_number_start,
-                page_number_end=item.page_number_end,
-                paragraph_start=item.paragraph_start,
-                paragraph_end=item.paragraph_end,
-                preview=item.preview,
-                lexical_score=item.score.lexical_raw,
-                vector_score=item.score.vector_raw,
-                fused_score=item.score.fused,
-                rank=index,
-                citation_metadata=item.citation_metadata,
-            )
-            for index, item in enumerate(prepared.selected_chunks, start=1)
-        ]
+        citation_rows = self._build_citation_rows(assistant_message.id, prepared)
         self.chat_repository.add_citations(citation_rows)
         self.session.commit()
 
@@ -282,4 +266,80 @@ class ChatService:
                 "citation_metadata": citation.citation_metadata,
                 "created_at": citation.created_at,
             }
+        )
+
+    def _build_citation_rows(self, message_id: UUID, prepared: PreparedChatAnswer) -> list[MessageCitation]:
+        if prepared.selected_chunks:
+            return [
+                MessageCitation(
+                    message_id=message_id,
+                    chunk_id=item.chunk_id,
+                    document_id=item.document_id,
+                    document_version_id=item.document_version_id,
+                    document_title=item.document_title,
+                    version_number=item.version_number,
+                    chunk_index=item.chunk_index,
+                    page_number_start=item.page_number_start,
+                    page_number_end=item.page_number_end,
+                    paragraph_start=item.paragraph_start,
+                    paragraph_end=item.paragraph_end,
+                    preview=item.preview,
+                    lexical_score=item.score.lexical_raw,
+                    vector_score=item.score.vector_raw,
+                    fused_score=item.score.fused,
+                    rank=index,
+                    citation_metadata=item.citation_metadata,
+                )
+                for index, item in enumerate(prepared.selected_chunks, start=1)
+            ]
+
+        citations = getattr(prepared.structured_result, "citations", None)
+        if not isinstance(citations, list) or not citations:
+            return []
+
+        rows: list[MessageCitation] = []
+        seen: set[str] = set()
+        for rank, citation in enumerate(citations, start=1):
+            payload = citation.model_dump(mode="python") if hasattr(citation, "model_dump") else dict(citation)
+            identity = self._citation_identity(payload)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            rows.append(
+                MessageCitation(
+                    message_id=message_id,
+                    chunk_id=payload.get("chunk_id"),
+                    document_id=payload.get("document_id"),
+                    document_version_id=payload.get("document_version_id"),
+                    document_title=payload.get("document_title"),
+                    version_number=payload.get("version_number"),
+                    chunk_index=payload.get("chunk_index"),
+                    page_number_start=payload.get("page_number_start"),
+                    page_number_end=payload.get("page_number_end"),
+                    paragraph_start=payload.get("paragraph_start"),
+                    paragraph_end=payload.get("paragraph_end"),
+                    preview=payload.get("preview"),
+                    lexical_score=None,
+                    vector_score=None,
+                    fused_score=payload.get("fused_score"),
+                    rank=len(rows) + 1,
+                    citation_metadata=None,
+                )
+            )
+        return rows
+
+    @staticmethod
+    def _citation_identity(payload: dict) -> str:
+        chunk_id = payload.get("chunk_id")
+        if chunk_id:
+            return f"chunk:{chunk_id}"
+        return "|".join(
+            [
+                str(payload.get("document_id") or ""),
+                str(payload.get("document_version_id") or ""),
+                str(payload.get("chunk_index") or ""),
+                str(payload.get("page_number_start") or ""),
+                str(payload.get("paragraph_start") or ""),
+                str(payload.get("preview") or ""),
+            ]
         )

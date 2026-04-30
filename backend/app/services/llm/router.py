@@ -81,7 +81,12 @@ class DeterministicRouterProvider:
     ) -> RouterDecisionResult:
         started = time.perf_counter()
         lowered = question.strip().lower()
-        decision = self._route(question, accessible_documents, conversation_context)
+        decision = _stabilize_router_decision(
+            question=question,
+            accessible_documents=accessible_documents,
+            conversation_context=conversation_context,
+            decision=self._route(question, accessible_documents, conversation_context),
+        )
         return RouterDecisionResult(
             decision=decision,
             provider_name=self.provider_name,
@@ -206,7 +211,12 @@ class OpenAIRouterProvider:
         )
         content = response.choices[0].message.content or "{}"
         raw_payload = _parse_json_payload(content)
-        decision = _coerce_router_decision(raw_payload, accessible_documents)
+        decision = _stabilize_router_decision(
+            question=question,
+            accessible_documents=accessible_documents,
+            conversation_context=conversation_context,
+            decision=_coerce_router_decision(raw_payload, accessible_documents),
+        )
         usage = getattr(response, "usage", None)
         return RouterDecisionResult(
             decision=decision,
@@ -320,6 +330,81 @@ def _coerce_router_decision(payload: dict[str, Any], accessible_documents: list[
         should_refuse_if_inaccessible=bool(payload.get("should_refuse_if_inaccessible", False)),
         reasoning_brief=_string_or_none(payload.get("reasoning_brief")) or "Router completed.",
     )
+
+
+def _stabilize_router_decision(
+    *,
+    question: str,
+    accessible_documents: list[RouterAccessibleDocument],
+    conversation_context: ConversationMemory | None,
+    decision: RouterDecision,
+) -> RouterDecision:
+    matched_document = _match_accessible_document(question, accessible_documents) or _match_context_document(
+        question,
+        accessible_documents,
+        conversation_context,
+    )
+    requested_document_name = _resolve_requested_document_name(question, conversation_context)
+    has_followup_reference = _looks_like_followup_document_reference(question)
+    has_explicit_document_anchor = matched_document is not None or requested_document_name is not None or has_followup_reference
+
+    if decision.intent == "topic_qa" and matched_document and _looks_like_document_request(question, conversation_context):
+        return decision.model_copy(
+            update={
+                "intent": "document_qa",
+                "target_document_id": matched_document.document_id,
+                "target_document_title": matched_document.title,
+                "requested_document_name": requested_document_name or matched_document.title,
+                "topic": None,
+                "needs_citations": True,
+                "should_refuse_if_inaccessible": True,
+                "reasoning_brief": "问题明确指向当前可访问的具体文档，按文档问答处理。",
+            }
+        )
+
+    if decision.intent == "document_qa":
+        if matched_document:
+            return decision.model_copy(
+                update={
+                    "target_document_id": matched_document.document_id,
+                    "target_document_title": matched_document.title,
+                    "requested_document_name": requested_document_name or matched_document.title,
+                    "needs_citations": True,
+                    "should_refuse_if_inaccessible": True,
+                }
+            )
+        if requested_document_name and not decision.target_document_title:
+            return decision.model_copy(
+                update={
+                    "requested_document_name": requested_document_name,
+                    "needs_citations": True,
+                    "should_refuse_if_inaccessible": True,
+                }
+            )
+        if decision.target_document_title and not has_explicit_document_anchor:
+            return decision.model_copy(
+                update={
+                    "intent": "topic_qa",
+                    "target_document_id": None,
+                    "target_document_title": None,
+                    "requested_document_name": None,
+                    "topic": question.strip(),
+                    "needs_citations": True,
+                    "should_refuse_if_inaccessible": False,
+                    "reasoning_brief": "问题未明确指定文档，按主题问答处理，避免提前锁定单一文档。",
+                }
+            )
+
+    if decision.intent == "version_compare" and matched_document and not decision.target_document_title:
+        return decision.model_copy(
+            update={
+                "target_document_id": matched_document.document_id,
+                "target_document_title": matched_document.title,
+                "requested_document_name": requested_document_name or matched_document.title,
+            }
+        )
+
+    return decision
 
 
 

@@ -548,13 +548,38 @@ class CopilotOrchestrator:
                     intent=router_result.decision.intent,
                     agent_run_trace=runner_result.run_trace,
                 )
+            candidate_chunks = list(latest_search.candidate_chunks)
+            if router_result.decision.intent == "topic_qa":
+                abstain_decision = should_abstain_from_answer(question, latest_search.candidate_chunks, None)
+                candidate_chunks = list(abstain_decision.filtered_chunks or latest_search.candidate_chunks)
+                if abstain_decision.should_abstain or not candidate_chunks:
+                    return self._build_refusal_result(
+                        question=question,
+                        router_result=router_result,
+                        answer=abstain_decision.user_message or "未找到足够相关的可访问内容来支持可靠回答。",
+                        refusal_reason=abstain_decision.reason or "insufficient_relevant_evidence",
+                        conversation_memory=conversation_memory,
+                        tool_name=latest_search.tool_metadata.tool_name,
+                        tool_input=latest_search.tool_metadata.tool_input,
+                        tool_output_summary={
+                            **latest_search.tool_metadata.tool_output_summary,
+                            "post_filter_candidates": len(candidate_chunks),
+                        },
+                        retrieval_response=latest_search.retrieval_response,
+                        intent="topic_qa",
+                        agent_run_trace=runner_result.run_trace,
+                    )
+                latest_search.tool_metadata.tool_output_summary = {
+                    **latest_search.tool_metadata.tool_output_summary,
+                    "post_filter_candidates": len(candidate_chunks),
+                }
             return self._generate_grounded_qa(
                 question=question,
                 existing_messages=existing_messages,
                 conversation_memory=conversation_memory,
                 router_result=router_result,
                 retrieval_response=latest_search.retrieval_response,
-                candidate_chunks=latest_search.candidate_chunks,
+                candidate_chunks=candidate_chunks,
                 tool_metadata=latest_search.tool_metadata,
                 target_document=latest_search.target_document,
                 allow_low_score=router_result.decision.intent == "document_qa",
@@ -880,6 +905,8 @@ class CopilotOrchestrator:
         target_document = self._resolve_target_document(router_result.decision, structured_result)
         is_refusal = bool(answer_result.insufficient_evidence)
         tool_name = tool_metadata.tool_name if tool_metadata.tool_name != "none" else None
+        effective_candidate_count = self._effective_candidate_count(candidate_chunks, agent_run_trace)
+        effective_selected_count = self._effective_selected_count(selected_chunks, structured_result)
 
         query_output = f"识别为 {intent}"
         if target_document:
@@ -917,7 +944,13 @@ class CopilotOrchestrator:
             tool_execution_output = self._summarize_tool_execution(tool_metadata)
 
         evidence_status = "completed"
-        evidence_output = self._summarize_evidence_review(intent, candidate_chunks, selected_chunks, answer_result, structured_result)
+        evidence_output = self._summarize_evidence_review(
+            intent,
+            effective_candidate_count,
+            effective_selected_count,
+            answer_result,
+            structured_result,
+        )
         if intent == "unsupported_or_unclear":
             evidence_status = "skipped"
             evidence_output = "当前请求未进入检索或工具结果校验。"
@@ -971,12 +1004,12 @@ class CopilotOrchestrator:
             ),
             AgentStep(
                 name="evidence_review",
-                input_summary=f"candidate_chunks={len(candidate_chunks)}",
+                input_summary=f"candidate_chunks={effective_candidate_count}",
                 output_summary=evidence_output,
                 status=evidence_status,  # type: ignore[arg-type]
                 tool_name=tool_name,
                 metadata={
-                    "selected_citations": len(selected_chunks),
+                    "selected_citations": effective_selected_count,
                     "retrieval_debug": retrieval_response.debug.model_dump(),
                     "final_status": agent_run_trace.final_status if agent_run_trace else None,
                     "final_reason": agent_run_trace.final_reason if agent_run_trace else None,
@@ -1038,15 +1071,19 @@ class CopilotOrchestrator:
     @staticmethod
     def _summarize_evidence_review(
         intent: str,
-        candidate_chunks: list[SearchResultChunk],
-        selected_chunks: list[SearchResultChunk],
+        candidate_chunk_count: int,
+        selected_citation_count: int,
         answer_result: AnswerGenerationResult,
         structured_result: QAAnswerResult | VersionCompareResult | WorkflowGenerationResult,
     ) -> str:
         if intent in {"document_qa", "topic_qa"}:
+            if isinstance(structured_result, WorkflowGenerationResult):
+                if getattr(structured_result, "refusal_reason", None):
+                    return "当前请求未形成稳定结构化结果，未确认正式引用。"
+                return f"检索候选分块 {candidate_chunk_count} 个，结构化结果复用了 {selected_citation_count} 条来源引用。"
             if answer_result.insufficient_evidence:
-                return f"候选分块 {len(candidate_chunks)} 个，但证据不足，未确认正式引用。"
-            return f"候选分块 {len(candidate_chunks)} 个，最终选中 {len(selected_chunks)} 条引用。"
+                return f"候选分块 {candidate_chunk_count} 个，但证据不足，未确认正式引用。"
+            return f"候选分块 {candidate_chunk_count} 个，最终选中 {selected_citation_count} 条引用。"
         if intent == "version_compare":
             refusal_reason = getattr(structured_result, "refusal_reason", None)
             if refusal_reason == "insufficient_versions_for_compare":
@@ -1139,7 +1176,57 @@ class CopilotOrchestrator:
         position_map = {chunk_id: index for index, chunk_id in enumerate(validated_chunk_ids)}
         selected = [item for item in matched_chunks if item.chunk_id in position_map]
         selected.sort(key=lambda item: position_map[item.chunk_id])
-        return selected[:3]
+        unique_items: list[SearchResultChunk] = []
+        seen: set[str] = set()
+        for item in selected:
+            key = CopilotOrchestrator._citation_identity_from_chunk(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_items.append(item)
+            if len(unique_items) >= 3:
+                break
+        return unique_items
+
+    @staticmethod
+    def _citation_identity_from_chunk(chunk: SearchResultChunk) -> str:
+        if chunk.chunk_id:
+            return f"chunk:{chunk.chunk_id}"
+        return "|".join(
+            [
+                str(chunk.document_id),
+                str(chunk.document_version_id),
+                str(chunk.chunk_index),
+                str(chunk.page_number_start or ""),
+                str(chunk.paragraph_start or ""),
+                chunk.preview,
+            ]
+        )
+
+    @staticmethod
+    def _effective_candidate_count(candidate_chunks: list[SearchResultChunk], agent_run_trace: AgentRunTrace | None) -> int:
+        if candidate_chunks:
+            return len(candidate_chunks)
+        if not agent_run_trace:
+            return 0
+        for observation in agent_run_trace.observations:
+            raw_output = observation.raw_output or {}
+            matched_chunks = raw_output.get("matched_chunks")
+            if isinstance(matched_chunks, int):
+                return matched_chunks
+        return 0
+
+    @staticmethod
+    def _effective_selected_count(
+        selected_chunks: list[SearchResultChunk],
+        structured_result: QAAnswerResult | VersionCompareResult | WorkflowGenerationResult,
+    ) -> int:
+        if selected_chunks:
+            return len(selected_chunks)
+        citations = getattr(structured_result, "citations", None)
+        if isinstance(citations, list):
+            return len(citations)
+        return 0
 
     @staticmethod
     def _compute_confidence(selected_chunks: list[SearchResultChunk], answer_result: AnswerGenerationResult) -> str:

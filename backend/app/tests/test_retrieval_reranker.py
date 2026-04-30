@@ -139,3 +139,29 @@ def test_reranker_reorders_business_candidates_after_hybrid_retrieval() -> None:
     assert result.candidates[0].candidate.document_title == "平台发布手册"
     assert result.candidates[0].fused_score < result.candidates[1].fused_score
     assert result.candidates[0].rerank_score > result.candidates[1].rerank_score
+
+
+def test_reranker_penalizes_negative_evidence_even_when_terms_overlap() -> None:
+    reranker = HeuristicReranker()
+    query = "客服接到高优先级工单后，首次响应时间要求是多少？"
+
+    negative_candidate = _candidate(
+        document_title="客户事故响应指南",
+        content="这里没有定义客服对工单的首次响应时间，只要求经理在五分钟内建立事故沟通渠道。",
+        fused_score=0.58,
+        vector_raw=0.58,
+        chunk_index=0,
+    )
+    grounded_candidate = _candidate(
+        document_title="客户支持、数据导出与知识库维护协作规范",
+        content="P1 工单：五分钟内完成首次响应，十分钟内完成内部升级。首次响应至少要包含三项信息。",
+        fused_score=0.49,
+        lexical_raw=0.05,
+        vector_raw=0.49,
+        chunk_index=1,
+    )
+
+    result = reranker.rerank(query, [negative_candidate, grounded_candidate], top_k=2)
+
+    assert result.candidates[0].candidate.document_title == "客户支持、数据导出与知识库维护协作规范"
+    assert result.candidates[0].rerank_score > result.candidates[1].rerank_score

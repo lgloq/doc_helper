@@ -46,6 +46,40 @@ CHINESE_STOPWORDS = {
     "登记",
 }
 
+NEGATIVE_EVIDENCE_HINTS = (
+    "没有定义",
+    "未定义",
+    "未提及",
+    "未涉及",
+    "不涉及",
+    "不包含",
+    "无法确认",
+    "无法判断",
+)
+
+META_NON_ANSWER_HINTS = (
+    "本文档用于演示",
+    "为了方便测试",
+    "为了方便上传后立即测试",
+    "你可以尝试以下问题",
+    "faq 入库前需要检查",
+    "文档目的",
+)
+
+QUERY_REQUIREMENT_HINTS = (
+    "多少",
+    "多久",
+    "多长时间",
+    "时间要求",
+    "响应时间",
+    "响应时限",
+    "首次响应",
+    "要求",
+    "规定",
+)
+
+HIGH_PRIORITY_HINTS = ("高优先级", "高优先级工单", "高优先", "高优")
+
 
 @dataclass
 class RerankCandidate:
@@ -87,16 +121,20 @@ class HeuristicReranker:
             )
 
         query_features = _feature_tokens(query)
+        query_features = _expand_domain_features(query, query_features)
+        expects_requirement_answer = _expects_requirement_answer(query)
         reranked: list[RerankCandidate] = []
         for item in candidates:
             candidate = item.candidate
-            content_features = _feature_tokens(
-                " ".join(
-                    part
-                    for part in [candidate.document_title, candidate.section_title or "", candidate.content[:420]]
-                    if part
-                )
+            combined_text = " ".join(
+                part
+                for part in [candidate.document_title, candidate.section_title or "", candidate.content[:420]]
+                if part
             )
+            content_features = _feature_tokens(
+                combined_text
+            )
+            content_features = _expand_domain_features(combined_text, content_features)
             title_features = _feature_tokens(candidate.document_title)
             section_features = _feature_tokens(candidate.section_title or "")
 
@@ -113,6 +151,15 @@ class HeuristicReranker:
                 score += 0.04
             if target_document_id is not None and candidate.document_id == target_document_id:
                 score += 0.08
+            score += _domain_alignment_bonus(query, candidate.content)
+            if "p1" in query_features and "p1" in content_features:
+                score += 0.08
+            if expects_requirement_answer and _looks_like_direct_requirement_answer(candidate.content):
+                score += 0.36
+            if expects_requirement_answer and _contains_negative_evidence_hint(candidate.content):
+                score -= 0.42
+            if expects_requirement_answer and _contains_meta_non_answer_hint(candidate.content) and not _looks_like_direct_requirement_answer(candidate.content):
+                score -= 0.85
             if overlap < 0.08 and not lexical_support:
                 score -= 0.09
             if overlap < 0.12 and title_overlap == 0 and section_overlap == 0 and item.fused_score < 0.35:
@@ -167,6 +214,62 @@ def _feature_tokens(value: str) -> set[str]:
                 features.add(token)
 
     return features
+
+
+def _expand_domain_features(value: str, features: set[str]) -> set[str]:
+    expanded = set(features)
+    lowered = value.casefold()
+    normalized = re.sub(r"\s+", "", lowered)
+    if any(token in normalized for token in ("高优先级", "高优先级工单", "高优先", "高优")):
+        expanded.update({"p1", "p1工单", "高优先级", "高优先", "工单"})
+    if "首次响应" in normalized:
+        expanded.update({"首次响应", "响应时间", "响应时限"})
+    if "周报" in normalized:
+        expanded.add("weeklyreport")
+    return expanded
+
+
+def _contains_negative_evidence_hint(value: str) -> bool:
+    normalized = re.sub(r"\s+", "", value.casefold())
+    return any(hint in normalized for hint in NEGATIVE_EVIDENCE_HINTS)
+
+
+def _contains_meta_non_answer_hint(value: str) -> bool:
+    normalized = re.sub(r"\s+", "", value.casefold())
+    return any(re.sub(r"\s+", "", hint.casefold()) in normalized for hint in META_NON_ANSWER_HINTS)
+
+
+def _expects_requirement_answer(query: str) -> bool:
+    normalized = re.sub(r"\s+", "", query.casefold())
+    return any(hint in normalized for hint in QUERY_REQUIREMENT_HINTS)
+
+
+def _looks_like_direct_requirement_answer(value: str) -> bool:
+    if _contains_negative_evidence_hint(value) or _contains_meta_non_answer_hint(value):
+        return False
+    normalized = re.sub(r"\s+", "", value.casefold())
+    if re.search(r"([0-9]+|[一二三四五六七八九十两]+)(分钟|小时|天|项)", normalized):
+        return True
+    return any(token in normalized for token in ("必须", "需要", "应当", "需在"))
+
+
+def _domain_alignment_bonus(query: str, value: str) -> float:
+    normalized_query = re.sub(r"\s+", "", query.casefold())
+    normalized_value = re.sub(r"\s+", "", value.casefold())
+    bonus = 0.0
+    if any(token in normalized_query for token in HIGH_PRIORITY_HINTS) and (
+        "p1" in normalized_value or "p1工单" in normalized_value
+    ):
+        bonus += 0.34
+    if "首次响应" in normalized_query and "首次响应" in normalized_value:
+        bonus += 0.24
+    if _expects_requirement_answer(query) and (
+        "首次响应" in normalized_value or "响应时间" in normalized_value or "响应时限" in normalized_value
+    ) and re.search(r"([0-9]+|[一二三四五六七八九十两]+)(分钟|小时)", normalized_value):
+        bonus += 0.18
+    if "工单" in normalized_query and "工单" in normalized_value:
+        bonus += 0.06
+    return bonus
 
 
 def _feature_overlap(left: set[str], right: set[str]) -> float:
