@@ -15,7 +15,8 @@
 ## 当前完成度
 ### 已实现
 - mock 登录与三类角色：`viewer / manager / admin`
-- 支持 `TXT / Markdown / HTML / PDF / DOCX` 文档上传与摄取
+- 支持 `TXT / Markdown / HTML / PDF / DOCX / CSV` 文档上传与摄取
+- 支持 Markdown、HTML、DOCX、CSV 和文本型 PDF 表格提取
 - 本地文件存储与文档版本保留
 - 文档级 ACL：支持 `public / user / role / team`
 - 基于 PostgreSQL FTS + pgvector 的权限感知混合检索与候选重排
@@ -32,7 +33,8 @@
 - 企业级 SSO / LDAP / OAuth
 - 多租户组织树与复杂权限继承
 - 生产级异步任务队列与 worker 编排
-- 扫描版 PDF 的深度 OCR 优化
+- 扫描版 PDF、图片型表格和复杂 PDF 表格的 OCR / 结构恢复
+- 复杂 Excel、多 sheet XLSX 和合并单元格表格解析
 - Slack / 飞书等外部协作集成
 - cross-encoder rerank 与更高级 faithfulness judge
 

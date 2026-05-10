@@ -413,6 +413,26 @@ def test_router_downgrades_non_explicit_document_guess_to_topic_qa() -> None:
     assert stabilized.topic == "客服接到高优先级工单后，首次响应时间要求是多少？"
 
 
+def test_router_treats_policy_version_change_as_qa_not_version_compare() -> None:
+    guessed = RouterDecision(
+        intent="version_compare",
+        needs_citations=False,
+        reasoning_brief="llm guessed version compare",
+    )
+
+    stabilized = _stabilize_router_decision(
+        question="如果制度版本发生变化，哪些检查项是必须完成的？",
+        accessible_documents=[],
+        conversation_context=None,
+        decision=guessed,
+    )
+
+    assert stabilized.intent == "topic_qa"
+    assert stabilized.from_version_ref is None
+    assert stabilized.to_version_ref is None
+    assert stabilized.needs_citations is True
+
+
 def test_topic_qa_prefers_support_manual_for_first_response_time_question(client: TestClient, db_session: Session) -> None:
     _seed_roles_and_users(db_session)
     admin_token = _login(client, "admin@example.com", "admin-pass")
@@ -458,6 +478,42 @@ def test_topic_qa_prefers_support_manual_for_first_response_time_question(client
     assert all(item["document_title"] != "客户事故响应指南" for item in payload["citations"])
     assert metadata["router_decision"]["intent"] == "topic_qa"
     assert metadata["tool_execution"]["tool_name"] == "search_docs"
+
+
+def test_policy_checklist_question_does_not_generate_tasks(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+
+    document_id, _ = _upload_and_ingest(
+        client,
+        admin_token,
+        "运营审批与客户响应规范",
+        (
+            "版本更新检查清单：检查 FAQ 是否引用旧口径是必须完成的检查项。"
+            "同步数据导出审批变化是必须完成的检查项。"
+            "更新安全例外到期动作是必须完成的检查项。"
+            "通知所有客户不是必须检查项。"
+        ),
+    )
+    _grant_acl(
+        client,
+        admin_token,
+        document_id,
+        {"principal_type": "public", "can_view": True, "can_manage": False},
+    )
+
+    session_id = _create_session(client, admin_token)
+    payload = _send_question(client, admin_token, session_id, "如果制度版本发生变化，哪些检查项是必须完成的？")
+    metadata = payload["assistant_message"]["message_metadata"]
+    trace = _agent_run_trace(payload)
+
+    assert payload["assistant_message"]["insufficient_evidence"] is False
+    assert metadata["router_decision"]["intent"] == "topic_qa"
+    assert metadata["tool_execution"]["tool_name"] == "search_docs"
+    assert metadata["structured_result"]["answer_type"] == "grounded_answer"
+    assert metadata["structured_result"].get("artifact_type") is None
+    assert [action["tool_name"] for action in trace["actions"] if action["action_type"] == "tool_call"] == ["search_docs"]
+    assert "检查" in payload["assistant_message"]["content"]
 
 
 def test_version_compare_routes_to_compare_tool(client: TestClient, db_session: Session) -> None:

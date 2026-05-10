@@ -4,6 +4,7 @@ from pathlib import Path
 
 from docx import Document as DocxDocument
 
+from app.services.ingestion import parsers as parser_module
 from app.services.ingestion.parsers import DocumentParser
 
 
@@ -66,3 +67,215 @@ def test_document_parser_supports_multiple_formats(tmp_path: Path) -> None:
     assert any(segment.section_title == "Quarterly Report" for segment in docx_result.segments)
     assert pdf_result.page_count == 1
     assert pdf_result.normalized_text
+
+
+def test_document_parser_extracts_markdown_tables(tmp_path: Path) -> None:
+    parser = DocumentParser()
+    md_path = tmp_path / "policy.md"
+    md_path.write_text(
+        "\n".join(
+            [
+                "# Leave Rules",
+                "",
+                "| Type | Approver | Notice |",
+                "| --- | --- | --- |",
+                "| Annual leave | Direct manager | 3 business days |",
+                "| Sick leave | Team lead | Same day |",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = parser.parse(md_path)
+
+    assert "Table row: Leave Rules. Type=Annual leave; Approver=Direct manager; Notice=3 business days." in result.normalized_text
+    assert "Type=Sick leave; Approver=Team lead; Notice=Same day." in result.normalized_text
+
+
+def test_document_parser_extracts_html_tables(tmp_path: Path) -> None:
+    parser = DocumentParser()
+    html_path = tmp_path / "policy.html"
+    html_path.write_text(
+        """
+        <html><body>
+          <h1>Export Rules</h1>
+          <table>
+            <caption>Retention</caption>
+            <tr><th>Data Type</th><th>Retention</th></tr>
+            <tr><td>Audit logs</td><td>180 days</td></tr>
+          </table>
+        </body></html>
+        """,
+        encoding="utf-8",
+    )
+
+    result = parser.parse(html_path)
+
+    assert "Table row: Retention. Data Type=Audit logs; Retention=180 days." in result.normalized_text
+
+
+def test_document_parser_extracts_docx_tables_in_body_order(tmp_path: Path) -> None:
+    parser = DocumentParser()
+    docx_path = tmp_path / "runbook.docx"
+    doc = DocxDocument()
+    doc.add_heading("Incident Runbook", level=1)
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Severity"
+    table.cell(0, 1).text = "Response"
+    table.cell(1, 0).text = "P1"
+    table.cell(1, 1).text = "5 minutes"
+    doc.add_paragraph("After table paragraph.")
+    doc.save(docx_path)
+
+    result = parser.parse(docx_path)
+
+    normalized = result.normalized_text
+    table_text = "Table row: Incident Runbook. Severity=P1; Response=5 minutes."
+    assert table_text in normalized
+    assert normalized.index("Incident Runbook") < normalized.index(table_text)
+    assert normalized.index(table_text) < normalized.index("After table paragraph.")
+
+
+def test_document_parser_extracts_pdf_tables(tmp_path: Path, monkeypatch) -> None:
+    class FakePage:
+        def extract_tables(self):
+            return [
+                [
+                    ["Data Type", "Approver", "SLA"],
+                    ["Customer phone", "Admin", "2 business days"],
+                ]
+            ]
+
+    class FakePdf:
+        pages = [FakePage()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    class FakePdfPlumber:
+        @staticmethod
+        def open(path: str):
+            return FakePdf()
+
+    monkeypatch.setattr(parser_module, "pdfplumber", FakePdfPlumber)
+
+    parser = DocumentParser()
+    pdf_path = tmp_path / "table.pdf"
+    _write_minimal_pdf(pdf_path, "PDF table source")
+
+    result = parser.parse(pdf_path)
+
+    assert result.parser_name == "pdf"
+    assert result.page_count == 1
+    assert "Table row: PDF page 1 table 1. Data Type=Customer phone; Approver=Admin; SLA=2 business days." in result.normalized_text
+
+
+def test_document_parser_reuses_previous_pdf_table_header_for_continuation_page(monkeypatch) -> None:
+    class FakePage:
+        def __init__(self, tables):
+            self._tables = tables
+
+        def extract_tables(self):
+            return self._tables
+
+    class FakePdf:
+        pages = [
+            FakePage(
+                [
+                    [
+                        ["Data Type", "Approver", "SLA"],
+                        ["Customer phone", "Admin", "2 business days"],
+                    ]
+                ]
+            ),
+            FakePage(
+                [
+                    [
+                        ["Audit logs", "Security owner", "180 days"],
+                    ]
+                ]
+            ),
+        ]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    class FakePdfPlumber:
+        @staticmethod
+        def open(path: str):
+            return FakePdf()
+
+    monkeypatch.setattr(parser_module, "pdfplumber", FakePdfPlumber)
+
+    parser = DocumentParser()
+    segments_by_page = parser._extract_pdf_table_segments(Path("ignored.pdf"))
+
+    continuation_segment = segments_by_page[2][0][0]
+    assert "Data Type=Audit logs" in continuation_segment
+    assert "Approver=Security owner" in continuation_segment
+    assert "SLA=180 days" in continuation_segment
+
+
+def test_document_parser_excludes_pdf_table_area_from_plain_text(monkeypatch) -> None:
+    class FakeTable:
+        bbox = (0, 100, 500, 220)
+
+        def extract(self):
+            return [
+                ["Data Type", "Approver", "SLA"],
+                ["Customer phone", "Admin", "2 business days"],
+            ]
+
+    class FakeFilteredPage:
+        def extract_text(self):
+            return "Policy intro outside the table."
+
+    class FakePage:
+        def find_tables(self):
+            return [FakeTable()]
+
+        def filter(self, predicate):
+            return FakeFilteredPage()
+
+        def extract_text(self):
+            return "Policy intro outside the table.\nData Type Approver SLA Customer phone Admin 2 business days"
+
+    class FakePdf:
+        pages = [FakePage()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    class FakePdfPlumber:
+        @staticmethod
+        def open(path: str):
+            return FakePdf()
+
+    monkeypatch.setattr(parser_module, "pdfplumber", FakePdfPlumber)
+
+    result = DocumentParser().parse(Path("table.pdf"))
+
+    assert "Policy intro outside the table." in result.normalized_text
+    assert "Data Type Approver SLA Customer phone Admin" not in result.normalized_text
+    assert "Table row: PDF page 1 table 1. Data Type=Customer phone; Approver=Admin; SLA=2 business days." in result.normalized_text
+
+
+def test_document_parser_extracts_csv_tables(tmp_path: Path) -> None:
+    parser = DocumentParser()
+    csv_path = tmp_path / "approvals.csv"
+    csv_path.write_text("Request,Approver,SLA\nData export,Admin,1 day\nRefund,Manager,2 days\n", encoding="utf-8")
+
+    result = parser.parse(csv_path)
+
+    assert result.parser_name == "csv"
+    assert "Table row: approvals. Request=Data export; Approver=Admin; SLA=1 day." in result.normalized_text
+    assert "Request=Refund; Approver=Manager; SLA=2 days." in result.normalized_text

@@ -18,6 +18,7 @@ SUPPORTED_FILE_TYPES = {
     ".htm": "text/html",
     ".pdf": "application/pdf",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".csv": "text/csv",
 }
 
 

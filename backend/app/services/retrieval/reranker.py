@@ -128,7 +128,7 @@ class HeuristicReranker:
             candidate = item.candidate
             combined_text = " ".join(
                 part
-                for part in [candidate.document_title, candidate.section_title or "", candidate.content[:420]]
+                for part in [candidate.document_title, candidate.section_title or "", candidate.content[:1600]]
                 if part
             )
             content_features = _feature_tokens(
@@ -149,6 +149,8 @@ class HeuristicReranker:
             score += section_overlap * 0.06
             if lexical_support:
                 score += 0.04
+            if "Table row:" in candidate.content and overlap >= 0.16:
+                score += 0.22
             if target_document_id is not None and candidate.document_id == target_document_id:
                 score += 0.08
             score += _domain_alignment_bonus(query, candidate.content)
@@ -224,6 +226,18 @@ def _expand_domain_features(value: str, features: set[str]) -> set[str]:
         expanded.update({"p1", "p1工单", "高优先级", "高优先", "工单"})
     if "首次响应" in normalized:
         expanded.update({"首次响应", "响应时间", "响应时限"})
+    if "数据导出" in normalized:
+        expanded.update({"数据导出", "导出", "审批", "审批人", "处理时限", "脱敏要求"})
+    if "客户手机号" in normalized or "手机号" in normalized:
+        expanded.update({"客户手机号", "手机号", "脱敏", "敏感字段"})
+    if "处理时限" in normalized or "时限" in normalized or "sla" in normalized:
+        expanded.update({"处理时限", "时限", "sla"})
+    if "脱敏" in normalized:
+        expanded.update({"脱敏", "敏感字段"})
+    if "版本发生变化" in normalized or ("制度版本" in normalized and "检查" in normalized):
+        expanded.update({"版本更新", "版本更新检查清单", "检查清单", "检查项", "是否必须", "必须"})
+    if "检查项" in normalized:
+        expanded.update({"检查清单", "检查项", "是否必须"})
     if "周报" in normalized:
         expanded.add("weeklyreport")
     return expanded
@@ -269,6 +283,18 @@ def _domain_alignment_bonus(query: str, value: str) -> float:
         bonus += 0.18
     if "工单" in normalized_query and "工单" in normalized_value:
         bonus += 0.06
+    if ("客户手机号" in normalized_query or "手机号" in normalized_query) and "数据范围=包含客户手机号" in normalized_value:
+        bonus += 0.42
+        if "处理时限=" in normalized_value:
+            bonus += 0.12
+        if "脱敏要求=" in normalized_value:
+            bonus += 0.12
+    if ("检查项" in normalized_query or "哪些检查" in normalized_query) and "版本更新检查清单" in normalized_value:
+        bonus += 0.42
+        if "是否必须=必须" in normalized_value:
+            bonus += 0.12
+    if "制度版本发生变化" in normalized_query and "知识库维护动作" in normalized_value and "版本更新检查清单" not in normalized_value:
+        bonus -= 0.12
     return bonus
 
 

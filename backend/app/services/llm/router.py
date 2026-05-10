@@ -26,7 +26,8 @@ Rules:
 - If the user clearly asks about a specific document, use document_qa.
 - When a specific document is requested, choose target_document_title and target_document_id only from the accessible document list provided below.
 - If the user appears to reference a specific document that is not in the accessible list, keep requested_document_name, leave target_document_title and target_document_id null, and set should_refuse_if_inaccessible=true.
-- If the user asks to compare versions or asks what changed between versions, use version_compare.
+- If the user explicitly asks to compare two document versions or asks what changed between versions, use version_compare.
+- If "version changed" / "版本发生变化" is only a business condition inside a policy, and the user asks what checklist or rule applies, use document_qa or topic_qa instead of version_compare.
 - Extract version refs such as v1, v2, latest, newest, current, previous, 最新, 上一版, 前一版 when present.
 - artifact_type may be set together with document_qa, topic_qa, or version_compare when the user wants to search/compare first and then generate tasks, a weekly report, or FAQ.
 - Use workflow_generation only when the user is mainly asking to generate tasks, a weekly report, or FAQ from existing conversation context.
@@ -117,7 +118,7 @@ class DeterministicRouterProvider:
 
         artifact_type = _infer_artifact_type(lowered)
 
-        if any(pattern in lowered for pattern in VERSION_COMPARE_PATTERNS):
+        if _looks_like_version_compare_request(question):
             matched_document = _match_accessible_document(question, accessible_documents) or _match_context_document(
                 question,
                 accessible_documents,
@@ -348,6 +349,37 @@ def _stabilize_router_decision(
     has_followup_reference = _looks_like_followup_document_reference(question)
     has_explicit_document_anchor = matched_document is not None or requested_document_name is not None or has_followup_reference
 
+    if decision.intent == "version_compare" and not _looks_like_version_compare_request(question):
+        if matched_document:
+            return decision.model_copy(
+                update={
+                    "intent": "document_qa",
+                    "target_document_id": matched_document.document_id,
+                    "target_document_title": matched_document.title,
+                    "requested_document_name": requested_document_name or matched_document.title,
+                    "topic": None,
+                    "from_version_ref": None,
+                    "to_version_ref": None,
+                    "needs_citations": True,
+                    "should_refuse_if_inaccessible": True,
+                    "reasoning_brief": "问题提到版本变化作为业务条件，但未要求比较两个版本，按文档问答处理。",
+                }
+            )
+        return decision.model_copy(
+            update={
+                "intent": "topic_qa",
+                "target_document_id": None,
+                "target_document_title": None,
+                "requested_document_name": None,
+                "topic": question.strip(),
+                "from_version_ref": None,
+                "to_version_ref": None,
+                "needs_citations": True,
+                "should_refuse_if_inaccessible": False,
+                "reasoning_brief": "问题提到版本变化作为业务条件，但未要求比较两个版本，按主题问答处理。",
+            }
+        )
+
     if decision.intent == "topic_qa" and matched_document and _looks_like_document_request(question, conversation_context):
         return decision.model_copy(
             update={
@@ -509,6 +541,15 @@ def _extract_version_ref(question: str, *, prefer: str) -> str | None:
     if re.search(r"最新|latest|newest|current", question, flags=re.IGNORECASE):
         return "latest"
     return None
+
+
+def _looks_like_version_compare_request(question: str) -> bool:
+    lowered = question.strip().casefold()
+    if any(pattern in lowered for pattern in VERSION_COMPARE_PATTERNS):
+        return True
+    has_version_ref = bool(re.search(r"v\s*\d+|上一版|前一版|previous|prior|latest|newest|current|最新|最新版", lowered))
+    has_compare_verb = bool(re.search(r"比较|对比|差异|改了什么|compare|diff|changed", lowered))
+    return has_version_ref and has_compare_verb
 
 
 

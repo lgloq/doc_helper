@@ -9,8 +9,9 @@
 整条链路可分为 6 个阶段：
 
 1. 文档解析
-   - 支持 `TXT / Markdown / HTML / PDF / DOCX`
+   - 支持 `TXT / Markdown / HTML / PDF / DOCX / CSV`
    - 尽量保留标题、页码、段落等结构信息
+   - Markdown、HTML、DOCX、CSV 和文本型 PDF 表格会转成可检索文本
    - 输出统一的 `ParsedDocument`
 
 2. 结构化切块
@@ -53,10 +54,13 @@
 
 ## 文档解析与切块策略
 ### 解析策略
-- Markdown / HTML：尽量保留标题层级
-- PDF：尽量保留页码
-- DOCX：保留段落和 heading 风格
+- Markdown / HTML：尽量保留标题层级，并提取文本型表格
+- PDF：尽量保留页码；可复制文本型表格会尝试按行转成 key-value 文本
+- DOCX：保留段落、heading 风格和文本型表格
 - TXT：按自然段拆分
+- CSV：第一行作为表头，后续行转成 key-value 文本
+
+当前没有做图片 OCR、扫描版 PDF、复杂 Excel、多 sheet XLSX、复杂合并单元格或跨页表格恢复。PDF 表格仅覆盖可复制文本型表格，能提取出行列时会进入 `Table row:` 文本；提取失败时仍按普通 PDF 文本处理。
 
 ### 切块策略
 - 优先保留语义边界

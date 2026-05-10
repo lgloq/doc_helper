@@ -639,9 +639,10 @@ class CopilotOrchestrator:
         allow_low_score: bool,
         agent_run_trace: AgentRunTrace | None = None,
     ) -> CopilotRunResult:
+        generation_chunks = self._focus_generation_chunks(question, candidate_chunks)
         generation = self.answer_generator.generate(
             question=question,
-            retrieved_chunks=candidate_chunks,
+            retrieved_chunks=generation_chunks,
             history_lines=conversation_memory.history_lines,
             conversation_context=conversation_memory.to_answer_context(),
             allow_low_score=allow_low_score,
@@ -709,6 +710,18 @@ class CopilotOrchestrator:
             agent_steps=agent_steps,
             agent_run_trace=agent_run_trace,
         )
+
+    @staticmethod
+    def _focus_generation_chunks(question: str, candidate_chunks: list[SearchResultChunk]) -> list[SearchResultChunk]:
+        if not candidate_chunks:
+            return []
+        if _looks_like_structured_table_lookup(question) and "Table row:" in candidate_chunks[0].content:
+            return [candidate_chunks[0]]
+        top_document_id = candidate_chunks[0].document_id
+        same_document_chunks = [chunk for chunk in candidate_chunks if chunk.document_id == top_document_id]
+        if same_document_chunks:
+            return same_document_chunks[:3]
+        return candidate_chunks[:3]
 
     def _build_refusal_result(
         self,
@@ -1307,6 +1320,23 @@ def _resolve_runner_refusal_reason(runner_result) -> str:
 def _looks_like_followup_question(question: str) -> bool:
     lowered = question.casefold()
     markers = ("刚才", "上一个", "上一轮", "继续", "这个文档", "这份文档", "那份文档", "这个手册", "这份手册")
+    return any(marker in lowered for marker in markers)
+
+
+def _looks_like_structured_table_lookup(question: str) -> bool:
+    lowered = question.casefold()
+    markers = (
+        "审批",
+        "处理时限",
+        "时限",
+        "脱敏",
+        "检查项",
+        "是否必须",
+        "负责人",
+        "完成时限",
+        "由谁",
+        "哪些",
+    )
     return any(marker in lowered for marker in markers)
 
 

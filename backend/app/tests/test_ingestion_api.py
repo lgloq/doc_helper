@@ -97,6 +97,47 @@ def test_upload_ingest_and_chunk_visibility(client: TestClient, db_session: Sess
     assert chunk_payload["preview"]
 
 
+def test_csv_upload_ingest_exposes_table_text_in_chunks(client: TestClient, db_session: Session) -> None:
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add(admin_role)
+    db_session.flush()
+
+    _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+    db_session.commit()
+
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+
+    csv_bytes = "Request,Approver,SLA\nData export,Admin,1 day\nRefund,Manager,2 days\n".encode("utf-8")
+    upload_response = client.post(
+        "/api/v1/documents/upload",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        files={"file": ("approvals.csv", BytesIO(csv_bytes), "text/csv")},
+        data={"title": "Approval Matrix", "description": "csv upload", "status": "active"},
+    )
+    assert upload_response.status_code == 200
+    document_payload = upload_response.json()
+    document_id = document_payload["document"]["id"]
+    version_id = document_payload["version"]["id"]
+    assert document_payload["version"]["mime_type"] == "text/csv"
+
+    ingest_response = client.post(
+        f"/api/v1/documents/{document_id}/ingest",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"version_id": version_id},
+    )
+    assert ingest_response.status_code == 200
+    assert ingest_response.json()["chunk_count"] >= 1
+
+    chunks_response = client.get(
+        f"/api/v1/documents/{document_id}/chunks",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert chunks_response.status_code == 200
+    chunk_text = "\n".join(item["content"] for item in chunks_response.json())
+    assert "Table row: approvals. Request=Data export; Approver=Admin; SLA=1 day." in chunk_text
+    assert "Request=Refund; Approver=Manager; SLA=2 days." in chunk_text
+
+
 def test_document_management_write_endpoints_require_admin_role(client: TestClient, db_session: Session) -> None:
     admin_role = Role(name=RoleName.ADMIN, description="Admin")
     manager_role = Role(name=RoleName.MANAGER, description="Manager")

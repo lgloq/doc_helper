@@ -165,3 +165,38 @@ def test_reranker_penalizes_negative_evidence_even_when_terms_overlap() -> None:
 
     assert result.candidates[0].candidate.document_title == "客户支持、数据导出与知识库维护协作规范"
     assert result.candidates[0].rerank_score > result.candidates[1].rerank_score
+
+
+def test_reranker_can_find_table_row_later_in_chunk_content() -> None:
+    reranker = HeuristicReranker()
+    query = "包含客户手机号的数据导出由谁审批，处理时限和脱敏要求是什么？"
+
+    generic_policy_chunk = _candidate(
+        document_title="客户支持、数据导出与知识库维护协作规范",
+        section_title="客户沟通要求",
+        content="不应直接对外同步未验证的根因猜测、内部员工姓名、内部系统名称或审计信息。涉及客户数据时应谨慎处理。",
+        fused_score=0.62,
+        vector_raw=0.62,
+        chunk_index=2,
+    )
+    table_chunk = _candidate(
+        document_title="客户支持、数据导出与知识库维护协作规范",
+        section_title="数据导出审批与脱敏矩阵",
+        content=(
+            "数据导出申请需要根据字段敏感程度、客户范围和交付渠道判断审批人。"
+            "普通运营报表由部门负责人审批。包含客户邮箱时由管理员审批。"
+            "其他说明用于拉长 chunk，避免答案总在开头。"
+            "交付记录需要包含导出编号、审批人、生成时间、字段说明、脱敏方式和接收确认状态。"
+            "Table row: 数据导出审批与脱敏矩阵. 数据范围=包含客户手机号; 审批人=管理员; "
+            "处理时限=2 个工作日; 脱敏要求=保留前三位和后四位; 允许交付渠道=加密邮件."
+        ),
+        fused_score=0.51,
+        lexical_raw=0.03,
+        vector_raw=0.51,
+        chunk_index=8,
+    )
+
+    result = reranker.rerank(query, [generic_policy_chunk, table_chunk], top_k=2)
+
+    assert result.candidates[0].candidate.section_title == "数据导出审批与脱敏矩阵"
+    assert "包含客户手机号" in result.candidates[0].candidate.content

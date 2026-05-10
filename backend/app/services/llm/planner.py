@@ -40,6 +40,7 @@ Rules:
 - Prefer search_docs when the user first needs grounded document evidence.
 - Prefer compare_versions when the user explicitly asks to compare versions or asks what changed between versions.
 - Only use extract_todos, generate_weekly_report, or generate_faq after there is enough grounded evidence in previous observations or conversation context.
+- Do not treat policy words such as 检查项 or 事项 as a request to call extract_todos unless the user explicitly asks to 提取待办, 整理成待办, 生成任务, 生成周报, or 生成 FAQ.
 - If previous observations show missing evidence, inaccessible documents, unknown tools, or insufficient context, do not force another workflow tool. Use refuse or ask_clarification.
 - If the user asks for a follow-up structured result based on previous context and there is already enough grounded evidence, it is acceptable to use extract_todos, generate_weekly_report, or generate_faq directly.
 - Never invent tool names outside the whitelist.
@@ -47,6 +48,8 @@ Rules:
 - evidence_state must be one of: none, partial, sufficient, insufficient.
 - expected_next should briefly describe what may happen after this step, or null.
 """
+
+WORKFLOW_TOOL_NAMES = {"extract_todos", "generate_weekly_report", "generate_faq"}
 
 
 class ActionPlanner(Protocol):
@@ -288,6 +291,7 @@ class LLMActionPlanner:
                 tool_args["query"] = user_query
             decision = decision.model_copy(update={"tool_args": tool_args})
         decision = _sanitize_planner_decision(
+            user_query=user_query,
             decision=decision,
             available_tools=available_tools,
             previous_actions=previous_actions,
@@ -402,6 +406,7 @@ def _terminal_decision_from_observation(
 
 def _sanitize_planner_decision(
     *,
+    user_query: str,
     decision: PlannerDecision,
     available_tools: list[ToolDefinition],
     previous_actions: list[ToolAction],
@@ -417,12 +422,80 @@ def _sanitize_planner_decision(
     )
     if terminal_decision is not None and decision.action_type == "tool_call":
         return terminal_decision
+    workflow_guard = _guard_unrequested_workflow_tool(
+        user_query=user_query,
+        decision=decision,
+        available_tools=available_tools,
+        previous_observations=previous_observations,
+        artifact_type=artifact_type,
+    )
+    if workflow_guard is not None:
+        return workflow_guard
     return _avoid_redundant_repeated_tool_call(
         decision=decision,
         available_tools=available_tools,
         previous_actions=previous_actions,
         previous_observations=previous_observations,
         artifact_type=artifact_type,
+    )
+
+
+def _guard_unrequested_workflow_tool(
+    *,
+    user_query: str,
+    decision: PlannerDecision,
+    available_tools: list[ToolDefinition],
+    previous_observations: list[ToolObservation],
+    artifact_type: str | None,
+) -> PlannerDecision | None:
+    if decision.action_type != "tool_call" or decision.tool_name not in WORKFLOW_TOOL_NAMES:
+        return None
+    if artifact_type or _has_explicit_artifact_request(user_query):
+        return None
+    if previous_observations:
+        return PlannerDecision(
+            action_type="final_answer",
+            reason="用户是在询问文档规则，不是要求生成结构化产物；已有 observation 可直接回答。",
+            evidence_state="sufficient",
+            expected_next=None,
+        )
+    allowed_tools = {tool.name for tool in available_tools}
+    if "search_docs" in allowed_tools:
+        return PlannerDecision(
+            action_type="tool_call",
+            tool_name="search_docs",
+            tool_args={"query": user_query},
+            reason="用户是在询问文档规则，不是要求生成结构化产物；先检索证据。",
+            evidence_state="none",
+            expected_next="检索后根据证据生成回答。",
+        )
+    return PlannerDecision(
+        action_type="ask_clarification",
+        reason="当前请求不像结构化产物生成，请补充要查询的文档或主题。",
+        evidence_state="none",
+        expected_next=None,
+    )
+
+
+def _has_explicit_artifact_request(question: str) -> bool:
+    normalized = re.sub(r"\s+", "", question.casefold())
+    return any(
+        marker in normalized
+        for marker in (
+            "整理成待办",
+            "提取待办",
+            "生成待办",
+            "待办事项",
+            "任务项",
+            "actionitem",
+            "todo",
+            "生成周报",
+            "周报草稿",
+            "weeklyreport",
+            "生成faq",
+            "faq草稿",
+            "常见问题",
+        )
     )
 
 

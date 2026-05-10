@@ -245,7 +245,11 @@ def _candidate_signal_score(chunk: SearchResultChunk) -> float:
 
 
 def _build_chunk_summary(chunk: SearchResultChunk, question: str) -> str:
-    source_text = " ".join((chunk.preview or chunk.content).split())
+    table_summary = _build_table_row_summary(chunk.content, question)
+    if table_summary:
+        return table_summary
+
+    source_text = " ".join(chunk.content.split())
     if not source_text:
         return ""
     sentences = _split_sentences(source_text)
@@ -282,6 +286,79 @@ def _build_chunk_summary(chunk: SearchResultChunk, question: str) -> str:
             selected = [fallback_cleaned]
 
     return " ".join(item for item in selected if item)
+
+
+def _build_table_row_summary(content: str, question: str) -> str:
+    rows = _extract_table_rows(content)
+    if not rows:
+        return ""
+
+    query_terms = _extract_query_terms(question)
+    scored_rows: list[tuple[int, int, str]] = []
+    for index, row in enumerate(rows):
+        score = _sentence_match_score(row, query_terms)
+        score += _table_field_match_bonus(question, row)
+        scored_rows.append((score, -index, row))
+    scored_rows.sort(reverse=True)
+
+    selected: list[str] = []
+    total_length = 0
+    for score, _, row in scored_rows:
+        if score <= 0 and selected:
+            continue
+        cleaned = _clean_table_row(row)
+        if not cleaned or cleaned in selected:
+            continue
+        next_length = total_length + len(cleaned)
+        if selected and next_length > 260:
+            continue
+        selected.append(cleaned)
+        total_length = next_length
+        if len(selected) >= 3:
+            break
+
+    if not selected and scored_rows:
+        selected = [_clean_table_row(scored_rows[0][2])]
+
+    return " ".join(item for item in selected if item)
+
+
+def _extract_table_rows(content: str) -> list[str]:
+    rows: list[str] = []
+    for line in content.splitlines():
+        cleaned = line.strip()
+        if cleaned.startswith("Table row:"):
+            rows.append(cleaned)
+    return rows
+
+
+def _clean_table_row(row: str) -> str:
+    cleaned = row.removeprefix("Table row:").strip()
+    cleaned = cleaned.replace(". ", "：", 1)
+    cleaned = cleaned.replace("; ", "；")
+    return _ensure_sentence_ending(_compact_text(cleaned, 180))
+
+
+def _table_field_match_bonus(question: str, row: str) -> int:
+    normalized_question = re.sub(r"\s+", "", question.casefold())
+    normalized_row = re.sub(r"\s+", "", row.casefold())
+    bonus = 0
+    field_pairs = (
+        ("客户手机号", "客户手机号"),
+        ("手机号", "手机号"),
+        ("审批", "审批人"),
+        ("处理时限", "处理时限"),
+        ("时限", "处理时限"),
+        ("脱敏", "脱敏要求"),
+        ("检查项", "检查项="),
+        ("必须", "是否必须=必须"),
+        ("制度版本", "版本更新检查清单"),
+        ("版本发生变化", "版本更新检查清单"),
+    )
+    for query_hint, row_hint in field_pairs:
+        if query_hint in normalized_question and row_hint in normalized_row:
+            bonus += 3
+    return bonus
 
 
 

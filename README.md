@@ -34,7 +34,8 @@
 
 ## 主要功能
 - 内置演示账号覆盖 `viewer / manager / admin` 三类角色，并额外提供 `viewer2@local.test` 用于团队权限演示
-- 支持 `TXT / Markdown / HTML / PDF / DOCX` 文档上传与摄取
+- 支持 `TXT / Markdown / HTML / PDF / DOCX / CSV` 文档上传与摄取
+- 支持 Markdown、HTML、DOCX、CSV 和文本型 PDF 表格提取，表格行会转成可检索文本
 - 文档版本管理与历史保留
 - 文档级 ACL：支持 `public / user / role / team`
 - 基于 PostgreSQL FTS + pgvector 的权限感知混合检索与候选重排
@@ -144,7 +145,8 @@ docker-compose.yml
 - 企业级 SSO / LDAP / OAuth 接入
 - 多租户与复杂组织架构
 - 生产级异步任务队列
-- 扫描版 PDF 的深度 OCR 优化
+- 扫描版 PDF、图片型表格和复杂 PDF 表格的 OCR / 结构恢复
+- 复杂 Excel、多 sheet XLSX 和合并单元格表格解析
 - Slack / 飞书 / 邮件等外部协作集成
 - cross-encoder rerank 或更高级 judge 评测
 - 完整的生产部署与安全加固
