@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+import re
 from typing import Any
 from uuid import UUID
 
@@ -715,8 +716,10 @@ class CopilotOrchestrator:
     def _focus_generation_chunks(question: str, candidate_chunks: list[SearchResultChunk]) -> list[SearchResultChunk]:
         if not candidate_chunks:
             return []
-        if _looks_like_structured_table_lookup(question) and "Table row:" in candidate_chunks[0].content:
-            return [candidate_chunks[0]]
+        if _looks_like_structured_table_lookup(question):
+            table_chunks = [_focus_table_rows_for_question(question, chunk) for chunk in candidate_chunks[:5] if "Table row:" in chunk.content]
+            if table_chunks:
+                return table_chunks[:3]
         top_document_id = candidate_chunks[0].document_id
         same_document_chunks = [chunk for chunk in candidate_chunks if chunk.document_id == top_document_id]
         if same_document_chunks:
@@ -1327,17 +1330,136 @@ def _looks_like_structured_table_lookup(question: str) -> bool:
     lowered = question.casefold()
     markers = (
         "审批",
+        "审批链路",
         "处理时限",
         "时限",
         "脱敏",
         "检查项",
         "是否必须",
         "负责人",
+        "责任人",
         "完成时限",
+        "复核周期",
+        "退出要求",
+        "有效期",
+        "验收材料",
+        "验收人",
+        "保留",
+        "l4",
+        "高风险",
+        "生产环境",
         "由谁",
         "哪些",
     )
     return any(marker in lowered for marker in markers)
+
+
+def _focus_table_rows_for_question(question: str, chunk: SearchResultChunk) -> SearchResultChunk:
+    rows = _extract_table_rows(chunk.content)
+    if not rows:
+        return chunk
+    required_markers = _required_table_row_markers(question)
+    if required_markers:
+        strict_rows = [row for row in rows if any(marker in _normalize_for_focus(row) for marker in required_markers)]
+        if strict_rows:
+            rows = strict_rows
+
+    scored_rows = [
+        (_table_row_focus_score(question, row), -index, row)
+        for index, row in enumerate(rows)
+    ]
+    scored_rows.sort(reverse=True)
+    best_score = scored_rows[0][0] if scored_rows else 0
+
+    selected: list[str] = []
+    for score, _, row in scored_rows:
+        if score <= 0 and selected:
+            continue
+        if selected and best_score > 0 and score < best_score * 0.75:
+            continue
+        if row not in selected:
+            selected.append(row)
+        if len(selected) >= 2:
+            break
+
+    if not selected and scored_rows:
+        selected = [scored_rows[0][2]]
+
+    prefix_parts = [part for part in [chunk.section_title, chunk.preview] if part and "Table row:" not in part]
+    focused_content = "\n".join([*prefix_parts[:1], *selected]).strip()
+    if not focused_content:
+        return chunk
+    return chunk.model_copy(update={"content": focused_content, "preview": focused_content[:500]})
+
+
+def _extract_table_rows(content: str) -> list[str]:
+    return [line.strip() for line in content.splitlines() if line.strip().startswith("Table row:")]
+
+
+def _table_row_focus_score(question: str, row: str) -> int:
+    normalized_question = _normalize_for_focus(question)
+    normalized_row = _normalize_for_focus(row)
+    score = 0
+
+    query_terms = _focus_query_terms(normalized_question)
+    for term in query_terms:
+        if term in normalized_row:
+            score += 4 if len(term) >= 4 else 2
+
+    domain_pairs = (
+        (("l4", "高风险"), ("准入等级=l4高风险", "l4高风险")),
+        (("审批链路", "审批", "链路"), ("审批链路=",)),
+        (("复核周期", "复核"), ("复核周期=",)),
+        (("退出要求", "退出"), ("退出要求=",)),
+        (("生产环境",), ("访问对象=生产环境", "可访问生产环境")),
+        (("允许方式", "允许"), ("允许方式=",)),
+        (("有效期",), ("有效期=",)),
+        (("回收责任人", "责任人"), ("回收责任人=",)),
+        (("日志要求", "日志"), ("日志要求=",)),
+        (("数据处理服务",), ("交付类型=数据处理服务",)),
+        (("验收材料", "材料"), ("验收材料=",)),
+        (("验收人",), ("验收人=",)),
+        (("保留多久", "保留期限", "资料保留"), ("保留期限=",)),
+    )
+    for query_hints, row_hints in domain_pairs:
+        if any(hint in normalized_question for hint in query_hints) and any(hint in normalized_row for hint in row_hints):
+            score += 8
+
+    return score
+
+
+def _focus_query_terms(normalized_question: str) -> list[str]:
+    stop_terms = {"什么", "哪些", "分别", "要求", "供应商", "文档", "规范", "需要"}
+    terms: list[str] = []
+    for term in re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9]{2,}", normalized_question):
+        if term in stop_terms:
+            continue
+        if len(term) > 8:
+            for size in (4, 5, 6):
+                for index in range(0, max(len(term) - size + 1, 0)):
+                    item = term[index : index + size]
+                    if item not in stop_terms and item not in terms:
+                        terms.append(item)
+        elif term not in terms:
+            terms.append(term)
+    return terms
+
+
+def _normalize_for_focus(value: str) -> str:
+    return re.sub(r"\s+", "", value.casefold())
+
+
+def _required_table_row_markers(question: str) -> tuple[str, ...]:
+    normalized_question = _normalize_for_focus(question)
+    if "l4" in normalized_question or "高风险" in normalized_question:
+        return ("准入等级=l4", "l4高风险")
+    if "数据处理服务" in normalized_question:
+        return ("交付类型=数据处理服务",)
+    if "生产环境" in normalized_question:
+        return ("访问对象=生产环境", "可访问生产环境")
+    if "客户手机号" in normalized_question or "手机号" in normalized_question:
+        return ("客户手机号",)
+    return ()
 
 
 def _truncate(value: str, limit: int) -> str:

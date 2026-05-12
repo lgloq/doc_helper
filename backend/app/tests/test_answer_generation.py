@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from app.schemas.search import SearchResultChunk, SearchScoreBreakdown
 from app.services.chat.generation import DeterministicAnswerGenerator
+from app.services.llm.orchestrator import CopilotOrchestrator
 
 
 def _chunk(*, content: str, preview: str, paragraph_start: int = 1) -> SearchResultChunk:
@@ -94,3 +95,62 @@ def test_deterministic_answer_keeps_multiple_required_checklist_rows() -> None:
     assert "同步数据导出审批变化" in result.answer
     assert "更新安全例外到期动作" in result.answer
     assert "通知所有客户" not in result.answer
+
+
+def test_generation_focuses_relevant_pdf_table_row_before_answering() -> None:
+    content = (
+        "供应商准入需要根据访问范围、数据敏感度和驻场周期判断风险等级。\n"
+        "Table row: PDF page 3 table 1. 准入等级=L1 低风险; 触发条件=仅访问公开资料; "
+        "审批链路=直属主管; 复核周期=半年复核一次; 退出要求=关闭临时账号.\n"
+        "Table row: PDF page 3 table 1. 准入等级=L2 中风险; 触发条件=访问测试环境或低敏数据; "
+        "审批链路=部门负责人；采购经理; 复核周期=季度复核一次; 退出要求=提交交接记录.\n"
+        "Table row: PDF page 3 table 1. 准入等级=L4 高风险; "
+        "触发条件=可访问生产环境、核心数据库、客户敏感字段或长期驻场; "
+        "审批链路=部门负责人；法务负责人；财务负责人；信息安全负责人; "
+        "复核周期=每月复核一次; 退出要求=必须有退出清单、账号回收证明和复盘记录."
+    )
+
+    focused = CopilotOrchestrator._focus_generation_chunks(
+        "L4 高风险供应商的审批链路、复核周期和退出要求是什么？",
+        [
+            _chunk(
+                content=content,
+                preview="供应商准入需要根据访问范围、数据敏感度和驻场周期判断风险等级。",
+                paragraph_start=3,
+            )
+        ],
+    )
+
+    assert len(focused) == 1
+    assert "准入等级=L4 高风险" in focused[0].content
+    assert "审批链路=部门负责人；法务负责人；财务负责人；信息安全负责人" in focused[0].content
+    assert "准入等级=L1" not in focused[0].content
+
+
+def test_deterministic_answer_prefers_l4_pdf_table_row() -> None:
+    generator = DeterministicAnswerGenerator()
+    content = (
+        "Table row: PDF page 3 table 1. 准入等级=L2 中风险; 触发条件=访问测试环境或低敏数据; "
+        "审批链路=部门负责人；采购经理; 复核周期=季度复核一次; 退出要求=提交交接记录.\n"
+        "Table row: PDF page 3 table 1. 准入等级=L4 高风险; "
+        "触发条件=可访问生产环境、核心数据库、客户敏感字段或长期驻场; "
+        "审批链路=部门负责人；法务负责人；财务负责人；信息安全负责人; "
+        "复核周期=每月复核一次; 退出要求=必须有退出清单、账号回收证明和复盘记录."
+    )
+
+    result = generator.generate(
+        question="L4 高风险供应商的审批链路、复核周期和退出要求是什么？",
+        retrieved_chunks=[
+            _chunk(
+                content=content,
+                preview="供应商准入风险等级表。",
+                paragraph_start=3,
+            )
+        ],
+        history_lines=[],
+    )
+
+    assert result.insufficient_evidence is False
+    assert "法务负责人" in result.answer
+    assert "每月复核一次" in result.answer
+    assert "账号回收证明" in result.answer

@@ -421,6 +421,21 @@ def _has_structured_table_answer_row(query: str, content: str) -> bool:
     normalized_query = re.sub(r"\s+", "", query.casefold())
     normalized_content = re.sub(r"\s+", "", content.casefold())
     checks = (
+        ("l4", "准入等级=l4"),
+        ("高风险", "准入等级=l4高风险"),
+        ("审批链路", "审批链路="),
+        ("复核周期", "复核周期="),
+        ("退出要求", "退出要求="),
+        ("生产环境", "访问对象=生产环境"),
+        ("生产环境", "可访问生产环境"),
+        ("允许方式", "允许方式="),
+        ("有效期", "有效期="),
+        ("回收责任人", "回收责任人="),
+        ("日志要求", "日志要求="),
+        ("数据处理服务", "交付类型=数据处理服务"),
+        ("验收材料", "验收材料="),
+        ("验收人", "验收人="),
+        ("保留", "保留期限="),
         ("客户手机号", "数据范围=包含客户手机号"),
         ("手机号", "数据范围=包含客户手机号"),
         ("审批", "审批人="),
@@ -572,6 +587,22 @@ def _expand_domain_features(value: str, features: set[str]) -> set[str]:
         expanded.update({"版本更新", "版本更新检查清单", "检查清单", "检查项", "是否必须", "必须"})
     if "检查项" in normalized:
         expanded.update({"检查清单", "检查项", "是否必须"})
+    if "l4" in normalized or "高风险" in normalized:
+        expanded.update({"l4", "高风险", "准入等级", "审批链路", "复核周期", "退出要求"})
+    if "审批链路" in normalized:
+        expanded.update({"审批", "审批链路"})
+    if "复核周期" in normalized:
+        expanded.update({"复核", "复核周期"})
+    if "退出要求" in normalized:
+        expanded.update({"退出", "退出要求"})
+    if "生产环境" in normalized:
+        expanded.update({"生产环境", "允许方式", "有效期", "回收责任人", "日志要求"})
+    if "数据处理服务" in normalized:
+        expanded.update({"数据处理服务", "验收材料", "验收人", "保留期限"})
+    if "验收材料" in normalized or "验收人" in normalized:
+        expanded.update({"验收", "验收材料", "验收人"})
+    if "保留多久" in normalized or "保留期限" in normalized or "资料保留" in normalized:
+        expanded.update({"保留", "保留期限", "归档"})
     return expanded
 
 
@@ -625,4 +656,19 @@ def _domain_alignment_bonus(query: str, value: str) -> float:
         bonus += 0.42
         if "是否必须=必须" in normalized_value:
             bonus += 0.12
+    if ("l4" in normalized_query or "高风险" in normalized_query) and "准入等级=l4高风险" in normalized_value:
+        bonus += 0.55
+        for field in ("审批链路=", "复核周期=", "退出要求="):
+            if field in normalized_value:
+                bonus += 0.08
+    if "生产环境" in normalized_query and ("访问对象=生产环境" in normalized_value or "可访问生产环境" in normalized_value):
+        bonus += 0.48
+        for field in ("允许方式=", "有效期=", "回收责任人=", "日志要求="):
+            if field in normalized_value:
+                bonus += 0.06
+    if "数据处理服务" in normalized_query and "交付类型=数据处理服务" in normalized_value:
+        bonus += 0.48
+        for field in ("验收材料=", "验收人=", "保留期限="):
+            if field in normalized_value:
+                bonus += 0.08
     return bonus

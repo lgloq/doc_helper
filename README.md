@@ -215,7 +215,7 @@ docker compose up --build
 启动后默认服务：
 - PostgreSQL + pgvector：`localhost:5432`
 - Redis：`localhost:6379`
-- FastAPI 后端：`http://localhost:8500`
+- FastAPI 后端：`http://localhost:9500`
 - React 前端：`http://localhost:5173`
 
 ### 初始化演示数据
@@ -318,7 +318,7 @@ npm run dev
 
 ## 环境变量说明
 - Docker Compose 下前端通过 Vite 代理 `/api` 到容器内的 `http://backend:8000`
-- 宿主机访问后端地址为 `http://localhost:8500`
+- 宿主机访问后端地址为 `http://localhost:9500`
 - 是否依赖外部模型取决于 `backend/.env` 配置；当前仓库保留 deterministic 回退能力，外部调用失败时本地链路仍可继续运行
 - `JWT_SECRET_KEY` 建议使用至少 32 字节以上的随机字符串；仓库中的示例值仅用于本地开发与演示
 

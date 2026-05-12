@@ -405,6 +405,19 @@ def _stabilize_router_decision(
                     "should_refuse_if_inaccessible": True,
                 }
             )
+        if decision.requested_document_name and not has_explicit_document_anchor:
+            return decision.model_copy(
+                update={
+                    "intent": "topic_qa",
+                    "target_document_id": None,
+                    "target_document_title": None,
+                    "requested_document_name": None,
+                    "topic": question.strip(),
+                    "needs_citations": True,
+                    "should_refuse_if_inaccessible": False,
+                    "reasoning_brief": "问题未明确指定文档，忽略模型猜测的目标文档名，按主题问答处理。",
+                }
+            )
         if requested_document_name and not decision.target_document_title:
             return decision.model_copy(
                 update={

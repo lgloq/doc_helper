@@ -200,3 +200,72 @@ def test_reranker_can_find_table_row_later_in_chunk_content() -> None:
 
     assert result.candidates[0].candidate.section_title == "数据导出审批与脱敏矩阵"
     assert "包含客户手机号" in result.candidates[0].candidate.content
+
+
+def test_reranker_prefers_pdf_table_row_for_l4_supplier_requirements() -> None:
+    reranker = HeuristicReranker()
+    query = "L4 高风险供应商的审批链路、复核周期和退出要求是什么？"
+
+    generic_role_chunk = _candidate(
+        document_title="供应商准入、合同变更与临时采购协作规范",
+        section_title="PDF page 2 table 1",
+        content=(
+            "Table row: PDF page 2 table 1. 角色=采购专员; 主要职责=检查报价、比价、供应商资质和流程完整性; "
+            "不应承担的职责=不判断系统安全风险; 必须输出=比价记录；供应商准入记录."
+        ),
+        fused_score=0.62,
+        vector_raw=0.62,
+        chunk_index=2,
+    )
+    l4_table_chunk = _candidate(
+        document_title="供应商准入、合同变更与临时采购协作规范",
+        section_title="PDF page 3 table 1",
+        content=(
+            "Table row: PDF page 3 table 1. 准入等级=L4 高风险; "
+            "触发条件=可访问生产环境、核心数据库、客户敏感字段或长期驻场; "
+            "审批链路=部门负责人；法务负责人；财务负责人；信息安全负责人; "
+            "复核周期=每月复核一次; 允许接触数据=原则上不允许直接接触原始敏感数据; "
+            "退出要求=必须有退出清单、账号回收证明和复盘记录."
+        ),
+        fused_score=0.48,
+        lexical_raw=0.02,
+        vector_raw=0.48,
+        chunk_index=3,
+    )
+
+    result = reranker.rerank(query, [generic_role_chunk, l4_table_chunk], top_k=2)
+
+    assert "准入等级=L4 高风险" in result.candidates[0].candidate.content
+    assert result.candidates[0].rerank_score > result.candidates[1].rerank_score
+
+
+def test_reranker_prefers_pdf_table_row_for_data_processing_acceptance() -> None:
+    reranker = HeuristicReranker()
+    query = "数据处理服务验收时需要哪些材料，验收人是谁，资料保留多久？"
+
+    generic_chunk = _candidate(
+        document_title="供应商准入、合同变更与临时采购协作规范",
+        section_title="验收、付款与资料归档",
+        content="验收不是确认供应商已经做了事，而是确认交付物满足合同和业务目标。若验收材料不完整，财务不得安排付款。",
+        fused_score=0.61,
+        vector_raw=0.61,
+        chunk_index=6,
+    )
+    table_chunk = _candidate(
+        document_title="供应商准入、合同变更与临时采购协作规范",
+        section_title="PDF page 5 table 2",
+        content=(
+            "Table row: PDF page 5 table 2. 交付类型=数据处理服务; "
+            "验收材料=字段说明；脱敏方式；抽样检查结果; 验收人=数据 owner；信息安全负责人; "
+            "付款前置条件=字段范围一致；无未授权字段; 归档位置=数据治理平台; 保留期限=5 年."
+        ),
+        fused_score=0.47,
+        lexical_raw=0.03,
+        vector_raw=0.47,
+        chunk_index=7,
+    )
+
+    result = reranker.rerank(query, [generic_chunk, table_chunk], top_k=2)
+
+    assert "交付类型=数据处理服务" in result.candidates[0].candidate.content
+    assert result.candidates[0].rerank_score > result.candidates[1].rerank_score

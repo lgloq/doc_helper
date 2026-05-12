@@ -413,6 +413,32 @@ def test_router_downgrades_non_explicit_document_guess_to_topic_qa() -> None:
     assert stabilized.topic == "客服接到高优先级工单后，首次响应时间要求是多少？"
 
 
+def test_router_downgrades_hallucinated_requested_document_name_to_topic_qa() -> None:
+    accessible_documents = [
+        RouterAccessibleDocument(document_id=uuid4(), title="供应商准入、合同变更与临时采购协作规范"),
+    ]
+    guessed = RouterDecision(
+        intent="document_qa",
+        requested_document_name="数据处理服务验收规范",
+        needs_citations=True,
+        should_refuse_if_inaccessible=True,
+        reasoning_brief="llm guessed a target document name from the topic",
+    )
+
+    stabilized = _stabilize_router_decision(
+        question="数据处理服务验收时需要哪些材料，验收人是谁，资料保留多久？",
+        accessible_documents=accessible_documents,
+        conversation_context=None,
+        decision=guessed,
+    )
+
+    assert stabilized.intent == "topic_qa"
+    assert stabilized.target_document_title is None
+    assert stabilized.requested_document_name is None
+    assert stabilized.should_refuse_if_inaccessible is False
+    assert stabilized.topic == "数据处理服务验收时需要哪些材料，验收人是谁，资料保留多久？"
+
+
 def test_router_treats_policy_version_change_as_qa_not_version_compare() -> None:
     guessed = RouterDecision(
         intent="version_compare",

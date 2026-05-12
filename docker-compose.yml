@@ -53,7 +53,7 @@ services:
       SEED_DEMO_EVAL_CASES: "true"
       DATA_DIR: /app/backend/data
     ports:
-      - "8500:8000"
+      - "9500:8000"
     volumes:
       - ./backend:/app/backend
       - ./scripts:/app/scripts

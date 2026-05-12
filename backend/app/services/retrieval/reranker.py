@@ -238,6 +238,32 @@ def _expand_domain_features(value: str, features: set[str]) -> set[str]:
         expanded.update({"版本更新", "版本更新检查清单", "检查清单", "检查项", "是否必须", "必须"})
     if "检查项" in normalized:
         expanded.update({"检查清单", "检查项", "是否必须"})
+    if "l4" in normalized or "高风险供应商" in normalized:
+        expanded.update({"l4", "高风险", "高风险供应商", "准入等级", "审批链路", "复核周期", "退出要求"})
+    if "审批链路" in normalized:
+        expanded.update({"审批链路", "审批人", "负责人"})
+    if "复核周期" in normalized:
+        expanded.update({"复核周期", "复核"})
+    if "退出要求" in normalized:
+        expanded.update({"退出要求", "退出清单", "账号回收", "复盘记录"})
+    if "生产环境" in normalized:
+        expanded.update({"生产环境", "访问对象", "允许方式", "有效期", "回收责任人", "日志要求", "l4"})
+    if "允许方式" in normalized:
+        expanded.update({"允许方式", "访问对象"})
+    if "有效期" in normalized:
+        expanded.update({"有效期", "最长"})
+    if "回收责任人" in normalized:
+        expanded.update({"回收责任人", "责任人"})
+    if "日志要求" in normalized:
+        expanded.update({"日志要求", "操作审计", "事后复盘"})
+    if "数据处理服务" in normalized:
+        expanded.update({"数据处理服务", "交付类型", "验收材料", "验收人", "保留期限"})
+    if "验收材料" in normalized or "哪些材料" in normalized:
+        expanded.update({"验收材料", "字段说明", "脱敏方式", "抽样检查结果"})
+    if "验收人" in normalized:
+        expanded.update({"验收人", "数据owner", "信息安全负责人"})
+    if "资料保留" in normalized or "保留多久" in normalized:
+        expanded.update({"保留期限", "5年", "归档位置"})
     if "周报" in normalized:
         expanded.add("weeklyreport")
     return expanded
@@ -295,6 +321,32 @@ def _domain_alignment_bonus(query: str, value: str) -> float:
             bonus += 0.12
     if "制度版本发生变化" in normalized_query and "知识库维护动作" in normalized_value and "版本更新检查清单" not in normalized_value:
         bonus -= 0.12
+    if ("l4" in normalized_query or "高风险供应商" in normalized_query) and "准入等级=l4高风险" in normalized_value:
+        bonus += 0.52
+        if "审批链路=" in normalized_value:
+            bonus += 0.14
+        if "复核周期=" in normalized_value:
+            bonus += 0.14
+        if "退出要求=" in normalized_value:
+            bonus += 0.14
+    if "生产环境" in normalized_query and "访问对象=生产环境" in normalized_value:
+        bonus += 0.52
+        if "允许方式=" in normalized_value:
+            bonus += 0.1
+        if "有效期=" in normalized_value:
+            bonus += 0.1
+        if "回收责任人=" in normalized_value:
+            bonus += 0.1
+        if "日志要求=" in normalized_value:
+            bonus += 0.1
+    if "数据处理服务" in normalized_query and "交付类型=数据处理服务" in normalized_value:
+        bonus += 0.52
+        if "验收材料=" in normalized_value:
+            bonus += 0.14
+        if "验收人=" in normalized_value:
+            bonus += 0.14
+        if "保留期限=" in normalized_value:
+            bonus += 0.14
     return bonus
 
 
