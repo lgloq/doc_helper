@@ -315,6 +315,28 @@ def _domain_alignment_bonus(query: str, value: str) -> float:
             bonus += 0.12
         if "脱敏要求=" in normalized_value:
             bonus += 0.12
+    if "客户数据导出" in normalized_query and "事项=客户数据导出" in normalized_value:
+        bonus += 0.44
+        if "证据" in normalized_query and "证据要求=" in normalized_value:
+            bonus += 0.18
+        if "审批" in normalized_query and "审批人=" in normalized_value:
+            bonus += 0.12
+        if "时限" in normalized_query and "时限=" in normalized_value:
+            bonus += 0.12
+    if "临时高权限访问" in normalized_query and "事项=临时高权限访问" in normalized_value:
+        bonus += 0.44
+        if "审批" in normalized_query and "审批人=" in normalized_value:
+            bonus += 0.12
+        if "时限" in normalized_query and "时限=" in normalized_value:
+            bonus += 0.12
+        if "证据" in normalized_query and "证据要求=" in normalized_value:
+            bonus += 0.12
+    if ("扫描a" in normalized_query or "scana" in normalized_query) and (
+        "编号=扫描a" in normalized_value or "编号=scana" in normalized_value
+    ):
+        bonus += 0.48
+        if "动作" in normalized_query and "动作=" in normalized_value:
+            bonus += 0.18
     if ("检查项" in normalized_query or "哪些检查" in normalized_query) and "版本更新检查清单" in normalized_value:
         bonus += 0.42
         if "是否必须=必须" in normalized_value:

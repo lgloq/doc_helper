@@ -1,24 +1,37 @@
 from __future__ import annotations
 
+import base64
 import csv
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from bs4 import BeautifulSoup
 from docx import Document as DocxDocument
+from docx.oxml.ns import qn
 from docx.oxml.table import CT_Tbl
 from docx.oxml.text.paragraph import CT_P
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 from pypdf import PdfReader
 
+from app.core.config import get_settings
+from app.services.ingestion.ocr import OcrResult, OcrService
 from app.services.ingestion.table_utils import table_rows_to_text_segments
 
 try:
     import pdfplumber
 except ImportError:  # pragma: no cover - optional until the backend image is rebuilt
     pdfplumber = None
+
+try:
+    import fitz
+except ImportError:  # pragma: no cover - optional until OCR dependencies are installed
+    fitz = None
+
+
+IMAGE_FILE_SUFFIXES = {".png", ".jpg", ".jpeg"}
 
 
 @dataclass
@@ -47,6 +60,10 @@ class PdfPlumberExtraction:
 
 
 class DocumentParser:
+    def __init__(self, ocr_service: OcrService | None = None):
+        self.settings = get_settings()
+        self.ocr_service = ocr_service or OcrService(self.settings)
+
     def parse(self, path: Path) -> ParsedDocument:
         suffix = path.suffix.lower()
         if suffix == ".txt":
@@ -61,6 +78,8 @@ class DocumentParser:
             return self._parse_docx(path)
         if suffix == ".csv":
             return self._parse_csv(path)
+        if suffix in IMAGE_FILE_SUFFIXES:
+            return self._parse_image(path)
         raise ValueError(f"Unsupported parser for file type '{suffix}'.")
 
     def _parse_txt(self, path: Path) -> ParsedDocument:
@@ -126,6 +145,22 @@ class DocumentParser:
                     )
                 index = next_index
                 continue
+            image_sources = self._extract_markdown_image_sources(stripped)
+            if image_sources:
+                image_line_text = self._strip_markdown_inline(stripped)
+                if image_line_text:
+                    paragraph_buffer.append(image_line_text)
+                flush_buffer()
+                paragraph_index = self._append_image_source_segments(
+                    segments,
+                    image_sources,
+                    paragraph_index=paragraph_index,
+                    source_path=path,
+                    section_title=current_section,
+                    section_title_prefix="Markdown image",
+                )
+                index += 1
+                continue
             if not stripped:
                 flush_buffer()
                 index += 1
@@ -142,7 +177,19 @@ class DocumentParser:
         current_section: str | None = None
         paragraph_index = 0
 
-        for element in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "table"]):
+        for element in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "table", "img"]):
+            if element.name == "img":
+                src = element.get("src")
+                if src:
+                    paragraph_index = self._append_image_source_segments(
+                        segments,
+                        [src],
+                        paragraph_index=paragraph_index,
+                        source_path=path,
+                        section_title=current_section,
+                        section_title_prefix="HTML image",
+                    )
+                continue
             if element.name == "table":
                 table_rows = self._extract_html_table_rows(element)
                 caption = self._normalize_text(element.find("caption").get_text(" ", strip=True)) if element.find("caption") else current_section
@@ -179,13 +226,19 @@ class DocumentParser:
     def _parse_pdf(self, path: Path) -> ParsedDocument:
         pdfplumber_extraction = self._extract_pdf_with_pdfplumber(path)
         if pdfplumber_extraction and (
-            any(text.strip() for text in pdfplumber_extraction.page_texts.values())
+            self.ocr_service.enabled
+            or any(text.strip() for text in pdfplumber_extraction.page_texts.values())
             or any(pdfplumber_extraction.table_segments_by_page.values())
         ):
-            segments: list[ParsedSegment] = []
-            paragraph_index = 0
-            for page_number in range(1, pdfplumber_extraction.page_count + 1):
-                raw_text = pdfplumber_extraction.page_texts.get(page_number, "")
+            return self._parse_pdf_pdfplumber_pages(path, pdfplumber_extraction)
+
+        reader = PdfReader(str(path))
+        segments: list[ParsedSegment] = []
+        paragraph_index = 0
+        pdf_image_document = self._open_pdf_image_document(path)
+        try:
+            for page_number, page in enumerate(reader.pages, start=1):
+                raw_text = page.extract_text() or ""
                 paragraphs = self._split_plain_paragraphs(raw_text)
                 if not paragraphs and raw_text.strip():
                     paragraphs = [self._normalize_text(raw_text)]
@@ -198,7 +251,57 @@ class DocumentParser:
                             paragraph_index=paragraph_index,
                         )
                     )
-                for table_text, section_title in pdfplumber_extraction.table_segments_by_page.get(page_number, []):
+                page_segment_count = len(paragraphs)
+                should_ocr_page = self._should_ocr_pdf_page(
+                    page_number=page_number,
+                    raw_text=raw_text,
+                    page_segment_count=page_segment_count,
+                    has_table_segments=False,
+                )
+                if should_ocr_page:
+                    paragraph_index = self._append_ocr_segments(
+                        segments,
+                        self.ocr_service.extract_pdf_page(path, page_number),
+                        paragraph_index=paragraph_index,
+                        page_number=page_number,
+                        ocr_section_title=f"PDF page {page_number} OCR",
+                        table_caption_prefix=f"PDF page {page_number} OCR table",
+                    )
+                    continue
+                paragraph_index = self._append_pdf_embedded_image_segments(
+                    segments,
+                    pdf_image_document,
+                    paragraph_index=paragraph_index,
+                    page_number=page_number,
+                )
+        finally:
+            if pdf_image_document is not None and hasattr(pdf_image_document, "close"):
+                pdf_image_document.close()
+
+        return self._finalize_segments(segments, parser_name="pdf", page_count=len(reader.pages))
+
+    def _parse_pdf_pdfplumber_pages(self, path: Path, extraction: PdfPlumberExtraction) -> ParsedDocument:
+        segments: list[ParsedSegment] = []
+        paragraph_index = 0
+        pdf_image_document = self._open_pdf_image_document(path)
+        try:
+            for page_number in range(1, extraction.page_count + 1):
+                page_segment_start = len(segments)
+                raw_text = extraction.page_texts.get(page_number, "")
+                paragraphs = self._split_plain_paragraphs(raw_text)
+                if not paragraphs and raw_text.strip():
+                    paragraphs = [self._normalize_text(raw_text)]
+                for paragraph in paragraphs:
+                    paragraph_index += 1
+                    segments.append(
+                        ParsedSegment(
+                            text=paragraph,
+                            page_number=page_number,
+                            paragraph_index=paragraph_index,
+                        )
+                    )
+                table_segments = extraction.table_segments_by_page.get(page_number, [])
+                for table_text, section_title in table_segments:
                     paragraph_index += 1
                     segments.append(
                         ParsedSegment(
@@ -208,28 +311,32 @@ class DocumentParser:
                             section_title=section_title,
                         )
                     )
-            return self._finalize_segments(segments, parser_name="pdf", page_count=pdfplumber_extraction.page_count)
-
-        reader = PdfReader(str(path))
-        segments: list[ParsedSegment] = []
-        paragraph_index = 0
-
-        for page_number, page in enumerate(reader.pages, start=1):
-            raw_text = page.extract_text() or ""
-            paragraphs = self._split_plain_paragraphs(raw_text)
-            if not paragraphs and raw_text.strip():
-                paragraphs = [self._normalize_text(raw_text)]
-            for paragraph in paragraphs:
-                paragraph_index += 1
-                segments.append(
-                    ParsedSegment(
-                        text=paragraph,
-                        page_number=page_number,
-                        paragraph_index=paragraph_index,
-                    )
+                should_ocr_page = self._should_ocr_pdf_page(
+                    page_number=page_number,
+                    raw_text=raw_text,
+                    page_segment_count=len(segments) - page_segment_start,
+                    has_table_segments=bool(table_segments),
                 )
-
-        return self._finalize_segments(segments, parser_name="pdf", page_count=len(reader.pages))
+                if should_ocr_page:
+                    paragraph_index = self._append_ocr_segments(
+                        segments,
+                        self.ocr_service.extract_pdf_page(path, page_number),
+                        paragraph_index=paragraph_index,
+                        page_number=page_number,
+                        ocr_section_title=f"PDF page {page_number} OCR",
+                        table_caption_prefix=f"PDF page {page_number} OCR table",
+                    )
+                    continue
+                paragraph_index = self._append_pdf_embedded_image_segments(
+                    segments,
+                    pdf_image_document,
+                    paragraph_index=paragraph_index,
+                    page_number=page_number,
+                )
+        finally:
+            if pdf_image_document is not None and hasattr(pdf_image_document, "close"):
+                pdf_image_document.close()
+        return self._finalize_segments(segments, parser_name="pdf", page_count=extraction.page_count)
 
     def _parse_docx(self, path: Path) -> ParsedDocument:
         doc = DocxDocument(str(path))
@@ -239,20 +346,28 @@ class DocumentParser:
 
         for block in self._iter_docx_blocks(doc):
             if isinstance(block, Paragraph):
+                paragraph_images = self._extract_docx_paragraph_image_payloads(doc, block)
                 text = self._normalize_text(block.text)
-                if not text:
-                    continue
-                style_name = (block.style.name or "").lower() if block.style else ""
-                if style_name.startswith("heading"):
-                    current_section = text
-                paragraph_index += 1
-                segments.append(
-                    ParsedSegment(
-                        text=text,
+                if text:
+                    style_name = (block.style.name or "").lower() if block.style else ""
+                    if style_name.startswith("heading"):
+                        current_section = text
+                    paragraph_index += 1
+                    segments.append(
+                        ParsedSegment(
+                            text=text,
+                            paragraph_index=paragraph_index,
+                            section_title=current_section,
+                        )
+                    )
+                if paragraph_images:
+                    paragraph_index = self._append_image_payload_segments(
+                        segments,
+                        paragraph_images,
                         paragraph_index=paragraph_index,
                         section_title=current_section,
+                        section_title_prefix="DOCX image",
                     )
-                )
                 continue
             if isinstance(block, Table):
                 table_rows = [
@@ -268,6 +383,15 @@ class DocumentParser:
                             section_title=current_section,
                         )
                     )
+                table_images = self._extract_docx_table_image_payloads(doc, block)
+                if table_images:
+                    paragraph_index = self._append_image_payload_segments(
+                        segments,
+                        table_images,
+                        paragraph_index=paragraph_index,
+                        section_title=current_section,
+                        section_title_prefix="DOCX image",
+                    )
 
         return self._finalize_segments(segments, parser_name="docx")
 
@@ -280,6 +404,171 @@ class DocumentParser:
         ]
         return self._finalize_segments(segments, parser_name="csv")
 
+    def _parse_image(self, path: Path) -> ParsedDocument:
+        segments: list[ParsedSegment] = []
+        ocr_result = self._filter_image_ocr_result(self.ocr_service.extract_image(path))
+        self._append_ocr_segments(
+            segments,
+            ocr_result,
+            paragraph_index=0,
+            ocr_section_title="Image OCR",
+            table_caption_prefix="Image table",
+        )
+        return self._finalize_segments(segments, parser_name="image", page_count=1)
+
+    def _should_ocr_pdf_page(
+        self,
+        *,
+        page_number: int,
+        raw_text: str,
+        page_segment_count: int,
+        has_table_segments: bool,
+    ) -> bool:
+        if not self.ocr_service.enabled:
+            return False
+        if self.settings.ocr_max_pages > 0 and page_number > self.settings.ocr_max_pages:
+            return False
+        if page_segment_count == 0:
+            return True
+        if has_table_segments:
+            return False
+        return len(self._normalize_text(raw_text)) < self.settings.ocr_min_text_chars
+
+    def _append_ocr_segments(
+        self,
+        segments: list[ParsedSegment],
+        ocr_result: OcrResult,
+        *,
+        paragraph_index: int,
+        page_number: int | None = None,
+        ocr_section_title: str,
+        table_caption_prefix: str,
+    ) -> int:
+        if ocr_result.text:
+            paragraph_index += 1
+            segments.append(
+                ParsedSegment(
+                    text=ocr_result.text,
+                    page_number=page_number,
+                    paragraph_index=paragraph_index,
+                    section_title=ocr_section_title,
+                )
+            )
+
+        for table_index, rows in enumerate(ocr_result.tables, start=1):
+            section_title = f"{table_caption_prefix} {table_index}"
+            for text in table_rows_to_text_segments(rows, caption=section_title):
+                paragraph_index += 1
+                segments.append(
+                    ParsedSegment(
+                        text=text,
+                        page_number=page_number,
+                        paragraph_index=paragraph_index,
+                        section_title=section_title,
+                    )
+                )
+        return paragraph_index
+
+    def _append_image_source_segments(
+        self,
+        segments: list[ParsedSegment],
+        image_sources: list[str],
+        *,
+        paragraph_index: int,
+        source_path: Path,
+        section_title: str | None,
+        section_title_prefix: str,
+        page_number: int | None = None,
+    ) -> int:
+        payloads = [payload for source in image_sources if (payload := self._resolve_image_payload(source_path, source)) is not None]
+        return self._append_image_payload_segments(
+            segments,
+            payloads,
+            paragraph_index=paragraph_index,
+            section_title=section_title,
+            section_title_prefix=section_title_prefix,
+            page_number=page_number,
+        )
+
+    def _append_image_payload_segments(
+        self,
+        segments: list[ParsedSegment],
+        image_payloads: list[bytes],
+        *,
+        paragraph_index: int,
+        section_title: str | None,
+        section_title_prefix: str,
+        page_number: int | None = None,
+    ) -> int:
+        image_index = self._next_embedded_image_index(segments, section_title_prefix)
+        for payload in image_payloads:
+            ocr_result = self._filter_image_ocr_result(self.ocr_service.extract_bytes(payload))
+            if not self._ocr_result_has_meaningful_content(ocr_result):
+                continue
+            base_title = f"{section_title_prefix} {image_index}"
+            paragraph_index = self._append_ocr_segments(
+                segments,
+                ocr_result,
+                paragraph_index=paragraph_index,
+                page_number=page_number,
+                ocr_section_title=f"{base_title} OCR",
+                table_caption_prefix=f"{base_title} table",
+            )
+            image_index += 1
+        return paragraph_index
+
+    def _append_pdf_embedded_image_segments(
+        self,
+        segments: list[ParsedSegment],
+        pdf_document,
+        *,
+        paragraph_index: int,
+        page_number: int,
+    ) -> int:
+        if pdf_document is None:
+            return paragraph_index
+        payloads = self._extract_pdf_page_image_payloads(pdf_document, page_number)
+        return self._append_image_payload_segments(
+            segments,
+            payloads,
+            paragraph_index=paragraph_index,
+            section_title=None,
+            section_title_prefix=f"PDF page {page_number} image",
+            page_number=page_number,
+        )
+
+    def _open_pdf_image_document(self, path: Path):
+        if not self.ocr_service.enabled or fitz is None:
+            return None
+        try:
+            return fitz.open(str(path))
+        except Exception:
+            return None
+
+    def _extract_pdf_page_image_payloads(self, pdf_document, page_number: int) -> list[bytes]:
+        if pdf_document is None:
+            return []
+        try:
+            page = pdf_document.load_page(page_number - 1)
+        except Exception:
+            return []
+
+        payloads: list[bytes] = []
+        seen_xrefs: set[int] = set()
+        for image_info in page.get_images(full=True):
+            xref = image_info[0]
+            if xref in seen_xrefs:
+                continue
+            seen_xrefs.add(xref)
+            try:
+                image_info_payload = pdf_document.extract_image(xref)
+                payload = image_info_payload.get("image")
+            except Exception:
+                continue
+            if payload:
+                payloads.append(payload)
+        return payloads
+
     @staticmethod
     def _iter_docx_blocks(doc):
         for child in doc.element.body.iterchildren():
@@ -287,6 +576,137 @@ class DocumentParser:
                 yield Paragraph(child, doc)
             elif isinstance(child, CT_Tbl):
                 yield Table(child, doc)
+
+    def _extract_docx_paragraph_image_payloads(self, doc, paragraph: Paragraph) -> list[bytes]:
+        return self._extract_docx_blip_payloads(doc, paragraph._element)
+
+    def _extract_docx_table_image_payloads(self, doc, table: Table) -> list[bytes]:
+        payloads: list[bytes] = []
+        seen_payloads: set[bytes] = set()
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    for payload in self._extract_docx_paragraph_image_payloads(doc, paragraph):
+                        if payload in seen_payloads:
+                            continue
+                        seen_payloads.add(payload)
+                        payloads.append(payload)
+        return payloads
+
+    @staticmethod
+    def _extract_docx_blip_payloads(doc, element) -> list[bytes]:
+        payloads: list[bytes] = []
+        seen_rids: set[str] = set()
+        for node in element.iter():
+            if node.tag != qn("a:blip"):
+                continue
+            relation_id = node.get(qn("r:embed"))
+            if not relation_id or relation_id in seen_rids:
+                continue
+            seen_rids.add(relation_id)
+            part = doc.part.related_parts.get(relation_id)
+            payload = getattr(part, "blob", None)
+            if payload:
+                payloads.append(payload)
+        return payloads
+
+    def _extract_markdown_image_sources(self, line: str) -> list[str]:
+        return [match.strip() for match in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", line) if match.strip()]
+
+    def _resolve_image_payload(self, source_path: Path, image_source: str) -> bytes | None:
+        cleaned_source = image_source.strip().strip("<>").strip()
+        if not cleaned_source:
+            return None
+        if cleaned_source.startswith("data:"):
+            return self._decode_data_url_image(cleaned_source)
+
+        source_without_title = re.split(r"\s+", cleaned_source, maxsplit=1)[0]
+        parsed = urlparse(source_without_title)
+        if parsed.scheme in {"http", "https", "file"}:
+            return None
+        base_dir = source_path.parent.resolve()
+        candidate = (base_dir / unquote(parsed.path or source_without_title)).resolve()
+        try:
+            candidate.relative_to(base_dir)
+        except ValueError:
+            return None
+        try:
+            if candidate.is_file():
+                return candidate.read_bytes()
+        except OSError:
+            return None
+        return None
+
+    @staticmethod
+    def _decode_data_url_image(source: str) -> bytes | None:
+        match = re.match(r"^data:[^;]+;base64,(.+)$", source, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            return None
+        try:
+            return base64.b64decode(match.group(1), validate=False)
+        except Exception:
+            return None
+
+    def _filter_image_ocr_result(self, ocr_result: OcrResult) -> OcrResult:
+        normalized_text = self._normalize_text(ocr_result.text)
+        if not normalized_text:
+            return replace(ocr_result, text="")
+        if not self.settings.ocr_filter_noise_text:
+            return replace(ocr_result, text=normalized_text)
+        if self._should_keep_image_ocr_text(normalized_text, ocr_result):
+            return replace(ocr_result, text=normalized_text)
+        return replace(ocr_result, text="")
+
+    def _should_keep_image_ocr_text(self, text: str, ocr_result: OcrResult) -> bool:
+        signal_char_count = self._count_signal_characters(text)
+        signal_unit_count = self._count_signal_units(text)
+        if self._looks_like_noise_only_text(text):
+            return False
+        if signal_char_count < self.settings.ocr_image_min_text_chars and signal_unit_count < self.settings.ocr_image_min_tokens:
+            return False
+        if ocr_result.layout_hint == "low_signal" and not ocr_result.tables:
+            return False
+        return True
+
+    @staticmethod
+    def _count_signal_characters(text: str) -> int:
+        return len(re.findall(r"[A-Za-z0-9\u4e00-\u9fff]", text))
+
+    @staticmethod
+    def _count_signal_units(text: str) -> int:
+        ascii_tokens = re.findall(r"[A-Za-z0-9]+(?:[-_./][A-Za-z0-9]+)*", text)
+        cjk_characters = re.findall(r"[\u4e00-\u9fff]", text)
+        return len(ascii_tokens) + len(cjk_characters)
+
+    @staticmethod
+    def _looks_like_noise_only_text(text: str) -> bool:
+        collapsed = re.sub(r"\s+", "", text)
+        if not collapsed:
+            return True
+        noise_patterns = (
+            r"^(图|表|附图|附件)\s*[:：-]?\s*[\dA-Za-z一二三四五六七八九十]+$",
+            r"^(FIG(?:URE)?|IMAGE)\s*[:：-]?\s*[\dA-Za-z._-]+$",
+            r"^(第?\d+页|\d+/\d+)$",
+            r"^\d{4}[-/.年]\d{1,2}(?:[-/.月]\d{1,2}日?)?$",
+            r"^\d+$",
+        )
+        return any(re.fullmatch(pattern, collapsed, flags=re.IGNORECASE) for pattern in noise_patterns)
+
+    @staticmethod
+    def _ocr_result_has_meaningful_content(ocr_result: OcrResult) -> bool:
+        return bool(ocr_result.text.strip() or ocr_result.tables)
+
+    @staticmethod
+    def _next_embedded_image_index(segments: list[ParsedSegment], section_title_prefix: str) -> int:
+        pattern = re.compile(rf"^{re.escape(section_title_prefix)} (\d+)(?:\s|$)")
+        indexes = []
+        for segment in segments:
+            if not segment.section_title:
+                continue
+            match = pattern.match(segment.section_title)
+            if match:
+                indexes.append(int(match.group(1)))
+        return (max(indexes) if indexes else 0) + 1
 
     def _extract_html_table_rows(self, table_element) -> list[list[str]]:
         rows: list[list[str]] = []

@@ -391,7 +391,11 @@ export function DocumentsPage() {
           <div className="panel-header">
             <div className="panel-heading">
               <h3>{canManageLibrary ? "上传文档" : "当前角色"}</h3>
-              <p>{canManageLibrary ? "上传知识文档并立即入库，便于后续检索、引用和版本管理。" : "当前账号仅支持查看可访问文档、分块、版本差异和引用问答。"}</p>
+              <p>
+                {canManageLibrary
+                  ? "上传知识文档并立即入库，适合首次录入或新增一份独立资料。"
+                  : "当前账号仅支持查看可访问文档、分块、版本差异和引用问答。"}
+              </p>
             </div>
             <StatusBadge tone={canManageLibrary ? "info" : "neutral"}>{canManageLibrary ? "文档维护" : "只读访问"}</StatusBadge>
           </div>
@@ -416,8 +420,9 @@ export function DocumentsPage() {
                 </label>
                 <label>
                   <span>文件</span>
-                  <input accept=".txt,.md,.markdown,.html,.htm,.pdf,.docx" name="file" type="file" required />
+                  <input accept=".txt,.md,.markdown,.html,.htm,.pdf,.docx,.csv,.png,.jpg,.jpeg" name="file" type="file" required />
                 </label>
+                <p className="muted">如果内容属于当前正在查看文档的更新，使用下方“上传新版本”会更合适。</p>
                 <ErrorNotice message={uploadError} />
                 <button className="primary-button" disabled={uploading} type="submit">
                   {uploading ? "上传中..." : "上传并入库"}
@@ -579,7 +584,8 @@ export function DocumentsPage() {
                 <div className="subsection-header">
                   <h4>上传新版本</h4>
                 </div>
-                <input accept=".txt,.md,.markdown,.html,.htm,.pdf,.docx" name="file" type="file" required />
+                <p className="muted">会追加到《{selectedDocument.title}》并生成新版本号，文档条目和现有权限配置会保持不变。</p>
+                <input accept=".txt,.md,.markdown,.html,.htm,.pdf,.docx,.csv,.png,.jpg,.jpeg" name="file" type="file" required />
                 <button className="primary-button" disabled={versionUploading} type="submit">
                   {versionUploading ? "上传中..." : "上传版本"}
                 </button>

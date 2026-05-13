@@ -21,7 +21,7 @@ from app.schemas.document import (
 )
 from app.services.ingestion.chunking import SemanticChunker
 from app.services.ingestion.embeddings import EmbeddingProviderFactory
-from app.services.ingestion.file_storage import LocalDocumentStorage
+from app.services.ingestion.file_storage import LocalDocumentStorage, UploadInspection
 from app.services.ingestion.parsers import DocumentParser
 from app.services.permissions.service import PermissionFilterBuilder
 
@@ -46,6 +46,21 @@ class DocumentIngestionService:
         status_value: DocumentStatus,
     ) -> DocumentUploadResponse:
         document_title = title or Path(file.filename or "document").stem or "Untitled Document"
+        upload_inspection = self._inspect_upload(file)
+        existing_version = self.document_repository.find_version_by_checksum_and_title(
+            checksum_sha256=upload_inspection.checksum_sha256,
+            title=document_title,
+        )
+        if existing_version is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"检测到同标题且内容完全相同的文档已存在："
+                    f"《{existing_version.document.title}》v{existing_version.version_number}。"
+                    "若要更新现有文档，请使用“上传新版本”；若只需重建索引，请对现有版本执行重新入库。"
+                ),
+            )
+
         document = Document(
             title=document_title,
             description=description,
@@ -55,7 +70,7 @@ class DocumentIngestionService:
         self.document_repository.add(document)
         self.session.flush()
 
-        version = self._create_version_record(actor, document, file, version_number=1)
+        version = self._create_version_record(actor, document, file, version_number=1, upload_inspection=upload_inspection)
         self.document_repository.set_current_version(document, version.id)
         self.session.commit()
         self.session.refresh(document)
@@ -67,8 +82,27 @@ class DocumentIngestionService:
 
     def upload_document_version(self, actor: User, document_id: UUID, file: UploadFile) -> DocumentUploadResponse:
         document = self._get_manageable_document(actor, document_id)
+        upload_inspection = self._inspect_upload(file)
+        existing_version = self.document_repository.find_version_by_checksum_in_document(
+            document_id=document.id,
+            checksum_sha256=upload_inspection.checksum_sha256,
+        )
+        if existing_version is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"该文件与文档《{document.title}》的 v{existing_version.version_number} 完全一致，"
+                    "无需重复上传相同版本。"
+                ),
+            )
         version_number = self.document_repository.get_next_version_number(document.id)
-        version = self._create_version_record(actor, document, file, version_number=version_number)
+        version = self._create_version_record(
+            actor,
+            document,
+            file,
+            version_number=version_number,
+            upload_inspection=upload_inspection,
+        )
         self.session.commit()
         self.session.refresh(document)
         self.session.refresh(version)
@@ -179,9 +213,17 @@ class DocumentIngestionService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document version not found.")
         return version
 
-    def _create_version_record(self, actor: User, document: Document, file: UploadFile, version_number: int) -> DocumentVersion:
+    def _create_version_record(
+        self,
+        actor: User,
+        document: Document,
+        file: UploadFile,
+        version_number: int,
+        *,
+        upload_inspection: UploadInspection | None = None,
+    ) -> DocumentVersion:
         try:
-            stored_file = self.storage.save_upload(document.id, version_number, file)
+            stored_file = self.storage.save_upload(document.id, version_number, file, inspection=upload_inspection)
         except ValueError as exc:
             self.session.rollback()
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
@@ -200,6 +242,12 @@ class DocumentIngestionService:
         self.document_repository.add_version(version)
         self.session.flush()
         return version
+
+    def _inspect_upload(self, file: UploadFile) -> UploadInspection:
+        try:
+            return self.storage.inspect_upload(file)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     @staticmethod
     def _serialize_document(document: Document, current_user_can_manage: bool):

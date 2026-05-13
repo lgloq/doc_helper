@@ -76,6 +76,29 @@ class DocumentRepository:
         )
         return self.session.scalar(statement)
 
+    def find_version_by_checksum_and_title(self, *, checksum_sha256: str, title: str) -> DocumentVersion | None:
+        statement = (
+            select(DocumentVersion)
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .options(selectinload(DocumentVersion.document))
+            .where(DocumentVersion.checksum_sha256 == checksum_sha256)
+            .where(func.lower(Document.title) == title.casefold())
+            .order_by(DocumentVersion.created_at.desc())
+            .limit(1)
+        )
+        return self.session.scalar(statement)
+
+    def find_version_by_checksum_in_document(self, *, document_id: UUID, checksum_sha256: str) -> DocumentVersion | None:
+        statement = (
+            select(DocumentVersion)
+            .options(selectinload(DocumentVersion.document))
+            .where(DocumentVersion.document_id == document_id)
+            .where(DocumentVersion.checksum_sha256 == checksum_sha256)
+            .order_by(DocumentVersion.version_number.desc())
+            .limit(1)
+        )
+        return self.session.scalar(statement)
+
     def get_next_version_number(self, document_id: UUID) -> int:
         statement = select(func.coalesce(func.max(DocumentVersion.version_number), 0)).where(DocumentVersion.document_id == document_id)
         current = self.session.scalar(statement) or 0

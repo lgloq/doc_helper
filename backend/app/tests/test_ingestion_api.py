@@ -138,6 +138,78 @@ def test_csv_upload_ingest_exposes_table_text_in_chunks(client: TestClient, db_s
     assert "Request=Refund; Approver=Manager; SLA=2 days." in chunk_text
 
 
+def test_exact_duplicate_upload_with_same_title_is_rejected(client: TestClient, db_session: Session) -> None:
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add(admin_role)
+    db_session.flush()
+
+    _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+    db_session.commit()
+
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    file_bytes = b"Same content for duplicate detection."
+
+    first_upload = client.post(
+        "/api/v1/documents/upload",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        files={"file": ("policy.txt", BytesIO(file_bytes), "text/plain")},
+        data={"title": "Policy Notes", "description": "first upload", "status": "active"},
+    )
+    assert first_upload.status_code == 200
+
+    duplicate_upload = client.post(
+        "/api/v1/documents/upload",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        files={"file": ("policy-copy.txt", BytesIO(file_bytes), "text/plain")},
+        data={"title": "Policy Notes", "description": "duplicate upload", "status": "active"},
+    )
+    assert duplicate_upload.status_code == 409
+    assert "内容完全相同" in duplicate_upload.json()["detail"]
+
+    documents_response = client.get(
+        "/api/v1/documents",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert documents_response.status_code == 200
+    assert sum(1 for item in documents_response.json() if item["title"] == "Policy Notes") == 1
+
+
+def test_exact_duplicate_version_upload_is_rejected(client: TestClient, db_session: Session) -> None:
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add(admin_role)
+    db_session.flush()
+
+    _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+    db_session.commit()
+
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    file_bytes = b"Same version payload."
+
+    upload_response = client.post(
+        "/api/v1/documents/upload",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        files={"file": ("policy.txt", BytesIO(file_bytes), "text/plain")},
+        data={"title": "Versioned Policy", "description": "first upload", "status": "active"},
+    )
+    assert upload_response.status_code == 200
+    document_id = upload_response.json()["document"]["id"]
+
+    duplicate_version_upload = client.post(
+        f"/api/v1/documents/{document_id}/versions/upload",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        files={"file": ("policy-v2.txt", BytesIO(file_bytes), "text/plain")},
+    )
+    assert duplicate_version_upload.status_code == 409
+    assert "无需重复上传相同版本" in duplicate_version_upload.json()["detail"]
+
+    versions_response = client.get(
+        f"/api/v1/documents/{document_id}/versions",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert versions_response.status_code == 200
+    assert len(versions_response.json()) == 1
+
+
 def test_document_management_write_endpoints_require_admin_role(client: TestClient, db_session: Session) -> None:
     admin_role = Role(name=RoleName.ADMIN, description="Admin")
     manager_role = Role(name=RoleName.MANAGER, description="Manager")

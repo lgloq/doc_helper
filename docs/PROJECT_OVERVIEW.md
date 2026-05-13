@@ -15,8 +15,9 @@
 ## 当前完成度
 ### 已实现
 - mock 登录与三类角色：`viewer / manager / admin`
-- 支持 `TXT / Markdown / HTML / PDF / DOCX / CSV` 文档上传与摄取
+- 支持 `TXT / Markdown / HTML / PDF / DOCX / CSV / PNG / JPG / JPEG` 文档上传与摄取
 - 支持 Markdown、HTML、DOCX、CSV 和文本型 PDF 表格提取
+- 支持图片文件 OCR 入库、扫描版 PDF 页级 OCR fallback，以及规整图片表格的 best-effort 提取
 - 本地文件存储与文档版本保留
 - 文档级 ACL：支持 `public / user / role / team`
 - 基于 PostgreSQL FTS + pgvector 的权限感知混合检索与候选重排
@@ -33,7 +34,8 @@
 - 企业级 SSO / LDAP / OAuth
 - 多租户组织树与复杂权限继承
 - 生产级异步任务队列与 worker 编排
-- 扫描版 PDF、图片型表格和复杂 PDF 表格的 OCR / 结构恢复
+- DOCX / HTML / Markdown 内嵌图片 OCR 暂未完整支持
+- 低清扫描、旋转拍照、复杂合并单元格、复杂跨页表格和图片型复杂版面的稳定结构化
 - 复杂 Excel、多 sheet XLSX 和合并单元格表格解析
 - Slack / 飞书等外部协作集成
 - cross-encoder rerank 与更高级 faithfulness judge
@@ -53,6 +55,10 @@
 - 当前版本既支持当前文档问答，也支持版本 diff 与变更摘要
 - Eval 和 trace 会保留链路结果，便于排查问题和做回归验证
 - 前端可直接展开查看处理轨迹，确认当前请求的工具选择与执行结果
+- OCR 能力保持在 parser 层：图片和扫描页 OCR 结果仍进入 `ParsedSegment -> chunk -> embedding -> FTS / pgvector -> citation`，不新增数据库表，也不改变权限判断。
+- 图片 OCR 会先做轻量降噪：低信息量标签、页码、图号之类的短文本会尽量被过滤，避免污染检索。
+- 图片表格只覆盖规整表格的 best-effort 提取，并增加列对齐校验，尽量避免把图例、流程节点或散点标签误判成表格。
+- 图表、流程图、组织图和示意图当前只提取可见文字，不提供图像语义理解；低清、旋转、复杂合并单元格和跨页图片表格不保证稳定恢复。
 
 ## 核心设计
 ### 权限感知检索

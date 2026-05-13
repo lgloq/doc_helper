@@ -39,17 +39,19 @@ class SemanticChunker:
         buffer: list[ParsedSegment] = []
         buffer_chars = 0
 
-        def flush_buffer() -> None:
+        def flush_buffer(*, preserve_overlap: bool = True) -> None:
             nonlocal buffer, buffer_chars
             if not buffer:
                 return
             chunks.append(self._build_chunk_payload(len(chunks), buffer))
-            overlap = buffer[-self.overlap_segments :] if self.overlap_segments > 0 else []
+            overlap = buffer[-self.overlap_segments :] if preserve_overlap and self.overlap_segments > 0 else []
             buffer = list(overlap)
             buffer_chars = sum(len(item.text) for item in buffer)
 
         for segment in prepared_segments:
             segment_length = len(segment.text)
+            if buffer and _is_table_row_segment(segment) and not all(_is_table_row_segment(item) for item in buffer):
+                flush_buffer(preserve_overlap=False)
             if buffer and buffer_chars + segment_length > self.target_chars:
                 flush_buffer()
             buffer.append(segment)
@@ -138,3 +140,7 @@ class SemanticChunker:
             char_end=max(char_ends) if char_ends else None,
             citation_metadata=citation_metadata,
         )
+
+
+def _is_table_row_segment(segment: ParsedSegment) -> bool:
+    return segment.text.startswith("Table row:")

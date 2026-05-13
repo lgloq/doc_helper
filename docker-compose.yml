@@ -52,6 +52,12 @@ services:
       SEED_MOCK_DATA: "true"
       SEED_DEMO_EVAL_CASES: "true"
       DATA_DIR: /app/backend/data
+      ENABLE_OCR: "false"
+      OCR_LANG: chi_sim+eng
+      OCR_MIN_TEXT_CHARS: "40"
+      OCR_IMAGE_DPI: "200"
+      OCR_MAX_PAGES: "30"
+      OCR_MAX_IMAGE_PIXELS: "25000000"
     ports:
       - "9500:8000"
     volumes:

@@ -51,6 +51,15 @@ class Settings(BaseSettings):
     chunk_max_chars: int = 1200
     chunk_overlap_segments: int = 1
     chat_history_window: int = 6
+    enable_ocr: bool = False
+    ocr_lang: str = "chi_sim+eng"
+    ocr_min_text_chars: int = 40
+    ocr_image_dpi: int = 200
+    ocr_max_pages: int = 30
+    ocr_max_image_pixels: int = 25_000_000
+    ocr_image_min_text_chars: int = 20
+    ocr_image_min_tokens: int = 5
+    ocr_filter_noise_text: bool = True
 
     @field_validator("cors_origins", mode="before")
     @classmethod

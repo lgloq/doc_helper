@@ -34,8 +34,9 @@
 
 ## 主要功能
 - 内置演示账号覆盖 `viewer / manager / admin` 三类角色，并额外提供 `viewer2@local.test` 用于团队权限演示
-- 支持 `TXT / Markdown / HTML / PDF / DOCX / CSV` 文档上传与摄取
+- 支持 `TXT / Markdown / HTML / PDF / DOCX / CSV / PNG / JPG / JPEG` 文档上传与摄取
 - 支持 Markdown、HTML、DOCX、CSV 和文本型 PDF 表格提取，表格行会转成可检索文本
+- 支持图片文件 OCR 入库、扫描版 PDF 页级 OCR fallback，以及规整图片表格的 best-effort 提取
 - 文档版本管理与历史保留
 - 文档级 ACL：支持 `public / user / role / team`
 - 基于 PostgreSQL FTS + pgvector 的权限感知混合检索与候选重排
@@ -125,6 +126,7 @@ docker-compose.yml
 - 缓存：Redis
 - 前端：React、Vite、TypeScript、React Router
 - 模型接入：OpenAI SDK、兼容 OpenAI 协议的模型服务、deterministic fallback
+- 文档解析：pdfplumber、pypdf、python-docx、BeautifulSoup、PyMuPDF、Pillow、pytesseract / Tesseract
 - 测试：pytest
 - 本地运行与集成：Docker Compose
 
@@ -145,7 +147,8 @@ docker-compose.yml
 - 企业级 SSO / LDAP / OAuth 接入
 - 多租户与复杂组织架构
 - 生产级异步任务队列
-- 扫描版 PDF、图片型表格和复杂 PDF 表格的 OCR / 结构恢复
+- DOCX / HTML / Markdown 内嵌图片 OCR 暂未完整支持
+- 低清扫描、旋转拍照、复杂合并单元格、复杂跨页表格和图片型复杂版面的稳定结构化
 - 复杂 Excel、多 sheet XLSX 和合并单元格表格解析
 - Slack / 飞书 / 邮件等外部协作集成
 - cross-encoder rerank 或更高级 judge 评测
@@ -158,6 +161,16 @@ docker-compose.yml
 - 已覆盖 `admin / manager / viewer` 三类角色的演示与回归验证，并补充 `viewer2` 作为团队权限演示账号
 - 当前后端测试已覆盖多工具串联、版本对比后停止、未知工具拒绝、`max_steps` 生效、无权限追问拒答与证据不足阻断结构化生成等场景
 - 检索结果 debug 现已记录 `pre_rerank_count / post_rerank_count / rerank_strategy`，便于回看召回后重排阶段
+
+## OCR 与图片表格说明
+- OCR 默认可通过 `ENABLE_OCR` 控制，适合在需要处理扫描件或图片文件时开启；默认关闭时图片和扫描页会降级为空解析结果，不会绕过上传权限或检索 ACL。
+- `OCR_LANG` 默认 `chi_sim+eng`，Dockerfile 已安装 `tesseract-ocr` 和 `tesseract-ocr-chi-sim`；可用 `OCR_IMAGE_DPI`、`OCR_MIN_TEXT_CHARS`、`OCR_MAX_PAGES`、`OCR_MAX_IMAGE_PIXELS`、`OCR_IMAGE_MIN_TEXT_CHARS`、`OCR_IMAGE_MIN_TOKENS`、`OCR_FILTER_NOISE_TEXT` 控制渲染、保护阈值和图片 OCR 降噪策略。
+- PDF 仍优先使用 pdfplumber / pypdf 解析可复制文本和文本型表格；只有页级文本不足或没有有效 segment 时，才对该页渲染图片并 OCR，避免文本 PDF 被整篇重复识别。对文本 PDF 中的嵌入图片会单独做图片 OCR。
+- 图片表格只做规整表格的 best-effort：基于 Tesseract 文字块坐标按 y 聚合行、按 x 聚合列，并增加列对齐校验，尽量避免把柱状图、流程图图例之类的散点标签误判成表格；表格行仍复用 `Table row:` 文本进入 chunk、embedding、FTS、pgvector 和 citation 链路。
+- 对柱状图、饼图、流程图、组织图和示意图，当前只提取可见标题、标签、注释、百分比等文字，不提供图表语义理解，也不会稳定还原节点关系、趋势结论或数据系列。
+- DOCX 原生表格已支持；DOCX 正文和表格中的内嵌图片会做 OCR。HTML 文本与表格已支持，本地相对图片和 base64 图片会做 OCR；远程图片暂不处理。Markdown 文本与 pipe table 已支持，本地相对图片和 base64 图片会做 OCR；外链图片暂不处理。
+- OCR 会增加入库耗时，也不保证低清扫描、旋转拍照、复杂合并单元格、复杂跨页表格或图片型复杂版面的稳定结构化；对低信息量图片会尽量做降噪过滤，避免污染检索结果。
+- 可用 `docs/ocr_samples/customer_export_access_policy_mixed_zh.pdf` 做混合样例验证：它是一份中文仿真制度文件，同时包含可复制正文、文本型 PDF 表格、扫描附件页和扫描页图片表格。
 
 ## 多步骤处理说明
 系统在现有 RAG 链路上补充了一层多步骤处理流程，用于串起检索、版本对比和结构化结果生成等请求：

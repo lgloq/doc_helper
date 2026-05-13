@@ -19,6 +19,9 @@ SUPPORTED_FILE_TYPES = {
     ".pdf": "application/pdf",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".csv": "text/csv",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
 }
 
 
@@ -31,43 +34,75 @@ class StoredFile:
     checksum_sha256: str
 
 
+@dataclass(frozen=True)
+class UploadInspection:
+    original_filename: str
+    mime_type: str
+    file_size: int
+    checksum_sha256: str
+
+
 class LocalDocumentStorage:
     def __init__(self):
         self.settings = get_settings()
         self.base_dir = self.settings.data_dir / "documents"
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
-    def save_upload(self, document_id, version_number: int, upload_file: UploadFile) -> StoredFile:
+    def inspect_upload(self, upload_file: UploadFile) -> UploadInspection:
         suffix = Path(upload_file.filename or "").suffix.lower()
         if suffix not in SUPPORTED_FILE_TYPES:
             supported = ", ".join(sorted(SUPPORTED_FILE_TYPES.keys()))
             raise ValueError(f"Unsupported file type '{suffix}'. Supported types: {supported}.")
 
         safe_name = self._sanitize_filename(upload_file.filename or f"document{suffix}")
-        relative_dir = Path(str(document_id)) / f"v{version_number}"
-        target_dir = self.base_dir / relative_dir
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target_path = target_dir / safe_name
+        mime_type = upload_file.content_type or SUPPORTED_FILE_TYPES[suffix] or mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
 
         upload_file.file.seek(0)
         digest = hashlib.sha256()
         file_size = 0
+        while True:
+            chunk = upload_file.file.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            file_size += len(chunk)
+        upload_file.file.seek(0)
+
+        return UploadInspection(
+            original_filename=safe_name,
+            mime_type=mime_type,
+            file_size=file_size,
+            checksum_sha256=digest.hexdigest(),
+        )
+
+    def save_upload(
+        self,
+        document_id,
+        version_number: int,
+        upload_file: UploadFile,
+        *,
+        inspection: UploadInspection | None = None,
+    ) -> StoredFile:
+        upload_inspection = inspection or self.inspect_upload(upload_file)
+        relative_dir = Path(str(document_id)) / f"v{version_number}"
+        target_dir = self.base_dir / relative_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / upload_inspection.original_filename
+
+        upload_file.file.seek(0)
         with target_path.open("wb") as destination:
             while True:
                 chunk = upload_file.file.read(1024 * 1024)
                 if not chunk:
                     break
                 destination.write(chunk)
-                digest.update(chunk)
-                file_size += len(chunk)
 
-        mime_type = upload_file.content_type or SUPPORTED_FILE_TYPES[suffix] or mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
         return StoredFile(
-            original_filename=safe_name,
-            relative_path=str(Path("documents") / relative_dir / safe_name),
-            mime_type=mime_type,
-            file_size=file_size,
-            checksum_sha256=digest.hexdigest(),
+            original_filename=upload_inspection.original_filename,
+            relative_path=str(Path("documents") / relative_dir / upload_inspection.original_filename),
+            mime_type=upload_inspection.mime_type,
+            file_size=upload_inspection.file_size,
+            checksum_sha256=upload_inspection.checksum_sha256,
         )
 
     def resolve_path(self, relative_path: str) -> Path:

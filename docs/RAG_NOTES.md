@@ -9,9 +9,10 @@
 整条链路可分为 6 个阶段：
 
 1. 文档解析
-   - 支持 `TXT / Markdown / HTML / PDF / DOCX / CSV`
+   - 支持 `TXT / Markdown / HTML / PDF / DOCX / CSV / PNG / JPG / JPEG`
    - 尽量保留标题、页码、段落等结构信息
    - Markdown、HTML、DOCX、CSV 和文本型 PDF 表格会转成可检索文本
+   - 图片文件和扫描版 PDF 页面在开启 OCR 后会转成普通文本 segment；规整图片表格会 best-effort 转成 `Table row:` 文本
    - 输出统一的 `ParsedDocument`
 
 2. 结构化切块
@@ -56,11 +57,13 @@
 ### 解析策略
 - Markdown / HTML：尽量保留标题层级，并提取文本型表格
 - PDF：尽量保留页码；可复制文本型表格会尝试按行转成 key-value 文本
-- DOCX：保留段落、heading 风格和文本型表格
+- 扫描版 PDF：不整篇无脑 OCR；先做页级文本解析，页面文本不足或没有有效 segment 时才渲染该页并 OCR
+- 图片：开启 OCR 后提取文字；低信息量图号、页码、短噪声会尽量过滤；规整图片表格会按 OCR 坐标 best-effort 聚合为表格行
+- DOCX：保留段落、heading 风格和文本型表格；正文和表格中的内嵌图片会做 OCR
 - TXT：按自然段拆分
 - CSV：第一行作为表头，后续行转成 key-value 文本
 
-当前没有做图片 OCR、扫描版 PDF、复杂 Excel、多 sheet XLSX、复杂合并单元格或跨页表格恢复。PDF 表格仅覆盖可复制文本型表格，能提取出行列时会进入 `Table row:` 文本；提取失败时仍按普通 PDF 文本处理。
+当前 OCR 是轻量增强，不新增数据库表，也不改变 ACL。OCR 文本和图片表格行仍走 `ParsedSegment -> chunk -> embedding -> PostgreSQL FTS + pgvector -> citation`。对文本 PDF 中的嵌入图片、本地相对路径或 base64 的 Markdown / HTML 图片、以及 DOCX 正文和表格中的内嵌图片，都会复用同一套图片 OCR 链路。限制是：低清扫描、旋转拍照、复杂合并单元格、复杂跨页表格和图片型复杂版面不保证稳定结构化；柱状图、饼图、流程图、组织图等图片当前只提取可见标签和文字，不提供图像语义理解；HTML 远程图片、Markdown 外链图片、DOCX 页眉页脚或水印类图片暂未完整支持；复杂 Excel 和多 sheet XLSX 仍未实现。
 
 ### 切块策略
 - 优先保留语义边界

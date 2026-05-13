@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from app.repositories.retrieval_repository import RetrievalCandidate
+from app.repositories.retrieval_repository import RetrievalCandidate, RetrievalRepository
 from app.services.retrieval.reranker import HeuristicReranker, RerankCandidate
 
 
@@ -269,3 +269,44 @@ def test_reranker_prefers_pdf_table_row_for_data_processing_acceptance() -> None
 
     assert "交付类型=数据处理服务" in result.candidates[0].candidate.content
     assert result.candidates[0].rerank_score > result.candidates[1].rerank_score
+
+
+def test_retrieval_repository_tokenizes_chinese_query_ngrams() -> None:
+    tokens = set(RetrievalRepository._tokenize("扫描附件里扫描A的处理动作是什么？临时高权限访问由谁审批？"))
+
+    assert "扫描" in tokens
+    assert "附件" in tokens
+    assert "处理" in tokens
+    assert "动作" in tokens
+    assert "临时" in tokens
+    assert "权限" in tokens
+    assert "访问" in tokens
+    assert "审批" in tokens
+    assert "a" in tokens
+
+
+def test_reranker_prefers_chinese_ocr_table_row_for_scanned_case_action() -> None:
+    reranker = HeuristicReranker()
+    query = "扫描附件里扫描A的处理动作是什么？"
+
+    generic_chunk = _candidate(
+        document_title="客户数据导出与临时权限管理办法",
+        section_title="总则",
+        content="客户数据导出、临时高权限访问和供应商例外处理必须在工单系统中留痕，并按最小必要原则执行。",
+        fused_score=0.62,
+        lexical_raw=0.2,
+        chunk_index=0,
+    )
+    table_chunk = _candidate(
+        document_title="客户数据导出与临时权限管理办法",
+        section_title="PDF page 4 OCR table 1",
+        content="Table row: PDF page 4 OCR table 1. 编号=扫描 A; 负责 人=张 三; 时 限=6 小 时; 动作=核验 日 志.",
+        fused_score=0.48,
+        lexical_raw=0.18,
+        chunk_index=1,
+    )
+
+    result = reranker.rerank(query, [generic_chunk, table_chunk], top_k=2)
+
+    assert result.candidates[0].candidate.section_title == "PDF page 4 OCR table 1"
+    assert "核验 日 志" in result.candidates[0].candidate.content

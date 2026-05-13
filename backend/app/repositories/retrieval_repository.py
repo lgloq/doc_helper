@@ -43,7 +43,11 @@ class RetrievalRepository:
         if not accessible_document_ids:
             return []
         if self.session.bind and self.session.bind.dialect.name == "postgresql":
-            return self._search_lexical_postgres(query_text, accessible_document_ids, limit)
+            postgres_hits = self._search_lexical_postgres(query_text, accessible_document_ids, limit)
+            if self._contains_cjk(query_text) and len(postgres_hits) < limit:
+                cjk_hits = self._search_lexical_python(query_text, accessible_document_ids, limit)
+                return self._merge_candidates(postgres_hits, cjk_hits, limit)
+            return postgres_hits
         return self._search_lexical_python(query_text, accessible_document_ids, limit)
 
     def search_vector(self, query_embedding: list[float], accessible_document_ids: Sequence[UUID], limit: int) -> list[RetrievalCandidate]:
@@ -126,7 +130,35 @@ class RetrievalRepository:
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
-        return [token for token in re.findall(r"[A-Za-z0-9\u4e00-\u9fff]+", text.lower()) if token]
+        normalized = text.casefold()
+        tokens = [token for token in re.findall(r"[a-z0-9]+", normalized) if token]
+        for chinese_run in re.findall(r"[\u4e00-\u9fff]+", normalized):
+            if len(chinese_run) <= 4:
+                tokens.append(chinese_run)
+            for size in (2, 3, 4):
+                if len(chinese_run) < size:
+                    continue
+                tokens.extend(chinese_run[index : index + size] for index in range(len(chinese_run) - size + 1))
+        return tokens
+
+    @staticmethod
+    def _contains_cjk(text: str) -> bool:
+        return bool(re.search(r"[\u4e00-\u9fff]", text))
+
+    @staticmethod
+    def _merge_candidates(
+        primary: list[RetrievalCandidate],
+        fallback: list[RetrievalCandidate],
+        limit: int,
+    ) -> list[RetrievalCandidate]:
+        merged: dict[UUID, RetrievalCandidate] = {}
+        for candidate in [*primary, *fallback]:
+            existing = merged.get(candidate.chunk_id)
+            if existing is None or (candidate.lexical_score or 0.0) > (existing.lexical_score or 0.0):
+                merged[candidate.chunk_id] = candidate
+        candidates = list(merged.values())
+        candidates.sort(key=lambda item: ((item.lexical_score or 0.0), -item.chunk_index), reverse=True)
+        return candidates[:limit]
 
     @staticmethod
     def _cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
