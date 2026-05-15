@@ -12,6 +12,7 @@ from app.services.chat.prompts import build_grounded_messages
 from app.services.llm.openai_compatible import (
     create_openai_compatible_client,
     has_openai_compatible_credentials,
+    request_chat_completion,
     uses_openai_compatible_provider,
 )
 
@@ -152,7 +153,8 @@ class OpenAIAnswerGenerator:
     ) -> AnswerGenerationResult:
         started = time.perf_counter()
         client = create_openai_compatible_client(self.settings)
-        response = client.chat.completions.create(
+        response = request_chat_completion(
+            client,
             model=self.model_name,
             messages=build_grounded_messages(question, retrieved_chunks, history_lines, context_summary=conversation_context),
             temperature=0.1,

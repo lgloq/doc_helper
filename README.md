@@ -33,27 +33,27 @@
 - 评测与链路追踪：支持效果验证与 trace 记录
 
 ## 主要功能
-- 内置演示账号覆盖 `viewer / manager / admin` 三类角色，并额外提供 `viewer2@local.test` 用于团队权限演示
-- 支持 `TXT / Markdown / HTML / PDF / DOCX / CSV / PNG / JPG / JPEG` 文档上传与摄取
-- 支持 Markdown、HTML、DOCX、CSV 和文本型 PDF 表格提取，表格行会转成可检索文本
-- 支持图片文件 OCR 入库、扫描版 PDF 页级 OCR fallback，以及规整图片表格的 best-effort 提取
-- 文档版本管理与历史保留
-- 文档级 ACL：支持 `public / user / role / team`
-- 基于 PostgreSQL FTS + pgvector 的权限感知混合检索与候选重排
-- 引用式问答：回答、citation、confidence、证据不足兜底
-- 基于上下文的多步骤处理：系统会结合问题、会话内容和已有结果决定下一步处理
-- 派生工作流：
+- 提供 `viewer / manager / admin` 三类演示账号，并额外保留 `viewer2@local.test` 用于团队 ACL 演示
+- 当前已接入 `TXT / Markdown / HTML / PDF / DOCX / CSV / PNG / JPG / JPEG` 的上传与解析链路
+- 当前对 Markdown、HTML、DOCX、CSV 和文本型 PDF 提供基础表格提取，表格行会转成可检索文本
+- 当前可选图片 OCR 入库；扫描版 PDF 仅在页级文本不足时走 OCR fallback，规整图片表格只做 best-effort 提取
+- 保留文档版本和基础历史记录
+- 文档级 ACL 当前覆盖 `public / user / role / team`
+- 基于 PostgreSQL FTS + pgvector 的权限感知混合检索，外加轻量候选重排
+- 引用式问答返回 answer / citation / confidence，并在证据不足时显式兜底
+- 基于上下文的多步骤处理目前只在已注册工具集合内做有限步决策
+- 当前派生工作流包括：
   - 待办提取
   - 周报草稿生成
   - FAQ 草稿沉淀
-- 文档 diff：原始 unified diff、变更摘要、潜在影响提示
-- Eval：
+- 文档 diff 当前提供 unified diff、变更摘要和影响提示
+- 当前评测指标包括：
   - retrieval hit rate
   - citation accuracy
   - answer faithfulness
   - permission isolation correctness
-- Observability：记录 trace、召回 chunk、selected citation、延迟、token、错误
-- 用于展示完整业务链路的 React 前端
+- 链路记录当前保留 trace、召回 chunk、selected citation、延迟、token 和错误信息
+- 提供一套 React 前端用于串联文档、问答、版本、评测与追踪页面
 
 ## 设计重点
 - 权限过滤在检索阶段生效，候选集、citation 和 prompt 都只基于可访问文档
@@ -204,17 +204,27 @@ docker-compose.yml
 
 在 `demo_permission_eval` 中，`viewer` 账号的 `team_name` 与评测用例预期不一致，导致权限隔离用例失败。修正默认用户同步逻辑并补充回归测试后，这组 3 条用例已恢复通过。
 
-### 扩展权限矩阵集（`demo_access_matrix_eval`，8 cases）
+### 扩展权限矩阵集（`demo_access_matrix_eval`，20 cases）
 
-| 指标 | 当前结果 |
-|------|----------|
-| pass_count | 8 / 8 |
-| retrieval_hit_rate_avg | 1.0 |
-| citation_accuracy_avg | 1.0 |
-| answer_faithfulness_avg | 0.95 |
-| permission_isolation_pass_rate | 1.0 |
+这组扩展评测目前包含 20 条演示样例，其中：
+- 11 条 `answer_expected`：检查公开文档、团队 ACL 文档、角色 ACL 文档和管理员专属文档的回答质量与证据支撑
+- 9 条 `refusal_expected`：检查越权检索、越权引用和越权回答是否被正确拒绝
 
-这组扩展评测覆盖公开文档、团队 ACL 文档、角色 ACL 文档和管理员专属文档场景，主要验证不同权限条件下的可访问、不可访问与拒答行为。
+当前演示基线已经在一轮完整运行中达到 `20 / 20`：
+
+- `answer_expected`：`11 / 11`
+- `refusal_expected`：`9 / 9`
+- 综合得分：`0.98`
+- 权限通过率：`1.0`
+
+这更适合被理解为 ACL-RAG 的小规模回归评测基线，而不是大规模通用 benchmark。页面里偶尔出现的 `连接失败` 记录主要来自上游模型接口抖动。
+
+四个主指标只保留最必要的含义：
+
+- `retrieval_hit_rate_avg`：看目标文档是否被召回；回答型结合 recall / precision / nDCG / fact recall，拒答型看越权召回率
+- `citation_accuracy_avg`：看引用是否落在预期证据上；回答型结合 citation F1 和 evidence fact recall，拒答型看越权引用率
+- `answer_faithfulness_avg`：看答案里的关键事实是否被选中证据支撑
+- `permission_isolation_pass_rate`：看受限内容是否在检索、引用或答案里泄漏；这项优先作为 blocker 看待
 
 
 ## 本地启动

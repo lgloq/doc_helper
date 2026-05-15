@@ -92,6 +92,8 @@ class ChatService:
         chat_session.updated_at = datetime.now(UTC)
         self.chat_repository.add_message(user_message)
         self.session.flush()
+        user_message_id = user_message.id
+        chat_session_id = chat_session.id
 
         prepared = self._prepare_answer(actor, payload.content, payload.top_k, existing_messages, session_id=chat_session.id)
         assistant_result = prepared.answer_result
@@ -125,13 +127,14 @@ class ChatService:
         chat_session.updated_at = datetime.now(UTC)
         self.chat_repository.add_message(assistant_message)
         self.session.flush()
+        assistant_message_id = assistant_message.id
 
         citation_rows = self._build_citation_rows(assistant_message.id, prepared)
         self.chat_repository.add_citations(citation_rows)
         self.session.commit()
 
-        hydrated_user_message = self.chat_repository.get_message(user_message.id)
-        hydrated_assistant_message = self.chat_repository.get_message(assistant_message.id)
+        hydrated_user_message = self.chat_repository.get_message(user_message_id)
+        hydrated_assistant_message = self.chat_repository.get_message(assistant_message_id)
         if hydrated_user_message is None or hydrated_assistant_message is None:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to load chat messages.")
 
@@ -161,7 +164,7 @@ class ChatService:
 
         assistant_citations = [self._serialize_citation(item) for item in hydrated_assistant_message.citations]
         return ChatMessageCreateResponse(
-            session_id=chat_session.id,
+            session_id=chat_session_id,
             user_message=self._serialize_message(hydrated_user_message),
             assistant_message=self._serialize_message(hydrated_assistant_message),
             citations=assistant_citations,

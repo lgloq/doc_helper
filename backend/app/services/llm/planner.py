@@ -12,6 +12,7 @@ from app.services.chat.memory import ConversationMemory
 from app.services.llm.openai_compatible import (
     create_openai_compatible_client,
     has_openai_compatible_credentials,
+    request_chat_completion,
     uses_openai_compatible_provider,
 )
 from app.services.llm.tool_registry import ToolDefinition, ToolRegistry
@@ -256,7 +257,8 @@ class LLMActionPlanner:
         }
         started = time.perf_counter()
         try:
-            response = client.chat.completions.create(
+            response = request_chat_completion(
+                client,
                 model=self.model_name,
                 messages=[
                     {"role": "system", "content": PLANNER_SYSTEM_PROMPT},

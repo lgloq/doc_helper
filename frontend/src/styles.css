@@ -576,6 +576,105 @@ h4 {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.segmented-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid var(--panel-border);
+  width: fit-content;
+  flex-wrap: wrap;
+}
+
+.segmented-button {
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  padding: 0.5rem 0.9rem;
+  font-weight: 600;
+}
+
+.segmented-button.is-active {
+  background: rgba(17, 77, 99, 0.12);
+  color: var(--primary-strong);
+}
+
+.run-filter-bar {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.run-filter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.85rem;
+}
+
+.inline-filter-button {
+  border: 0;
+  background: transparent;
+  color: var(--primary-strong);
+  padding: 0;
+  font-weight: 600;
+}
+
+.inline-filter-button:hover {
+  text-decoration: underline;
+}
+
+.insights-workspace {
+  grid-template-columns: 300px minmax(0, 1fr);
+  align-items: start;
+}
+
+.insights-summary-grid {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.insights-summary-grid-compact {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.insights-summary-grid .metric-card strong,
+.insights-summary-grid-compact .metric-card strong {
+  font-size: 1.15rem;
+}
+
+.insights-summary-cards {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.insights-main-split {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(280px, 0.82fr) minmax(0, 1.18fr);
+  align-items: start;
+}
+
+.insights-detail-panel {
+  display: grid;
+  gap: 1rem;
+  align-content: start;
+}
+
+.insights-scroll-list {
+  max-height: min(40rem, 68vh);
+  overflow: auto;
+  padding-right: 0.25rem;
+}
+
+.insights-answer-preview {
+  line-height: 1.7;
+}
+
 .metric-card {
   display: grid;
   gap: 0.35rem;
@@ -628,6 +727,14 @@ h4 {
   .versions-layout,
   .artifacts-layout,
   .chat-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .insights-workspace,
+  .insights-main-split,
+  .insights-summary-grid,
+  .insights-summary-grid-compact,
+  .insights-summary-cards {
     grid-template-columns: 1fr;
   }
 

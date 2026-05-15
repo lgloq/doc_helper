@@ -10,6 +10,7 @@ from app.core.config import get_settings
 from app.services.llm.openai_compatible import (
     create_openai_compatible_client,
     has_openai_compatible_credentials,
+    request_chat_completion,
     uses_openai_compatible_provider,
 )
 
@@ -130,7 +131,8 @@ class OpenAIDiffSummaryGenerator:
             f"{unified_diff[:2800]}"
         )
         try:
-            response = self.client.chat.completions.create(
+            response = request_chat_completion(
+                self.client,
                 model=self.model_name,
                 messages=[
                     {"role": "system", "content": "你是结构化 JSON 输出助手。只返回 JSON 对象本身。"},
