@@ -7,7 +7,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
-from app.models.enums import RoleName
+from app.models.chat import ChatMessage, ChatSession
+from app.models.enums import MessageRole, RoleName
 from app.models.role import Role
 from app.models.user import User
 from app.schemas.llm import PlannerDecision, RouterDecision, RouterDecisionResult, ToolAction, ToolObservation
@@ -286,6 +287,74 @@ def test_delete_chat_session_is_scoped_to_owner(client: TestClient, db_session: 
     assert get_response.status_code == 200
 
 
+def test_first_user_message_updates_generic_session_title_and_display_title(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    document_id, _ = _upload_and_ingest(
+        client,
+        admin_token,
+        "员工手册",
+        "节假日安排：法定节假日前一天下午可提前下班一小时，如需值班需提前登记。",
+    )
+    _grant_acl(
+        client,
+        admin_token,
+        document_id,
+        {"principal_type": "public", "can_view": True, "can_manage": False},
+    )
+
+    session_id = _create_session(client, admin_token, "新会话")
+    question = "节假日安排是什么样的？"
+    _send_question(client, admin_token, session_id, question)
+
+    list_response = client.get(
+        "/api/v1/chat/sessions",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert list_response.status_code == 200
+    session_payload = next(item for item in list_response.json() if item["id"] == session_id)
+    assert session_payload["title"] == question
+    assert session_payload["display_title"] == question
+
+
+def test_legacy_generic_session_uses_first_user_message_as_display_title(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
+    admin_user = _get_user(db_session, "admin@example.com")
+
+    legacy_session = ChatSession(user_id=admin_user.id, title="新会话")
+    db_session.add(legacy_session)
+    db_session.flush()
+    db_session.add_all(
+        [
+            ChatMessage(
+                session_id=legacy_session.id,
+                author_user_id=admin_user.id,
+                role=MessageRole.USER,
+                content="客户数据导出审批流程是什么？",
+                insufficient_evidence=False,
+            ),
+            ChatMessage(
+                session_id=legacy_session.id,
+                author_user_id=None,
+                role=MessageRole.ASSISTANT,
+                content="历史回答占位。",
+                insufficient_evidence=False,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    list_response = client.get(
+        "/api/v1/chat/sessions",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert list_response.status_code == 200
+    session_payload = next(item for item in list_response.json() if item["id"] == str(legacy_session.id))
+    assert session_payload["title"] == "新会话"
+    assert session_payload["display_title"] == "客户数据导出审批流程是什么？"
+
+
 
 def test_document_qa_inaccessible_returns_structured_refusal(client: TestClient, db_session: Session) -> None:
     _seed_roles_and_users(db_session)
@@ -342,6 +411,7 @@ def test_document_qa_accessible_answers_with_correct_citations(client: TestClien
     session_id = _create_session(client, admin_token)
     payload = _send_question(client, admin_token, session_id, "安全例外登记里写了什么？")
     metadata = payload["assistant_message"]["message_metadata"]
+    trace = _agent_run_trace(payload)
 
     assert payload["assistant_message"]["insufficient_evidence"] is False
     assert payload["citations"]
@@ -350,6 +420,7 @@ def test_document_qa_accessible_answers_with_correct_citations(client: TestClien
     assert metadata["router_decision"]["intent"] == "document_qa"
     assert metadata["structured_result"]["answer_type"] == "grounded_answer"
     assert metadata["structured_result"]["target_document"] == "安全例外登记"
+    assert trace["tool_plan"]["planner_name"] == "DirectSearchPlan"
 
 
 
@@ -383,6 +454,7 @@ def test_topic_qa_uses_accessible_search_without_explicit_title(client: TestClie
     assert metadata["router_decision"]["intent"] in {"topic_qa", "document_qa"}
     assert metadata["tool_execution"]["tool_name"] == "search_docs"
     assert trace["tool_plan"]["initial_intent"] in {"topic_qa", "document_qa"}
+    assert trace["tool_plan"]["planner_name"] == "DirectSearchPlan"
     assert [action["tool_name"] for action in trace["actions"] if action["action_type"] == "tool_call"] == ["search_docs"]
 
 

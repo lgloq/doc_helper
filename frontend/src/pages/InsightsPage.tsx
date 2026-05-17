@@ -313,6 +313,10 @@ export function InsightsPage() {
 
   const retrievedChunks = asArray<Record<string, unknown>>(selectedTrace?.retrieved_chunks_json);
   const selectedCitations = asArray<Record<string, unknown>>(selectedTrace?.selected_citations_json);
+  const selectedTraceMetadata = asRecord(selectedTrace?.trace_metadata);
+  const selectedTraceRetrievalDebug = asRecord(selectedTraceMetadata?.retrieval_debug);
+  const traceLexicalQueries = asStringList(selectedTraceRetrievalDebug?.lexical_queries);
+  const traceRewriteStrategies = asStringList(selectedTraceRetrievalDebug?.query_rewrite_strategies);
   const visibleRetrievedChunks = showAllTraceChunks ? retrievedChunks : retrievedChunks.slice(0, DEFAULT_VISIBLE_TRACE_ITEMS);
   const visibleSelectedCitations = showAllTraceCitations
     ? selectedCitations
@@ -793,6 +797,53 @@ export function InsightsPage() {
                   <span>输出 Token：{selectedTrace.completion_tokens ?? "-"}</span>
                 </div>
                 {selectedTrace.error_text ? <ErrorNotice message={selectedTrace.error_text} /> : null}
+
+                {selectedTraceRetrievalDebug ? (
+                  <div className="list-card">
+                    <div className="list-card-topline">
+                      <strong>查询增强与检索计划</strong>
+                    </div>
+                    <div className="metadata-subline">
+                      <span>可访问文档：{String(selectedTraceRetrievalDebug.accessible_document_count ?? "-")}</span>
+                      <span>关键词检索候选：{String(selectedTraceRetrievalDebug.lexical_candidate_count ?? "-")}</span>
+                      <span>向量检索候选：{String(selectedTraceRetrievalDebug.vector_candidate_count ?? "-")}</span>
+                    </div>
+                    <div className="metadata-subline">
+                      <span>重排前：{String(selectedTraceRetrievalDebug.pre_rerank_count ?? "-")}</span>
+                      <span>重排后：{String(selectedTraceRetrievalDebug.post_rerank_count ?? "-")}</span>
+                      <span>策略：{String(selectedTraceRetrievalDebug.rerank_strategy ?? "-")}</span>
+                    </div>
+                    <p className="muted">原始问题：{selectedTrace.query_text ?? "-"}</p>
+                    <p className="muted">检索语句：{String(selectedTraceRetrievalDebug.retrieval_query ?? selectedTrace.query_text ?? "-")}</p>
+                    <div className="metadata-subline">
+                      <span>改写已应用：{selectedTraceRetrievalDebug.query_rewrite_applied ? "是" : "否"}</span>
+                      <span>改写策略：{traceRewriteStrategies.length ? traceRewriteStrategies.join("、") : "无"}</span>
+                    </div>
+                    {typeof selectedTraceRetrievalDebug.query_plan_candidate_count === "number" &&
+                    selectedTraceRetrievalDebug.query_plan_candidate_count > 1 ? (
+                      <div className="metadata-subline">
+                        <span>候选方案：{selectedTraceRetrievalDebug.query_plan_candidate_count} 个</span>
+                        <span>选中方案：{String(selectedTraceRetrievalDebug.query_plan_selected ?? "-")}</span>
+                      </div>
+                    ) : null}
+                    {selectedTraceRetrievalDebug.query_plan_selection_reason ? (
+                      <p className="muted">选中原因：{String(selectedTraceRetrievalDebug.query_plan_selection_reason)}</p>
+                    ) : null}
+                    <div className="metadata-subline">
+                      <span>改写方式：{String(selectedTraceRetrievalDebug.query_rewrite_provider ?? "rules-only")}</span>
+                      <span>改写模型：{String(selectedTraceRetrievalDebug.query_rewrite_model ?? "-")}</span>
+                      <span>改写耗时：{String(selectedTraceRetrievalDebug.query_rewrite_latency_ms ?? "-")} ms</span>
+                    </div>
+                    {traceLexicalQueries.length ? (
+                      <div className="metadata-subline">
+                        <span>关键词检索变体：{traceLexicalQueries.join(" ｜ ")}</span>
+                      </div>
+                    ) : null}
+                    {typeof selectedTraceRetrievalDebug.fusion_strategy === "string" ? (
+                      <p className="muted">融合口径：{selectedTraceRetrievalDebug.fusion_strategy}</p>
+                    ) : null}
+                  </div>
+                ) : null}
 
                 <details className="execution-trace-secondary">
                   <summary>召回分块（{retrievedChunks.length}）</summary>

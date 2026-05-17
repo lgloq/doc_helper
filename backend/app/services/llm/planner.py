@@ -259,6 +259,7 @@ class LLMActionPlanner:
         try:
             response = request_chat_completion(
                 client,
+                max_attempts=1,
                 model=self.model_name,
                 messages=[
                     {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
@@ -272,6 +273,7 @@ class LLMActionPlanner:
                 ],
                 temperature=0.0,
                 response_format={"type": "json_object"},
+                timeout=10.0,
             )
             _ = int((time.perf_counter() - started) * 1000)
             payload = _parse_json_payload(response.choices[0].message.content or "{}")

@@ -310,6 +310,10 @@ def should_abstain_from_answer(
             filtered_chunks=[],
         )
 
+    dominant_document_chunks = _prefer_dominant_document(query, relevant_chunks)
+    if dominant_document_chunks:
+        relevant_chunks = dominant_document_chunks
+
     top_chunk = relevant_chunks[0]
     top_overlap = _chunk_overlap_score(query, top_chunk)
     top_score = _effective_evidence_score(query, top_chunk)
@@ -355,7 +359,7 @@ def should_abstain_from_answer(
             return AbstainDecision(
                 should_abstain=True,
                 reason="conflicting_or_ambiguous_evidence",
-                user_message="当前可访问证据存在明显竞争或歧义，暂时不适合直接下结论。",
+                user_message=_build_conflicting_evidence_message(query, top_two, relevant_chunks),
                 filtered_chunks=[],
             )
 
@@ -448,6 +452,125 @@ def _has_structured_table_answer_row(query: str, content: str) -> bool:
         ("版本发生变化", "版本更新检查清单"),
     )
     return sum(1 for query_hint, content_hint in checks if query_hint in normalized_query and content_hint in normalized_content) >= 2
+
+
+def _prefer_dominant_document(query: str, chunks: Sequence[SearchResultChunk]) -> list[SearchResultChunk] | None:
+    if len(chunks) < 2:
+        return None
+    requested_facets = _query_facets(query)
+    if len(requested_facets) < 3:
+        return None
+
+    by_document: dict[UUID, dict[str, object]] = {}
+    for chunk in chunks[:5]:
+        bucket = by_document.setdefault(
+            chunk.document_id,
+            {
+                "chunks": [],
+                "facets": set(),
+                "score": 0.0,
+            },
+        )
+        bucket_chunks = bucket["chunks"]
+        assert isinstance(bucket_chunks, list)
+        bucket_chunks.append(chunk)
+        bucket_facets = bucket["facets"]
+        assert isinstance(bucket_facets, set)
+        bucket_facets.update(_matched_query_facets(chunk))
+        bucket["score"] = max(float(bucket["score"]), _effective_evidence_score(query, chunk))
+
+    if len(by_document) < 2:
+        return None
+
+    ranked = sorted(
+        by_document.values(),
+        key=lambda item: (
+            len(item["facets"]),  # type: ignore[arg-type]
+            float(item["score"]),
+            len(item["chunks"]),  # type: ignore[arg-type]
+        ),
+        reverse=True,
+    )
+    best = ranked[0]
+    second = ranked[1]
+    best_facets = len(best["facets"])  # type: ignore[arg-type]
+    second_facets = len(second["facets"])  # type: ignore[arg-type]
+    best_score = float(best["score"])
+    second_score = float(second["score"])
+
+    if best_facets >= min(len(requested_facets), 4) and best_facets >= second_facets + 2:
+        return list(best["chunks"])[:3]  # type: ignore[arg-type]
+    if best_facets >= 4 and best_facets > second_facets and best_score >= second_score + 0.03:
+        return list(best["chunks"])[:3]  # type: ignore[arg-type]
+    return None
+
+
+def _build_conflicting_evidence_message(
+    query: str,
+    top_chunks: Sequence[SearchResultChunk],
+    relevant_chunks: Sequence[SearchResultChunk],
+) -> str:
+    titles = _top_competing_document_titles([*top_chunks, *relevant_chunks])
+    if not titles:
+        return "当前命中的高相关证据存在明显竞争或歧义，建议明确指定文档或缩小问题范围后再问。"
+
+    title_text = "、".join(f"《{title}》" for title in titles[:3])
+    compact_query = re.sub(r"\s+", "", query.strip())
+    if any(keyword in compact_query for keyword in ("审批", "处理时限", "时限", "补材料", "关闭", "回收", "导出")):
+        suggestion = "建议拆成一到两个更明确的问题，或直接指定以哪份制度为准。"
+    else:
+        suggestion = "建议直接指定文档名，或把问题缩小到单一流程/场景。"
+
+    return (
+        f"当前命中的高相关证据同时来自 {title_text}，这些文档覆盖的是相近但不完全相同的流程口径。"
+        f"为避免把不同制度拼成一个答案，我先不直接下结论。{suggestion}"
+    )
+
+
+def _top_competing_document_titles(chunks: Sequence[SearchResultChunk]) -> list[str]:
+    titles: list[str] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        title = chunk.document_title.strip()
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        titles.append(title)
+    return titles
+
+
+def _query_facets(query: str) -> set[str]:
+    normalized = re.sub(r"\s+", "", query.casefold())
+    facets: set[str] = set()
+    facet_hints: dict[str, tuple[str, ...]] = {
+        "emergency_access": ("先救火", "紧急", "最小权限", "最低权限", "顶上"),
+        "approval": ("谁来批", "审批", "审批人", "谁审批"),
+        "time_limit": ("多久", "时限", "最晚多久", "处理时限"),
+        "materials": ("补材料", "补齐材料", "最少材料", "事后补齐"),
+        "account_close": ("关账号", "关闭", "结束后多久", "回收"),
+        "export_rules": ("导出文件", "禁止发法", "禁止方式", "禁止发送"),
+    }
+    for facet, hints in facet_hints.items():
+        if any(hint in normalized for hint in hints):
+            facets.add(facet)
+    return facets
+
+
+def _matched_query_facets(chunk: SearchResultChunk) -> set[str]:
+    normalized = re.sub(r"\s+", "", f"{chunk.document_title}{chunk.section_title or ''}{chunk.content}".casefold())
+    matched: set[str] = set()
+    facet_markers: dict[str, tuple[str, ...]] = {
+        "emergency_access": ("紧急采购", "紧急场景", "最低权限服务", "最小可用服务", "可先执行动作"),
+        "approval": ("必须审批人", "审批人", "审批链路"),
+        "time_limit": ("处理时限",),
+        "materials": ("最少材料", "事后补齐材料"),
+        "account_close": ("账号关闭时限",),
+        "export_rules": ("禁止方式", "个人网盘", "私人聊天工具", "明文邮件", "访问对象=数据导出文件"),
+    }
+    for facet, markers in facet_markers.items():
+        if any(marker in normalized for marker in markers):
+            matched.add(facet)
+    return matched
 
 
 def _extract_requested_document_name(query: str) -> str | None:

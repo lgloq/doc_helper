@@ -144,3 +144,37 @@ def test_search_returns_chat_ready_scores_and_citation_metadata(client: TestClie
     assert "paragraph_start" in first
     assert payload["debug"]["pre_rerank_count"] >= payload["debug"]["post_rerank_count"] >= 1
     assert payload["debug"]["rerank_strategy"] == "heuristic-overlap"
+
+
+def test_search_debug_exposes_query_rewrite_plan(client: TestClient, db_session: Session) -> None:
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add(admin_role)
+    db_session.flush()
+    _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+    db_session.commit()
+
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    _upload_and_ingest(
+        client,
+        admin_token,
+        "平台发布手册",
+        "发布工单至少应写明变更目的、影响系统、风险描述和预计开始结束时间。",
+    )
+
+    search_response = client.post(
+        "/api/v1/search",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"query": "《平台发布手册》里面提到，发布工单至少写明哪些信息？", "top_k": 3},
+    )
+
+    assert search_response.status_code == 200
+    payload = search_response.json()
+    assert payload["matched_chunks"]
+    assert payload["debug"]["query_rewrite_applied"] is True
+    assert "title_anchor" in payload["debug"]["query_rewrite_strategies"]
+    assert payload["debug"]["retrieval_query"].startswith("平台发布手册 ")
+    assert len(payload["debug"]["lexical_queries"]) >= 2
+    assert payload["debug"]["query_plan_candidate_count"] >= 2
+    assert payload["debug"]["query_plan_probe_applied"] is True
+    assert payload["debug"]["query_plan_selected"]
+    assert payload["debug"]["query_plan_selection_reason"]

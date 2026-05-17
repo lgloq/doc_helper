@@ -150,6 +150,20 @@ export interface SearchDebugInfo {
   lexical_candidate_count: number;
   vector_candidate_count: number;
   fusion_strategy: string;
+  pre_rerank_count?: number;
+  post_rerank_count?: number;
+  rerank_strategy?: string;
+  retrieval_query?: string | null;
+  lexical_queries?: string[];
+  query_rewrite_applied?: boolean;
+  query_rewrite_strategies?: string[];
+  query_rewrite_provider?: string | null;
+  query_rewrite_model?: string | null;
+  query_rewrite_latency_ms?: number | null;
+  query_plan_candidate_count?: number;
+  query_plan_selected?: string | null;
+  query_plan_selection_reason?: string | null;
+  query_plan_probe_applied?: boolean;
 }
 
 export interface AgentStepRead {
@@ -241,6 +255,7 @@ export interface ChatSessionRead {
   id: string;
   user_id: string;
   title: string;
+  display_title: string;
   created_at: string;
   updated_at: string;
 }

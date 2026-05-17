@@ -72,7 +72,7 @@ def _format_chunk(chunk: SearchResultChunk) -> str:
 def truncate_session_title(question: str, limit: int = 80) -> str:
     compact = " ".join(question.strip().split())
     if len(compact) <= limit:
-        return compact or "New Chat"
+        return compact or "新会话"
     return compact[: limit - 3].rstrip() + "..."
 
 

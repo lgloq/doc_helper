@@ -107,6 +107,27 @@ class DeterministicAnswerGenerator:
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
 
+        structured_answer = _build_structured_table_answer(question, selected_chunks[:3])
+        if structured_answer:
+            return AnswerGenerationResult(
+                answer=structured_answer,
+                insufficient_evidence=False,
+                evidence_conflict=evidence_conflict,
+                used_chunk_ids=[str(chunk.chunk_id) for chunk in selected_chunks[:3]],
+                answer_basis="structured_table_answer",
+                provider_name=self.provider_name,
+                model_name=self.model_name,
+                prompt_tokens=max((len(question) + sum(len(chunk.content) for chunk in selected_chunks[:3])) // 4, 1),
+                completion_tokens=max(len(structured_answer) // 4, 1),
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                raw_payload={
+                    "history_lines": history_lines,
+                    "conversation_context": conversation_context,
+                    "allow_low_score": allow_low_score,
+                    "structured_fields": _structured_answer_field_summary(question, selected_chunks[:3]),
+                },
+            )
+
         summaries = [
             summary
             for summary in (_build_chunk_summary(chunk, question) for chunk in selected_chunks[:2])
@@ -153,13 +174,64 @@ class OpenAIAnswerGenerator:
     ) -> AnswerGenerationResult:
         started = time.perf_counter()
         client = create_openai_compatible_client(self.settings)
-        response = request_chat_completion(
-            client,
-            model=self.model_name,
-            messages=build_grounded_messages(question, retrieved_chunks, history_lines, context_summary=conversation_context),
-            temperature=0.1,
-            response_format={"type": "json_object"},
-        )
+        try:
+            response = request_chat_completion(
+                client,
+                max_attempts=1,
+                model=self.model_name,
+                messages=build_grounded_messages(question, retrieved_chunks, history_lines, context_summary=conversation_context),
+                temperature=0.1,
+                response_format={"type": "json_object"},
+                timeout=14.0,
+            )
+        except Exception as error:
+            fallback = DeterministicAnswerGenerator().generate(
+                question=question,
+                retrieved_chunks=retrieved_chunks,
+                history_lines=history_lines,
+                conversation_context=conversation_context,
+                allow_low_score=allow_low_score,
+            )
+            if fallback.answer_basis != "structured_table_answer" and _should_abstain_on_complex_fallback(question, retrieved_chunks):
+                titles = _top_document_titles(retrieved_chunks[:3])
+                fallback_answer = _build_complex_fallback_message(question, titles)
+                raw_payload = {
+                    "history_lines": history_lines,
+                    "conversation_context": conversation_context,
+                    "allow_low_score": allow_low_score,
+                    "error_text": str(error),
+                    "fallback_reason": "upstream_answer_generation_failed",
+                    "fallback_mode": "complex_question_abstain",
+                }
+                return AnswerGenerationResult(
+                    answer=fallback_answer,
+                    insufficient_evidence=True,
+                    evidence_conflict=len(titles) > 1,
+                    used_chunk_ids=[str(chunk.chunk_id) for chunk in retrieved_chunks[:2]],
+                    answer_basis="complex_fallback_abstain",
+                    provider_name=f"{self.provider_name}-fallback",
+                    model_name=self.model_name,
+                    prompt_tokens=max((len(question) + sum(len(chunk.content) for chunk in retrieved_chunks[:2])) // 4, 1),
+                    completion_tokens=max(len(fallback_answer) // 4, 1),
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                    raw_payload=raw_payload,
+                )
+            raw_payload = dict(fallback.raw_payload or {})
+            raw_payload["error_text"] = str(error)
+            raw_payload["fallback_reason"] = "upstream_answer_generation_failed"
+            return AnswerGenerationResult(
+                answer=fallback.answer,
+                insufficient_evidence=fallback.insufficient_evidence,
+                evidence_conflict=fallback.evidence_conflict,
+                used_chunk_ids=fallback.used_chunk_ids,
+                answer_basis=fallback.answer_basis,
+                provider_name=f"{self.provider_name}-fallback",
+                model_name=self.model_name,
+                prompt_tokens=fallback.prompt_tokens,
+                completion_tokens=fallback.completion_tokens,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                raw_payload=raw_payload,
+            )
         content = response.choices[0].message.content or "{}"
         payload = _parse_json_payload(content)
         latency_ms = int((time.perf_counter() - started) * 1000)
@@ -527,3 +599,298 @@ def _detect_evidence_conflict(chunks: list[SearchResultChunk]) -> bool:
     first = chunks[0]
     second = chunks[1]
     return first.document_id != second.document_id and abs(first.score.fused - second.score.fused) <= 0.1
+
+
+def _should_abstain_on_complex_fallback(question: str, chunks: list[SearchResultChunk]) -> bool:
+    normalized = re.sub(r"\s+", "", question)
+    if len(normalized) < 20:
+        return False
+
+    multi_clause_hints = (
+        "能不能",
+        "是否",
+        "谁来批",
+        "审批",
+        "最晚多久",
+        "多久",
+        "补材料",
+        "关账号",
+        "关闭",
+        "回收",
+        "哪些禁止",
+        "禁止",
+        "允许",
+    )
+    matched_hints = sum(1 for hint in multi_clause_hints if hint in normalized)
+    separator_count = sum(normalized.count(token) for token in ("，", "；", "、", "？"))
+    structured_chunks = sum(1 for chunk in chunks[:3] if "Table row:" in chunk.content)
+
+    return matched_hints >= 4 and (separator_count >= 2 or structured_chunks >= 1)
+
+
+def _top_document_titles(chunks: list[SearchResultChunk]) -> list[str]:
+    titles: list[str] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        title = chunk.document_title.strip()
+        if not title or title in seen:
+            continue
+        titles.append(title)
+        seen.add(title)
+    return titles
+
+
+def _build_complex_fallback_message(question: str, document_titles: list[str]) -> str:
+    if len(document_titles) >= 2:
+        title_text = "、".join(f"《{title}》" for title in document_titles[:3])
+        return (
+            f"我已经检索到 {title_text} 里的相关条款，但这个问题同时包含审批、时限、补材料、账号关闭和导出限制等多个条件。"
+            "当前自动保守兜底不足以把这些不同口径稳定整合成一个可靠答案，所以先不直接下结论。"
+            "建议你指定以哪份制度为准，或拆成两到三个更明确的问题。"
+        )
+    if len(document_titles) == 1:
+        return (
+            f"我已经检索到《{document_titles[0]}》里的相关条款，但这个问题同时包含审批、时限、补材料、账号关闭和导出限制等多个条件。"
+            "当前自动保守兜底不足以稳定整合这些规则，所以先不直接拼一个结论。"
+            "建议你继续指定更明确的子问题，比如先问审批链路和补材料时限，再单独问账号关闭和导出限制。"
+        )
+    return (
+        "我已经检索到和问题相关的条款，但这个问题同时包含多个条件。"
+        "当前自动保守兜底不足以稳定整合这些规则，所以先不直接给出可能误导的结论。"
+        "建议你把问题拆成两到三个更明确的子问题后再问。"
+    )
+
+
+def _build_structured_table_answer(question: str, chunks: list[SearchResultChunk]) -> str | None:
+    if not chunks:
+        return None
+    if len({chunk.document_id for chunk in chunks}) != 1:
+        return None
+
+    requested_fields = _requested_structured_fields(question)
+    if len(requested_fields) < 2:
+        return None
+
+    combined_rows: list[dict[str, str]] = []
+    for chunk in chunks:
+        for row in _extract_table_rows(chunk.content):
+            parsed = _parse_table_row_fields(row)
+            if parsed:
+                combined_rows.append(parsed)
+
+    if not combined_rows:
+        return None
+
+    supplier_answer = _build_supplier_emergency_table_answer(question, chunks, combined_rows)
+    if supplier_answer:
+        return supplier_answer
+
+    value_map: dict[str, str] = {}
+    candidate_map = _structured_field_candidates()
+    query_terms = _extract_query_terms(question)
+    best_field_scores: dict[str, int] = {}
+    for row in combined_rows:
+        row_text = " ".join(f"{key}={value}" for key, value in row.items())
+        row_score = _sentence_match_score(row_text, query_terms) + _table_field_match_bonus(question, row_text)
+        normalized_row = re.sub(r"\s+", "", " ".join(f"{key}={value}" for key, value in row.items()))
+        for field_name, candidates in candidate_map.items():
+            for key, value in row.items():
+                normalized_key = re.sub(r"\s+", "", key)
+                if any(candidate in normalized_key for candidate in candidates):
+                    if row_score >= best_field_scores.get(field_name, -1):
+                        value_map[field_name] = value.strip()
+                        best_field_scores[field_name] = row_score
+                    break
+            if field_name == "can_proceed" and any(token in normalized_row for token in ("最低权限服务", "最小可用服务")):
+                if row_score >= best_field_scores.get(field_name, -1):
+                    value_map[field_name] = row.get("可先执行动作", "").strip() or "启用备用供应商的最低权限服务"
+                    best_field_scores[field_name] = row_score
+
+    if len(set(value_map) & set(requested_fields)) < min(2, len(requested_fields)):
+        return None
+
+    clauses: list[str] = []
+    if "can_proceed" in requested_fields and value_map.get("can_proceed"):
+        clauses.append(f"紧急场景下可以先{value_map['can_proceed']}")
+    if "sync_people" in requested_fields and value_map.get("sync_people"):
+        clauses.append(f"先同步{value_map['sync_people']}")
+    if "approval" in requested_fields and value_map.get("approval"):
+        clauses.append(f"正式审批人为{value_map['approval']}")
+    if "time_limit" in requested_fields and value_map.get("time_limit"):
+        clauses.append(f"处理时限为{value_map['time_limit']}")
+    if "desensitization" in requested_fields and value_map.get("desensitization"):
+        clauses.append(f"脱敏要求为{value_map['desensitization']}")
+    if "minimum_materials" in requested_fields and value_map.get("minimum_materials"):
+        clauses.append(f"最少材料包括{value_map['minimum_materials']}")
+    if "post_materials" in requested_fields and value_map.get("post_materials"):
+        clauses.append(f"事后补齐材料包括{value_map['post_materials']}")
+    if "account_close" in requested_fields and value_map.get("account_close"):
+        clauses.append(f"账号应在{value_map['account_close']}")
+    if "forbidden_delivery" in requested_fields and value_map.get("forbidden_delivery"):
+        clauses.append(f"导出文件禁止通过{value_map['forbidden_delivery']}")
+
+    if len(clauses) < 2:
+        return None
+
+    document_title = chunks[0].document_title
+    return f"根据当前可访问文档中的证据，《{document_title}》里与这个场景直接相关的要求是：{'；'.join(clauses)}。"
+
+
+def _requested_structured_fields(question: str) -> list[str]:
+    normalized = re.sub(r"\s+", "", question)
+    requested: list[str] = []
+    field_hints: list[tuple[str, tuple[str, ...]]] = [
+        ("can_proceed", ("能不能", "是否", "先开最小权限", "最低权限", "顶上", "先救火")),
+        ("sync_people", ("同步谁", "通知谁", "先同步")),
+        ("approval", ("谁来批", "审批", "审批人", "谁审批")),
+        ("time_limit", ("多久", "时限", "最晚多久", "处理时限")),
+        ("desensitization", ("脱敏", "脱敏要求")),
+        ("minimum_materials", ("最少材料",)),
+        ("post_materials", ("补材料", "补齐材料", "事后补齐")),
+        ("account_close", ("关账号", "关闭", "回收", "结束后多久")),
+        ("forbidden_delivery", ("禁止发法", "禁止方式", "禁止发送", "导出的文件", "导出文件")),
+    ]
+    for field_name, hints in field_hints:
+        if any(hint in normalized for hint in hints):
+            requested.append(field_name)
+    return requested
+
+
+def _structured_field_candidates() -> dict[str, tuple[str, ...]]:
+    return {
+        "can_proceed": ("可先执行动作",),
+        "sync_people": ("必须同步对象",),
+        "approval": ("必须审批人", "审批人", "审批链路"),
+        "time_limit": ("处理时限",),
+        "desensitization": ("脱敏要求",),
+        "minimum_materials": ("最少材料",),
+        "post_materials": ("事后补齐材料",),
+        "account_close": ("账号关闭时限",),
+        "forbidden_delivery": ("禁止方式",),
+    }
+
+
+def _parse_table_row_fields(row: str) -> dict[str, str]:
+    cleaned = row.removeprefix("Table row:").strip()
+    if ". " in cleaned:
+        _, cleaned = cleaned.split(". ", 1)
+    fields: dict[str, str] = {}
+    matches = list(re.finditer(r"(?P<key>[^=;；\n]+?)=", cleaned))
+    for index, match in enumerate(matches):
+        key = match.group("key").strip().strip(";；")
+        value_start = match.end()
+        value_end = matches[index + 1].start() if index + 1 < len(matches) else len(cleaned)
+        raw_value = cleaned[value_start:value_end]
+        value = raw_value.strip().strip(" ;；。.")
+        value = re.sub(r"\s*[；;]\s*", "、", value)
+        value = re.sub(r"\s+", " ", value).strip()
+        if key and value:
+            fields[key] = value
+    return fields
+
+
+def _structured_answer_field_summary(question: str, chunks: list[SearchResultChunk]) -> list[str]:
+    requested = _requested_structured_fields(question)
+    if not requested:
+        return []
+    available: set[str] = set()
+    for chunk in chunks:
+        for row in _extract_table_rows(chunk.content):
+            parsed = _parse_table_row_fields(row)
+            for field_name, candidates in _structured_field_candidates().items():
+                if field_name in available:
+                    continue
+                if any(any(candidate in key for candidate in candidates) for key in parsed):
+                    available.add(field_name)
+    return [field for field in requested if field in available]
+
+
+def _build_supplier_emergency_table_answer(
+    question: str,
+    chunks: list[SearchResultChunk],
+    rows: list[dict[str, str]],
+) -> str | None:
+    normalized_question = re.sub(r"\s+", "", question)
+    document_title = chunks[0].document_title
+    if "供应商准入" not in document_title:
+        return None
+    if not any(token in normalized_question for token in ("先救火", "临时", "最小权限", "最低权限", "导出文件")):
+        return None
+    requested_fields = set(_requested_structured_fields(question))
+
+    emergency_row = next(
+        (
+            row
+            for row in rows
+            if row.get("采购类型") == "紧急采购" or "可先执行动作" in row or "紧急场景" in row
+        ),
+        None,
+    )
+    sensitive_row = next((row for row in rows if row.get("采购类型") == "敏感采购"), None)
+    export_row = next(
+        (
+            row
+            for row in rows
+            if row.get("访问对象") == "数据导出文件" or ("禁止方式" in row and "允许方式" in row)
+        ),
+        None,
+    )
+    narrative_text = " ".join(chunk.content for chunk in chunks)
+    normalized_narrative = re.sub(r"\s+", "", narrative_text)
+
+    needs_emergency_scope = any(token in normalized_question for token in ("先救火", "临时", "最小权限", "最低权限", "顶上"))
+    needs_sensitive_scope = any(token in normalized_question for token in ("客户数据", "生产系统"))
+    needs_export_scope = any(token in normalized_question for token in ("导出文件", "禁止发法", "禁止方式", "禁止发送"))
+    if needs_emergency_scope and not (emergency_row or any(token in normalized_narrative for token in ("最小可用服务", "最低权限服务"))):
+        return None
+    if needs_sensitive_scope and not sensitive_row:
+        return None
+    if needs_export_scope and not export_row:
+        return None
+
+    clauses: list[str] = []
+    if any(token in normalized_narrative for token in ("最小可用服务", "最低权限服务")):
+        clauses.append("可以先在最小边界内启用备用供应商服务")
+    elif emergency_row and emergency_row.get("可先执行动作"):
+        clauses.append(f"紧急场景下可以先{emergency_row['可先执行动作']}")
+    if emergency_row and emergency_row.get("必须审批人"):
+        clause = f"紧急临时审批人为{emergency_row['必须审批人']}"
+        if emergency_row.get("处理时限"):
+            if "完成临时审批" in emergency_row["处理时限"]:
+                clause += f"，并需在{emergency_row['处理时限']}"
+            else:
+                clause += f"，并需在{emergency_row['处理时限']}完成临时审批"
+        clauses.append(clause)
+    if emergency_row:
+        note = emergency_row.get("备注", "")
+        if "补齐" in note:
+            clauses.append(note)
+        elif emergency_row.get("最少材料"):
+            clauses.append(f"临时审批至少准备{emergency_row['最少材料']}")
+    if sensitive_row and sensitive_row.get("必须审批人"):
+        clause = f"若涉及客户数据、生产系统等敏感范围，正式审批人为{sensitive_row['必须审批人']}"
+        if sensitive_row.get("处理时限"):
+            clause += f"，处理时限为{sensitive_row['处理时限']}"
+        clauses.append(clause)
+    if sensitive_row and sensitive_row.get("最少材料"):
+        clauses.append(f"正式材料至少包括{sensitive_row['最少材料']}")
+    if (export_row and export_row.get("禁止方式")) or (emergency_row and emergency_row.get("禁止方式")):
+        forbidden = (export_row and export_row.get("禁止方式")) or emergency_row.get("禁止方式")
+        clauses.append(f"导出文件禁止通过{forbidden}")
+    if "account_close" in requested_fields:
+        explicit_account_close = (emergency_row and emergency_row.get("账号关闭时限")) or (sensitive_row and sensitive_row.get("账号关闭时限"))
+        if explicit_account_close:
+            clauses.append(f"账号应在{explicit_account_close}")
+        elif export_row and export_row.get("有效期"):
+            clauses.append(f"当前命中文档没有给出统一账号关闭时限，但要求在退出计划中明确回收安排；若通过加密链接交付，链接{export_row['有效期']}自动失效")
+        else:
+            clauses.append("当前命中文档没有给出统一账号关闭时限，但要求在退出计划中明确回收安排")
+
+    core_clause_count = sum(
+        1
+        for marker in ("启用备用供应商服务", "紧急临时审批人", "正式审批人", "导出文件禁止通过")
+        if any(marker in clause for clause in clauses)
+    )
+    if len(clauses) < 4 or core_clause_count < 3:
+        return None
+    return f"根据当前可访问文档中的证据，《{document_title}》里与这个场景直接相关的要求是：{'；'.join(clauses)}。"

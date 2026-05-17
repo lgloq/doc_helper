@@ -237,7 +237,7 @@ docker compose up --build
 
 启动后默认服务：
 - PostgreSQL + pgvector：`localhost:5432`
-- Redis：`localhost:6379`
+- Redis：容器内服务，backend 通过 `redis:6379` 访问
 - FastAPI 后端：`http://localhost:9500`
 - React 前端：`http://localhost:5173`
 
@@ -356,9 +356,9 @@ DIFF_SUMMARY_PROVIDER=openai_compatible
 
 LLM_API_KEY=your_deepseek_api_key
 LLM_BASE_URL=https://api.deepseek.com
-LLM_CHAT_MODEL=deepseek-chat
-LLM_ROUTER_MODEL=deepseek-chat
-LLM_REASONING_MODEL=deepseek-reasoner
+LLM_CHAT_MODEL=deepseek-v4-flash
+LLM_ROUTER_MODEL=deepseek-v4-flash
+LLM_REASONING_MODEL=deepseek-v4-pro
 
 OPENAI_API_KEY=your_openrouter_api_key
 OPENAI_BASE_URL=https://openrouter.ai/api/v1

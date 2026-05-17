@@ -10,7 +10,17 @@ import { useAppContext } from "../context/AppContext";
 import { api } from "../lib/api";
 import { formatArtifactType, formatConfidence, formatCopilotIntent, formatMessageRole, formatRefusalReason } from "../lib/display";
 import { formatDateTime, locationLabel } from "../lib/format";
-import type { AgentRunTraceRead, AgentStepRead, ChatCitationRead, ChatMessageRead, ChatSessionDetailRead, ChatSessionRead } from "../types/api";
+import type {
+  AgentRunTraceRead,
+  AgentStepRead,
+  ChatCitationRead,
+  ChatMessageRead,
+  ChatSessionDetailRead,
+  ChatSessionRead,
+  SearchDebugInfo,
+} from "../types/api";
+
+const GENERIC_SESSION_TITLES = new Set(["新会话", "New Chat"]);
 
 export function ChatPage() {
   const { token, selectedSessionId, setSelectedSessionId } = useAppContext();
@@ -139,7 +149,7 @@ export function ChatPage() {
     }
     setCreatingSession(true);
     try {
-      const session = await api.createChatSession(token, "新会话");
+      const session = await api.createChatSession(token);
       sessionListRequestRef.current += 1;
       sessionDetailRequestRef.current += 1;
       setSessions((current) => [session, ...current.filter((item) => item.id !== session.id)]);
@@ -219,7 +229,7 @@ export function ChatPage() {
       return;
     }
     const targetSession = sessions.find((item) => item.id === sessionId);
-    const sessionLabel = targetSession?.title || "这个会话";
+    const sessionLabel = targetSession?.display_title || targetSession?.title || "这个会话";
     if (!window.confirm(`确定删除“${sessionLabel}”吗？该会话下的问答记录和引用会一起移除。`)) {
       return;
     }
@@ -253,8 +263,8 @@ export function ChatPage() {
   const activeMessages =
     activeSession && (!selectedSessionId || activeSession.id === selectedSessionId) ? activeSession.messages : [];
   const visibleSessionTitle =
-    selectedSession?.title ??
-    (activeSession && (!selectedSessionId || activeSession.id === selectedSessionId) ? activeSession.title : null) ??
+    selectedSession?.display_title ??
+    (activeSession && (!selectedSessionId || activeSession.id === selectedSessionId) ? activeSession.display_title : null) ??
     "当前会话";
   const pendingDraftContent = pendingSubmission?.content.trim() ?? "";
   const pendingMatchesSelectedSession = Boolean(
@@ -268,7 +278,7 @@ export function ChatPage() {
       pendingSessionId &&
       activeSession?.id === pendingSessionId &&
       activeMessages.length === 0 &&
-      activeSession.title === "新会话" &&
+      GENERIC_SESSION_TITLES.has(activeSession.title) &&
       pendingDraftContent,
   );
   const visibleCitations = resolveVisibleCitations(
@@ -329,7 +339,7 @@ export function ChatPage() {
                     type="button"
                   >
                     <div className="list-card-topline">
-                      <strong>{session.title}</strong>
+                      <strong>{session.display_title}</strong>
                     </div>
                     <p>{formatDateTime(session.updated_at)}</p>
                   </button>
@@ -337,8 +347,8 @@ export function ChatPage() {
                     className="session-delete-button"
                     disabled={creatingSession || sending || Boolean(deletingSessionId)}
                     onClick={() => handleDeleteSession(session.id)}
-                    aria-label={`删除会话：${session.title}`}
-                    title={`删除会话：${session.title}`}
+                    aria-label={`删除会话：${session.display_title}`}
+                    title={`删除会话：${session.display_title}`}
                     type="button"
                   >
                     {deletingSessionId === session.id ? "..." : "×"}
@@ -562,6 +572,35 @@ function readAgentRunTrace(message: ChatMessageRead): AgentRunTraceRead | null {
   return trace as AgentRunTraceRead;
 }
 
+function readRetrievalDebug(message: ChatMessageRead): SearchDebugInfo | null {
+  const metadata = message.message_metadata;
+  if (!metadata || typeof metadata !== "object") {
+    return null;
+  }
+  const retrievalDebug = (metadata as Record<string, unknown>).retrieval_debug;
+  if (!retrievalDebug || typeof retrievalDebug !== "object") {
+    return null;
+  }
+  return retrievalDebug as SearchDebugInfo;
+}
+
+function readOriginalSearchQuery(message: ChatMessageRead): string | null {
+  const metadata = message.message_metadata;
+  if (!metadata || typeof metadata !== "object") {
+    return null;
+  }
+  const toolExecution = (metadata as Record<string, unknown>).tool_execution;
+  if (!toolExecution || typeof toolExecution !== "object") {
+    return null;
+  }
+  const toolInput = (toolExecution as Record<string, unknown>).tool_input;
+  if (!toolInput || typeof toolInput !== "object") {
+    return null;
+  }
+  const query = (toolInput as Record<string, unknown>).query;
+  return typeof query === "string" && query.trim() ? query : null;
+}
+
 function readMessageDebugInfo(message: ChatMessageRead): MessageDebugInfo | null {
   const metadata = message.message_metadata;
   if (!metadata || typeof metadata !== "object") {
@@ -608,6 +647,8 @@ function MessageBubble({ message, onSelectCitation }: MessageBubbleProps) {
   const debugInfo = message.role === "assistant" ? readMessageDebugInfo(message) : null;
   const agentSteps = message.role === "assistant" ? readAgentSteps(message) : [];
   const agentRunTrace = message.role === "assistant" ? readAgentRunTrace(message) : null;
+  const retrievalDebug = message.role === "assistant" ? readRetrievalDebug(message) : null;
+  const originalSearchQuery = message.role === "assistant" ? readOriginalSearchQuery(message) : null;
   return (
     <article className={`message-bubble ${tone}`}>
       <div className="message-meta">
@@ -628,7 +669,14 @@ function MessageBubble({ message, onSelectCitation }: MessageBubbleProps) {
           {debugInfo.refusalReason ? <span>拒答原因：{formatRefusalReason(debugInfo.refusalReason)}</span> : null}
         </div>
       ) : null}
-      {agentSteps.length || agentRunTrace ? <ExecutionTrace steps={agentSteps} runTrace={agentRunTrace} /> : null}
+      {agentSteps.length || agentRunTrace || retrievalDebug ? (
+        <ExecutionTrace
+          steps={agentSteps}
+          runTrace={agentRunTrace}
+          retrievalDebug={retrievalDebug}
+          originalQuery={originalSearchQuery}
+        />
+      ) : null}
       {message.citations.length ? (
         <div className="message-citations">
           {message.citations.map((citation) => (

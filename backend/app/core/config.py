@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     router_provider: str = "openai_compatible"
     diff_summary_provider: str = "deterministic"
     diff_summary_cache_ttl_seconds: int = 86400
+    query_rewrite_provider: str = "auto"
+    query_rewrite_model: str | None = None
+    query_rewrite_max_variants: int = 3
     llm_api_key: str | None = None
     llm_base_url: str | None = None
     llm_router_model: str | None = None
@@ -106,6 +109,10 @@ class Settings(BaseSettings):
     @property
     def effective_llm_reasoning_model(self) -> str:
         return self.llm_reasoning_model or self.openai_diff_model or self.effective_llm_chat_model
+
+    @property
+    def effective_query_rewrite_model(self) -> str:
+        return self.query_rewrite_model or self.effective_llm_router_model
 
 
 @lru_cache

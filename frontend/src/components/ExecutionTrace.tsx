@@ -9,15 +9,17 @@ import {
   formatToolName,
   formatToolObservationStatus,
 } from "../lib/display";
-import type { AgentRunTraceRead, AgentStepRead, ToolActionRead, ToolObservationRead } from "../types/api";
+import type { AgentRunTraceRead, AgentStepRead, SearchDebugInfo, ToolActionRead, ToolObservationRead } from "../types/api";
 
 interface ExecutionTraceProps {
   steps: AgentStepRead[];
   runTrace?: AgentRunTraceRead | null;
+  retrievalDebug?: SearchDebugInfo | null;
+  originalQuery?: string | null;
 }
 
-export function ExecutionTrace({ steps, runTrace }: ExecutionTraceProps) {
-  if (!steps.length && !runTrace) {
+export function ExecutionTrace({ steps, runTrace, retrievalDebug, originalQuery }: ExecutionTraceProps) {
+  if (!steps.length && !runTrace && !retrievalDebug) {
     return null;
   }
 
@@ -25,6 +27,7 @@ export function ExecutionTrace({ steps, runTrace }: ExecutionTraceProps) {
   runTrace?.observations.forEach((item) => observationsByStep.set(item.step_index, item));
   const finalAction = runTrace ? [...runTrace.actions].reverse().find((item) => item.action_type !== "tool_call") : undefined;
   const compactContextSummary = formatContextSummary(runTrace?.tool_plan.context_summary);
+  const retrievalSummary = retrievalDebug ? buildRetrievalSummary(retrievalDebug, originalQuery) : null;
 
   return (
     <details className="execution-trace">
@@ -46,6 +49,49 @@ export function ExecutionTrace({ steps, runTrace }: ExecutionTraceProps) {
             <p className="muted">可用工具：{runTrace.tool_plan.available_tools.map((name) => formatToolName(name)).join(" / ")}</p>
           </div>
         ) : null}
+        {retrievalDebug ? (
+          <div className="execution-trace-item">
+            <div className="execution-trace-topline">
+              <strong>检索计划</strong>
+              <StatusBadge tone={retrievalDebug.query_rewrite_applied ? "info" : "neutral"}>
+                {retrievalDebug.query_rewrite_applied ? "已增强" : "原始查询"}
+              </StatusBadge>
+            </div>
+            <p className="muted">检索语句：{retrievalSummary?.retrievalQuery ?? "-"}</p>
+            <p className="muted">增强策略：{retrievalSummary?.strategySummary ?? "未改写"}</p>
+            <p className="muted">候选结果：{retrievalSummary?.candidateSummary ?? "-"}</p>
+            {typeof retrievalDebug.query_plan_candidate_count === "number" && retrievalDebug.query_plan_candidate_count > 1 ? (
+              <p className="muted">
+                候选方案：{retrievalDebug.query_plan_candidate_count} 个
+                {retrievalDebug.query_plan_selected ? `，选中 ${retrievalDebug.query_plan_selected}` : ""}
+              </p>
+            ) : null}
+            {retrievalDebug.query_plan_selection_reason ? (
+              <p className="muted">选中原因：{retrievalDebug.query_plan_selection_reason}</p>
+            ) : null}
+            {retrievalSummary?.hasDetails ? (
+              <details className="execution-trace-secondary execution-trace-retrieval-details">
+                <summary>查看检索细节</summary>
+                <div className="execution-trace-secondary-list">
+                  {retrievalSummary.originalQuery ? <p className="muted">原始问题：{retrievalSummary.originalQuery}</p> : null}
+                  {retrievalSummary.methodSummary ? <p className="muted">改写方式：{retrievalSummary.methodSummary}</p> : null}
+                  {retrievalSummary.routeSummary ? <p className="muted">分路情况：{retrievalSummary.routeSummary}</p> : null}
+                  {retrievalDebug.query_plan_probe_applied ? <p className="muted">方案选优：已执行低成本试探</p> : null}
+                  {retrievalSummary.lexicalVariants.length ? (
+                    <div className="execution-trace-detail-block">
+                      <p className="muted">关键词检索变体：</p>
+                      <ul className="execution-trace-detail-list">
+                        {retrievalSummary.lexicalVariants.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                </div>
+              </details>
+            ) : null}
+          </div>
+        ) : null}
         {runTrace?.actions.map((action) => {
           const observation = observationsByStep.get(action.step_index);
           return (
@@ -53,6 +99,7 @@ export function ExecutionTrace({ steps, runTrace }: ExecutionTraceProps) {
               key={`action-${action.step_index}-${action.action_type}`}
               action={action}
               observation={observation}
+              hideToolArgs={Boolean(retrievalDebug && action.tool_name === "search_docs")}
             />
           );
         })}
@@ -107,9 +154,10 @@ function LegacyStepItem({ step }: LegacyStepItemProps) {
 interface TraceActionItemProps {
   action: ToolActionRead;
   observation?: ToolObservationRead;
+  hideToolArgs?: boolean;
 }
 
-function TraceActionItem({ action, observation }: TraceActionItemProps) {
+function TraceActionItem({ action, observation, hideToolArgs = false }: TraceActionItemProps) {
   const formattedToolArgs = formatToolArgs(action.tool_args);
 
   return (
@@ -124,7 +172,7 @@ function TraceActionItem({ action, observation }: TraceActionItemProps) {
       <p className="muted">reason：{action.reason}</p>
       <p className="muted">evidence state：{formatEvidenceState(action.evidence_state)}</p>
       {action.tool_name ? <p>tool call：{formatToolName(action.tool_name)}</p> : null}
-      {formattedToolArgs ? <p className="muted">tool args：{formattedToolArgs}</p> : null}
+      {formattedToolArgs && !hideToolArgs ? <p className="muted">tool args：{formattedToolArgs}</p> : null}
       {action.expected_next ? <p className="muted">expected next：{action.expected_next}</p> : null}
       {action.depends_on.length ? <p className="muted">depends on：{action.depends_on.join(", ")}</p> : null}
       {observation ? (
@@ -235,4 +283,81 @@ function shortenText(value: string, maxLength: number): string {
     return value;
   }
   return `${value.slice(0, maxLength - 1)}…`;
+}
+
+interface RetrievalSummary {
+  retrievalQuery: string;
+  originalQuery: string | null;
+  strategySummary: string;
+  candidateSummary: string;
+  routeSummary: string | null;
+  methodSummary: string | null;
+  lexicalVariants: string[];
+  hasDetails: boolean;
+}
+
+function buildRetrievalSummary(retrievalDebug: SearchDebugInfo, originalQuery?: string | null): RetrievalSummary {
+  const retrievalQuery = retrievalDebug.retrieval_query ?? originalQuery ?? "-";
+  const lexicalVariants = dedupeQueries(retrievalDebug.lexical_queries ?? []);
+  const compactOriginalQuery =
+    originalQuery && normalizeForCompare(originalQuery) !== normalizeForCompare(retrievalQuery) ? originalQuery : null;
+  const strategySummary = retrievalDebug.query_rewrite_strategies?.length
+    ? retrievalDebug.query_rewrite_strategies.map(formatRewriteStrategy).join(" / ")
+    : "未改写";
+  const routeSummary =
+    typeof retrievalDebug.pre_rerank_count === "number" && typeof retrievalDebug.post_rerank_count === "number"
+      ? `关键词检索 ${retrievalDebug.lexical_candidate_count} 个，向量检索 ${retrievalDebug.vector_candidate_count} 个，合并后 ${retrievalDebug.pre_rerank_count} 个，重排后保留 ${retrievalDebug.post_rerank_count} 个`
+      : `关键词检索 ${retrievalDebug.lexical_candidate_count} 个，向量检索 ${retrievalDebug.vector_candidate_count} 个`;
+  const candidateSummary =
+    typeof retrievalDebug.pre_rerank_count === "number" && typeof retrievalDebug.post_rerank_count === "number"
+      ? `召回 ${retrievalDebug.pre_rerank_count} 个候选，重排后保留 ${retrievalDebug.post_rerank_count} 个`
+      : `关键词检索 ${retrievalDebug.lexical_candidate_count} 个，向量检索 ${retrievalDebug.vector_candidate_count} 个`;
+  const methodSummary =
+    retrievalDebug.query_rewrite_provider || retrievalDebug.query_rewrite_model
+      ? `${retrievalDebug.query_rewrite_provider ?? "rules-only"}${retrievalDebug.query_rewrite_model ? ` · ${retrievalDebug.query_rewrite_model}` : ""}${typeof retrievalDebug.query_rewrite_latency_ms === "number" ? ` · ${retrievalDebug.query_rewrite_latency_ms} ms` : ""}`
+      : null;
+  const showRouteSummary = routeSummary !== candidateSummary;
+
+  return {
+    retrievalQuery,
+    originalQuery: compactOriginalQuery,
+    strategySummary,
+    candidateSummary,
+    routeSummary: showRouteSummary ? routeSummary : null,
+    methodSummary,
+    lexicalVariants,
+    hasDetails: Boolean(compactOriginalQuery || methodSummary || lexicalVariants.length || showRouteSummary),
+  };
+}
+
+function dedupeQueries(items: string[]): string[] {
+  const seen = new Set<string>();
+  const results: string[] = [];
+  for (const item of items) {
+    const trimmed = item.trim();
+    if (!trimmed) {
+      continue;
+    }
+    const key = normalizeForCompare(trimmed);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    results.push(trimmed);
+  }
+  return results;
+}
+
+function normalizeForCompare(value: string): string {
+  return value.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function formatRewriteStrategy(strategy: string): string {
+  const labels: Record<string, string> = {
+    normalize: "规范化",
+    focus_keywords: "关键词聚焦",
+    title_anchor: "标题锚定",
+    llm_rewrite: "LLM 改写",
+  };
+  return labels[strategy] ?? strategy;
 }

@@ -57,6 +57,7 @@ class ChatSessionRead(ORMModel):
     id: UUID
     user_id: UUID
     title: str
+    display_title: str
     created_at: datetime
     updated_at: datetime
 

@@ -23,7 +23,8 @@ from app.schemas.chat import (
 from app.services.llm.orchestrator import CopilotOrchestrator, CopilotRunResult
 from app.services.observability.service import ObservabilityService
 
-DEFAULT_CHAT_SESSION_TITLE = "New Chat"
+DEFAULT_CHAT_SESSION_TITLE = "新会话"
+GENERIC_CHAT_SESSION_TITLES = {DEFAULT_CHAT_SESSION_TITLE, "New Chat"}
 
 
 @dataclass
@@ -57,7 +58,11 @@ class ChatService:
 
     def list_sessions(self, actor: User) -> list[ChatSessionRead]:
         sessions = self.chat_repository.list_sessions_for_user(actor.id)
-        return [self._serialize_session(item) for item in sessions]
+        preview_by_session_id = self.chat_repository.list_first_user_message_previews([item.id for item in sessions])
+        return [
+            self._serialize_session(item, first_user_message=preview_by_session_id.get(item.id))
+            for item in sessions
+        ]
 
     def get_session(self, actor: User, session_id: UUID) -> ChatSessionDetailRead:
         chat_session = self._get_session_or_404(actor, session_id, include_messages=True)
@@ -87,7 +92,7 @@ class ChatService:
             content=payload.content,
             message_metadata={"top_k": payload.top_k},
         )
-        if not existing_messages and chat_session.title == DEFAULT_CHAT_SESSION_TITLE:
+        if not existing_messages and self._is_generic_session_title(chat_session.title):
             chat_session.title = self._truncate_session_title(payload.content)
         chat_session.updated_at = datetime.now(UTC)
         self.chat_repository.add_message(user_message)
@@ -221,9 +226,42 @@ class ChatService:
             return compact or DEFAULT_CHAT_SESSION_TITLE
         return compact[: limit - 3].rstrip() + "..."
 
-    @staticmethod
-    def _serialize_session(chat_session: ChatSession) -> ChatSessionRead:
-        return ChatSessionRead.model_validate(chat_session)
+    @classmethod
+    def _is_generic_session_title(cls, title: str | None) -> bool:
+        return (title or "").strip() in GENERIC_CHAT_SESSION_TITLES
+
+    @classmethod
+    def _resolve_display_title(
+        cls,
+        chat_session: ChatSession,
+        *,
+        first_user_message: str | None = None,
+    ) -> str:
+        if cls._is_generic_session_title(chat_session.title) and first_user_message:
+            return cls._truncate_session_title(first_user_message)
+        return chat_session.title
+
+    @classmethod
+    def _serialize_session(
+        cls,
+        chat_session: ChatSession,
+        *,
+        first_user_message: str | None = None,
+    ) -> ChatSessionRead:
+        if first_user_message is None and "messages" in chat_session.__dict__:
+            first_user_message = next(
+                (message.content for message in chat_session.messages if message.role == MessageRole.USER),
+                None,
+            )
+        payload = {
+            "id": chat_session.id,
+            "user_id": chat_session.user_id,
+            "title": chat_session.title,
+            "display_title": cls._resolve_display_title(chat_session, first_user_message=first_user_message),
+            "created_at": chat_session.created_at,
+            "updated_at": chat_session.updated_at,
+        }
+        return ChatSessionRead.model_validate(payload)
 
     def _serialize_message(self, message: ChatMessage) -> ChatMessageRead:
         return ChatMessageRead.model_validate(

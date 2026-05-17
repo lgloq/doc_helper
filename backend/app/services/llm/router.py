@@ -189,6 +189,7 @@ class OpenAIRouterProvider:
     def __init__(self) -> None:
         self.settings = get_settings()
         self.model_name = self.settings.effective_llm_router_model
+        self.fallback = DeterministicRouterProvider()
 
     def route(
         self,
@@ -198,38 +199,88 @@ class OpenAIRouterProvider:
         conversation_context: ConversationMemory | None = None,
     ) -> RouterDecisionResult:
         started = time.perf_counter()
-        client = create_openai_compatible_client(self.settings)
-        response = request_chat_completion(
-            client,
-            model=self.model_name,
-            temperature=0,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": self._build_user_prompt(question, accessible_documents, conversation_context),
-                },
-            ],
-        )
-        content = response.choices[0].message.content or "{}"
-        raw_payload = _parse_json_payload(content)
-        decision = _stabilize_router_decision(
-            question=question,
-            accessible_documents=accessible_documents,
-            conversation_context=conversation_context,
-            decision=_coerce_router_decision(raw_payload, accessible_documents),
-        )
-        usage = getattr(response, "usage", None)
-        return RouterDecisionResult(
-            decision=decision,
-            provider_name=self.provider_name,
-            model_name=self.model_name,
-            prompt_tokens=getattr(usage, "prompt_tokens", None),
-            completion_tokens=getattr(usage, "completion_tokens", None),
-            latency_ms=int((time.perf_counter() - started) * 1000),
-            raw_payload=raw_payload,
-        )
+        if self._should_prefer_fast_path(question, accessible_documents, conversation_context):
+            result = self.fallback.route(
+                question=question,
+                accessible_documents=accessible_documents,
+                conversation_context=conversation_context,
+            )
+            raw_payload = dict(result.raw_payload or {})
+            raw_payload["fast_path_reason"] = "obvious_document_or_topic_query"
+            return RouterDecisionResult(
+                decision=result.decision,
+                provider_name=result.provider_name,
+                model_name=result.model_name,
+                prompt_tokens=result.prompt_tokens,
+                completion_tokens=result.completion_tokens,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                raw_payload=raw_payload,
+            )
+        try:
+            client = create_openai_compatible_client(self.settings)
+            response = request_chat_completion(
+                client,
+                max_attempts=1,
+                model=self.model_name,
+                temperature=0,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": self._build_user_prompt(question, accessible_documents, conversation_context),
+                    },
+                ],
+                timeout=10.0,
+            )
+            content = response.choices[0].message.content or "{}"
+            raw_payload = _parse_json_payload(content)
+            decision = _stabilize_router_decision(
+                question=question,
+                accessible_documents=accessible_documents,
+                conversation_context=conversation_context,
+                decision=_coerce_router_decision(raw_payload, accessible_documents),
+            )
+            usage = getattr(response, "usage", None)
+            return RouterDecisionResult(
+                decision=decision,
+                provider_name=self.provider_name,
+                model_name=self.model_name,
+                prompt_tokens=getattr(usage, "prompt_tokens", None),
+                completion_tokens=getattr(usage, "completion_tokens", None),
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                raw_payload=raw_payload,
+            )
+        except Exception as error:
+            fallback = self.fallback.route(
+                question=question,
+                accessible_documents=accessible_documents,
+                conversation_context=conversation_context,
+            )
+            raw_payload = dict(fallback.raw_payload or {})
+            raw_payload["error_text"] = str(error)
+            raw_payload["fallback_reason"] = "upstream_router_failed"
+            return RouterDecisionResult(
+                decision=fallback.decision,
+                provider_name=f"{self.provider_name}-fallback",
+                model_name=self.model_name,
+                prompt_tokens=fallback.prompt_tokens,
+                completion_tokens=fallback.completion_tokens,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                raw_payload=raw_payload,
+            )
+
+    @staticmethod
+    def _should_prefer_fast_path(
+        question: str,
+        accessible_documents: list[RouterAccessibleDocument],
+        conversation_context: ConversationMemory | None,
+    ) -> bool:
+        if _looks_like_general_topic_question(question):
+            return True
+        if _match_accessible_document(question, accessible_documents) is not None:
+            return True
+        return _resolve_requested_document_name(question, conversation_context) is not None
 
     @staticmethod
     def _build_user_prompt(
@@ -451,6 +502,17 @@ def _stabilize_router_decision(
             }
         )
 
+    if decision.intent == "unsupported_or_unclear" and _looks_like_general_topic_question(question):
+        return decision.model_copy(
+            update={
+                "intent": "topic_qa",
+                "topic": question.strip(),
+                "needs_citations": True,
+                "should_refuse_if_inaccessible": False,
+                "reasoning_brief": "问题虽然没有明确文档名，但属于可检索的主题问答，按 topic_qa 处理。",
+            }
+        )
+
     return decision
 
 
@@ -619,6 +681,34 @@ def _looks_like_context_workflow_request(question: str, conversation_context: Co
     ):
         return True
     return False
+
+
+def _looks_like_general_topic_question(question: str) -> bool:
+    cleaned = re.sub(r"[\s？?！!。,.，、:：;；\"'`]+", "", question).strip()
+    if len(cleaned) < 4:
+        return False
+    lowered = question.casefold().strip()
+    if lowered in {"faq", "周报", "待办", "任务", "weekly report"}:
+        return False
+    topic_markers = (
+        "什么",
+        "怎么",
+        "谁",
+        "哪些",
+        "多久",
+        "要求",
+        "流程",
+        "规则",
+        "安排",
+        "审批",
+        "处理",
+        "条件",
+        "需要",
+        "如何",
+    )
+    if any(marker in question for marker in topic_markers):
+        return True
+    return bool(re.search(r"[\u4e00-\u9fff]{4,}", cleaned))
 
 
 

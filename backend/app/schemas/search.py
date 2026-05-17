@@ -47,6 +47,17 @@ class SearchDebugInfo(BaseModel):
     pre_rerank_count: int = 0
     post_rerank_count: int = 0
     rerank_strategy: str = "none"
+    retrieval_query: str | None = None
+    lexical_queries: list[str] = Field(default_factory=list)
+    query_rewrite_applied: bool = False
+    query_rewrite_strategies: list[str] = Field(default_factory=list)
+    query_rewrite_provider: str | None = None
+    query_rewrite_model: str | None = None
+    query_rewrite_latency_ms: int | None = None
+    query_plan_candidate_count: int = 1
+    query_plan_selected: str | None = None
+    query_plan_selection_reason: str | None = None
+    query_plan_probe_applied: bool = False
 
 
 class SearchResponse(BaseModel):

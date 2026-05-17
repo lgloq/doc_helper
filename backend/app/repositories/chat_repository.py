@@ -3,10 +3,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.chat import ChatMessage, ChatSession, MessageCitation
+from app.models.enums import MessageRole
 
 
 class ChatRepository:
@@ -27,6 +28,32 @@ class ChatRepository:
             .order_by(ChatSession.updated_at.desc(), ChatSession.created_at.desc())
         )
         return list(self.session.scalars(statement).all())
+
+    def list_first_user_message_previews(self, session_ids: Sequence[UUID]) -> dict[UUID, str]:
+        if not session_ids:
+            return {}
+        ranked_messages = (
+            select(
+                ChatMessage.session_id.label("session_id"),
+                ChatMessage.content.label("content"),
+                func.row_number()
+                .over(
+                    partition_by=ChatMessage.session_id,
+                    order_by=(ChatMessage.created_at.asc(), ChatMessage.id.asc()),
+                )
+                .label("row_number"),
+            )
+            .where(
+                ChatMessage.session_id.in_(session_ids),
+                ChatMessage.role == MessageRole.USER,
+            )
+            .subquery()
+        )
+        statement = select(ranked_messages.c.session_id, ranked_messages.c.content).where(
+            ranked_messages.c.row_number == 1
+        )
+        rows = self.session.execute(statement).all()
+        return {row.session_id: row.content for row in rows}
 
     def get_session_for_user(self, session_id: UUID, user_id: UUID, include_messages: bool = False) -> ChatSession | None:
         statement = select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == user_id)

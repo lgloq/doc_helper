@@ -13,13 +13,16 @@ from app.schemas.llm import (
     QAAnswerResult,
     RouterDecision,
     RouterDecisionResult,
+    ToolAction,
     ToolCitation,
+    ToolObservation,
+    ToolPlan,
     VersionCompareResult,
     WorkflowGenerationResult,
 )
 from app.services.chat.memory import ConversationMemory, build_conversation_memory, has_usable_workflow_context
 from app.schemas.search import SearchDebugInfo, SearchResponse, SearchResultChunk
-from app.services.chat.generation import AnswerGenerationResult, AnswerGeneratorFactory
+from app.services.chat.generation import AnswerGenerationResult, AnswerGeneratorFactory, DeterministicAnswerGenerator
 from app.services.chat.prompts import validate_used_chunk_ids
 from app.services.chat.reliability import should_abstain_from_answer
 from app.services.llm.agent_runner import AgentRunner
@@ -375,7 +378,9 @@ class CopilotOrchestrator:
         decision = router_result.decision
         if decision.intent == "unsupported_or_unclear":
             return False
-        return True
+        if decision.artifact_type is not None:
+            return True
+        return decision.intent in {"version_compare", "workflow_generation"}
 
     def _run_agent_workflow(
         self,
@@ -641,13 +646,36 @@ class CopilotOrchestrator:
         agent_run_trace: AgentRunTrace | None = None,
     ) -> CopilotRunResult:
         generation_chunks = self._focus_generation_chunks(question, candidate_chunks)
-        generation = self.answer_generator.generate(
+        structured_fastpath = self._try_structured_table_fastpath(
             question=question,
-            retrieved_chunks=generation_chunks,
+            candidate_chunks=generation_chunks,
             history_lines=conversation_memory.history_lines,
             conversation_context=conversation_memory.to_answer_context(),
             allow_low_score=allow_low_score,
         )
+        if structured_fastpath is not None:
+            generation = structured_fastpath
+        elif self._should_prefer_fast_grounded_summary(
+            question=question,
+            router_result=router_result,
+            candidate_chunks=generation_chunks,
+            conversation_memory=conversation_memory,
+        ):
+            generation = DeterministicAnswerGenerator().generate(
+                question=question,
+                retrieved_chunks=generation_chunks,
+                history_lines=conversation_memory.history_lines,
+                conversation_context=conversation_memory.to_answer_context(),
+                allow_low_score=allow_low_score,
+            )
+        else:
+            generation = self.answer_generator.generate(
+                question=question,
+                retrieved_chunks=generation_chunks,
+                history_lines=conversation_memory.history_lines,
+                conversation_context=conversation_memory.to_answer_context(),
+                allow_low_score=allow_low_score,
+            )
         generation = self._merge_answer_metrics(router_result, generation)
         validated_ids = validate_used_chunk_ids(generation.used_chunk_ids, {str(item.chunk_id) for item in candidate_chunks})
         selected_chunks = self._select_citation_chunks(candidate_chunks, validated_ids)
@@ -687,6 +715,18 @@ class CopilotOrchestrator:
             "selected_citations": len(selected_chunks),
             "insufficient_evidence": generation.insufficient_evidence,
         }
+        if agent_run_trace is None and tool_metadata.tool_name == TOOL_SEARCH_DOCS:
+            agent_run_trace = self._build_direct_search_trace(
+                router_result=router_result,
+                conversation_memory=conversation_memory,
+                tool_metadata=tool_metadata,
+                final_status="refused" if generation.insufficient_evidence else "completed",
+                final_reason=(
+                    str((generation.raw_payload or {}).get("reason") or generation.answer_basis or "insufficient_relevant_evidence")
+                    if generation.insufficient_evidence
+                    else "direct grounded qa completed from search evidence"
+                ),
+            )
         agent_steps = self._build_agent_steps(
             question=question,
             conversation_memory=conversation_memory,
@@ -726,6 +766,64 @@ class CopilotOrchestrator:
             return same_document_chunks[:3]
         return candidate_chunks[:3]
 
+    @staticmethod
+    def _try_structured_table_fastpath(
+        *,
+        question: str,
+        candidate_chunks: list[SearchResultChunk],
+        history_lines: list[str],
+        conversation_context: str | None,
+        allow_low_score: bool,
+    ) -> AnswerGenerationResult | None:
+        if not candidate_chunks or not _looks_like_structured_table_lookup(question):
+            return None
+        top_document_id = candidate_chunks[0].document_id
+        same_document_chunks = [chunk for chunk in candidate_chunks[:3] if chunk.document_id == top_document_id]
+        if not same_document_chunks or not any("Table row:" in chunk.content for chunk in same_document_chunks):
+            return None
+        generation = DeterministicAnswerGenerator().generate(
+            question=question,
+            retrieved_chunks=same_document_chunks,
+            history_lines=history_lines,
+            conversation_context=conversation_context,
+            allow_low_score=allow_low_score,
+        )
+        if generation.answer_basis == "structured_table_answer" and not generation.insufficient_evidence:
+            return generation
+        return None
+
+    @staticmethod
+    def _should_prefer_fast_grounded_summary(
+        *,
+        question: str,
+        router_result: RouterDecisionResult,
+        candidate_chunks: list[SearchResultChunk],
+        conversation_memory: ConversationMemory,
+    ) -> bool:
+        if router_result.decision.intent not in {"topic_qa", "document_qa"}:
+            return False
+        if conversation_memory.previous_tool_name or conversation_memory.previous_artifact_type:
+            return False
+        compact_question = question.strip()
+        if len(compact_question) > 36:
+            return False
+        if any(marker in compact_question for marker in ("区别", "对比", "比较", "总结", "整理", "生成", "FAQ", "周报", "待办")):
+            return False
+        if not any(marker in compact_question for marker in ("什么", "怎么", "如何", "哪些", "谁", "多久", "多少", "安排", "要求")):
+            return False
+        if len(candidate_chunks) < 2:
+            return False
+
+        top_document_id = candidate_chunks[0].document_id
+        top_two_chunks = candidate_chunks[:2]
+        if any(chunk.document_id != top_document_id for chunk in top_two_chunks):
+            return False
+
+        top_chunk = top_two_chunks[0]
+        lexical_signal = max(top_chunk.score.lexical_raw, top_chunk.score.lexical_normalized)
+        fused_signal = max(top_chunk.score.fused, top_chunk.score.rerank or 0.0)
+        return lexical_signal > 0 and fused_signal >= 0.4
+
     def _build_refusal_result(
         self,
         *,
@@ -760,6 +858,14 @@ class CopilotOrchestrator:
             tool_output_summary=tool_output_summary,
             retrieval_debug=retrieval_response.debug,
         )
+        if agent_run_trace is None and tool_name == TOOL_SEARCH_DOCS:
+            agent_run_trace = self._build_direct_search_trace(
+                router_result=router_result,
+                conversation_memory=conversation_memory,
+                tool_metadata=tool_metadata,
+                final_status="refused",
+                final_reason=refusal_reason,
+            )
         agent_steps = self._build_agent_steps(
             question=question,
             conversation_memory=conversation_memory,
@@ -844,6 +950,67 @@ class CopilotOrchestrator:
             structured_result=structured_result,
             agent_steps=agent_steps,
             agent_run_trace=agent_run_trace,
+        )
+
+    def _build_direct_search_trace(
+        self,
+        *,
+        router_result: RouterDecisionResult,
+        conversation_memory: ConversationMemory,
+        tool_metadata: CopilotExecutionMetadata,
+        final_status: str,
+        final_reason: str | None,
+    ) -> AgentRunTrace:
+        final_action_type = "refuse" if final_status == "refused" else "final_answer"
+        evidence_state = "insufficient" if final_status == "refused" else "sufficient"
+        context_summary_parts: list[str] = []
+        if conversation_memory.previous_target_document:
+            context_summary_parts.append(f"previous_target_document={conversation_memory.previous_target_document}")
+        if conversation_memory.previous_tool_name:
+            context_summary_parts.append(f"previous_tool_name={conversation_memory.previous_tool_name}")
+        if conversation_memory.previous_observation_summary:
+            context_summary_parts.append(f"previous_observation={conversation_memory.previous_observation_summary}")
+
+        return AgentRunTrace(
+            tool_plan=ToolPlan(
+                planner_name="DirectSearchPlan",
+                available_tools=[TOOL_SEARCH_DOCS],
+                max_steps=2,
+                initial_intent=router_result.decision.intent,
+                requested_artifact_type=router_result.decision.artifact_type,
+                context_summary="；".join(context_summary_parts) or None,
+            ),
+            actions=[
+                ToolAction(
+                    step_index=1,
+                    action_type="tool_call",
+                    tool_name=TOOL_SEARCH_DOCS,
+                    tool_args=dict(tool_metadata.tool_input),
+                    reason="当前请求是单步问答，先直接检索可访问证据。",
+                    evidence_state="none",
+                    expected_next="根据检索结果直接生成回答或返回拒答。",
+                ),
+                ToolAction(
+                    step_index=2,
+                    action_type=final_action_type,  # type: ignore[arg-type]
+                    reason="已有检索结果，可直接完成本轮问答。",
+                    evidence_state=evidence_state,  # type: ignore[arg-type]
+                    expected_next=None,
+                    depends_on=[1],
+                ),
+            ],
+            observations=[
+                ToolObservation(
+                    step_index=1,
+                    tool_name=TOOL_SEARCH_DOCS,
+                    status="completed",
+                    output_summary=self._summarize_tool_execution(tool_metadata),
+                    evidence_refs=[],
+                    raw_output=dict(tool_metadata.tool_output_summary),
+                )
+            ],
+            final_status=final_status,
+            final_reason=final_reason,
         )
 
     def _build_workflow_result(
@@ -1385,8 +1552,9 @@ def _focus_table_rows_for_question(question: str, chunk: SearchResultChunk) -> S
     if not selected and scored_rows:
         selected = [scored_rows[0][2]]
 
+    supporting_lines = _select_supporting_narrative_lines(question, chunk.content)
     prefix_parts = [part for part in [chunk.section_title, chunk.preview] if part and "Table row:" not in part]
-    focused_content = "\n".join([*prefix_parts[:1], *selected]).strip()
+    focused_content = "\n".join([*prefix_parts[:1], *supporting_lines, *selected]).strip()
     if not focused_content:
         return chunk
     return chunk.model_copy(update={"content": focused_content, "preview": focused_content[:500]})
@@ -1394,6 +1562,36 @@ def _focus_table_rows_for_question(question: str, chunk: SearchResultChunk) -> S
 
 def _extract_table_rows(content: str) -> list[str]:
     return [line.strip() for line in content.splitlines() if line.strip().startswith("Table row:")]
+
+
+def _select_supporting_narrative_lines(question: str, content: str) -> list[str]:
+    normalized_question = _normalize_for_focus(question)
+    query_terms = _focus_query_terms(normalized_question)
+    scored_lines: list[tuple[int, int, str]] = []
+    for index, line in enumerate(content.splitlines()):
+        cleaned = line.strip()
+        if not cleaned or cleaned.startswith("Table row:"):
+            continue
+        normalized_line = _normalize_for_focus(cleaned)
+        score = 0
+        for term in query_terms:
+            if term in normalized_line:
+                score += 3 if len(term) >= 4 else 1
+        if any(token in normalized_question for token in ("先救火", "紧急", "最小权限", "最低权限")) and any(
+            marker in normalized_line for marker in ("最小可用服务", "最低权限服务", "临时采购", "先行建立")
+        ):
+            score += 8
+        if score > 0:
+            scored_lines.append((score, -index, cleaned))
+
+    scored_lines.sort(reverse=True)
+    selected: list[str] = []
+    for score, _, line in scored_lines:
+        if line not in selected:
+            selected.append(line)
+        if len(selected) >= 2:
+            break
+    return selected
 
 
 def _table_row_focus_score(question: str, row: str) -> int:
@@ -1409,8 +1607,13 @@ def _table_row_focus_score(question: str, row: str) -> int:
     domain_pairs = (
         (("l4", "高风险"), ("准入等级=l4高风险", "l4高风险")),
         (("审批链路", "审批", "链路"), ("审批链路=",)),
+        (("谁来批", "审批", "审批人"), ("必须审批人=", "审批人=", "审批链路=")),
         (("复核周期", "复核"), ("复核周期=",)),
         (("退出要求", "退出"), ("退出要求=",)),
+        (("先救火", "紧急", "最小权限", "最低权限"), ("紧急场景=", "可先执行动作=", "最低权限服务", "最小可用服务")),
+        (("补材料", "补齐材料"), ("事后补齐材料=", "最少材料=")),
+        (("关账号", "关闭", "回收"), ("账号关闭时限=", "回收责任人=")),
+        (("禁止发法", "禁止方式", "导出文件"), ("禁止方式=", "访问对象=数据导出文件")),
         (("生产环境",), ("访问对象=生产环境", "可访问生产环境")),
         (("允许方式", "允许"), ("允许方式=",)),
         (("有效期",), ("有效期=",)),
@@ -1455,6 +1658,8 @@ def _required_table_row_markers(question: str) -> tuple[str, ...]:
         return ("准入等级=l4", "l4高风险")
     if "数据处理服务" in normalized_question:
         return ("交付类型=数据处理服务",)
+    if any(token in normalized_question for token in ("先救火", "紧急", "最小权限", "最低权限", "补材料", "关账号", "禁止发法", "导出文件")):
+        return ("紧急场景=", "可先执行动作=", "事后补齐材料=", "账号关闭时限=", "禁止方式=")
     if "生产环境" in normalized_question:
         return ("访问对象=生产环境", "可访问生产环境")
     if "客户手机号" in normalized_question or "手机号" in normalized_question:

@@ -76,6 +76,7 @@ class CopilotToolService:
             actor,
             SearchRequest(query=query, top_k=top_k),
             scoped_document_ids=[resolved.document_id],
+            target_document_title=resolved.title,
         )
         if not retrieval_response.matched_chunks:
             return DocumentContextToolResult(
