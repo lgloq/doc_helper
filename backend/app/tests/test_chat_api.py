@@ -314,7 +314,7 @@ def test_first_user_message_updates_generic_session_title_and_display_title(clie
     assert list_response.status_code == 200
     session_payload = next(item for item in list_response.json() if item["id"] == session_id)
     assert session_payload["title"] == question
-    assert session_payload["display_title"] == question
+    assert session_payload["display_title"] == "节假日安排与值班要求"
 
 
 def test_legacy_generic_session_uses_first_user_message_as_display_title(client: TestClient, db_session: Session) -> None:
@@ -352,7 +352,83 @@ def test_legacy_generic_session_uses_first_user_message_as_display_title(client:
     assert list_response.status_code == 200
     session_payload = next(item for item in list_response.json() if item["id"] == str(legacy_session.id))
     assert session_payload["title"] == "新会话"
-    assert session_payload["display_title"] == "客户数据导出审批流程是什么？"
+    assert session_payload["display_title"] == "客户数据导出审批要求"
+
+
+def test_session_title_summarizes_checklist_usage_question(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    document_id, _ = _upload_and_ingest(
+        client,
+        admin_token,
+        "平台发布手册",
+        "平台发布手册：发布前需确认负责人、变更窗口、事故指挥人和回滚预案。紧急发布结束后需补齐发布记录并完成复盘。",
+    )
+    _grant_acl(
+        client,
+        admin_token,
+        document_id,
+        {"principal_type": "public", "can_view": True, "can_manage": False},
+    )
+
+    session_id = _create_session(client, admin_token, "新会话")
+    question = "我要使用平台发布检查清单，有什么要注意的地方"
+    _send_question(client, admin_token, session_id, question)
+
+    list_response = client.get(
+        "/api/v1/chat/sessions",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert list_response.status_code == 200
+    session_payload = next(item for item in list_response.json() if item["id"] == session_id)
+    assert session_payload["display_title"] == "平台发布检查清单注意事项"
+
+
+def test_legacy_manager_and_viewer_sessions_use_topic_titles(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
+    manager_user = _get_user(db_session, "manager@example.com")
+    viewer_user = _get_user(db_session, "viewer@example.com")
+
+    samples = [
+        (manager_user.id, "发生面向客户的事故时，组长应该怎么做？", "客户事故响应要求"),
+        (manager_user.id, "安全例外登记里写了什么？", "安全例外登记要求"),
+        (viewer_user.id, "查看安全例外登记里关于补偿控制的要求，并帮我整理成待办事项。", "安全例外补偿控制待办"),
+        (viewer_user.id, "平台发布检查清单要求什么？", "平台发布检查清单要求"),
+    ]
+    for user_id, question, _ in samples:
+        legacy_session = ChatSession(user_id=user_id, title="新会话")
+        db_session.add(legacy_session)
+        db_session.flush()
+        db_session.add(
+            ChatMessage(
+                session_id=legacy_session.id,
+                author_user_id=user_id,
+                role=MessageRole.USER,
+                content=question,
+                insufficient_evidence=False,
+            )
+        )
+    db_session.commit()
+
+    manager_token = _login(client, "manager@example.com", "manager-pass")
+    manager_response = client.get(
+        "/api/v1/chat/sessions",
+        headers={"Authorization": f"Bearer {manager_token}"},
+    )
+    assert manager_response.status_code == 200
+    manager_titles = {item["display_title"] for item in manager_response.json()}
+    assert "客户事故响应要求" in manager_titles
+    assert "安全例外登记要求" in manager_titles
+
+    viewer_token = _login(client, "viewer@example.com", "viewer-pass")
+    viewer_response = client.get(
+        "/api/v1/chat/sessions",
+        headers={"Authorization": f"Bearer {viewer_token}"},
+    )
+    assert viewer_response.status_code == 200
+    viewer_titles = {item["display_title"] for item in viewer_response.json()}
+    assert "安全例外补偿控制待办" in viewer_titles
+    assert "平台发布检查清单要求" in viewer_titles
 
 
 

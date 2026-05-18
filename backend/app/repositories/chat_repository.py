@@ -55,6 +55,22 @@ class ChatRepository:
         rows = self.session.execute(statement).all()
         return {row.session_id: row.content for row in rows}
 
+    def list_first_message_previews_by_role(self, session_ids: Sequence[UUID]) -> dict[UUID, dict[str, str]]:
+        if not session_ids:
+            return {}
+        statement = (
+            select(ChatMessage.session_id, ChatMessage.role, ChatMessage.content)
+            .where(ChatMessage.session_id.in_(session_ids))
+            .order_by(ChatMessage.session_id.asc(), ChatMessage.created_at.asc(), ChatMessage.id.asc())
+        )
+        rows = self.session.execute(statement).all()
+        previews: dict[UUID, dict[str, str]] = {}
+        for row in rows:
+            session_entry = previews.setdefault(row.session_id, {})
+            role_key = str(row.role.value if hasattr(row.role, "value") else row.role)
+            session_entry.setdefault(role_key, row.content)
+        return previews
+
     def get_session_for_user(self, session_id: UUID, user_id: UUID, include_messages: bool = False) -> ChatSession | None:
         statement = select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == user_id)
         if include_messages:

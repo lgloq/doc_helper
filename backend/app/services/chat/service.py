@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import re
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -58,9 +59,13 @@ class ChatService:
 
     def list_sessions(self, actor: User) -> list[ChatSessionRead]:
         sessions = self.chat_repository.list_sessions_for_user(actor.id)
-        preview_by_session_id = self.chat_repository.list_first_user_message_previews([item.id for item in sessions])
+        preview_by_session_id = self.chat_repository.list_first_message_previews_by_role([item.id for item in sessions])
         return [
-            self._serialize_session(item, first_user_message=preview_by_session_id.get(item.id))
+            self._serialize_session(
+                item,
+                first_user_message=preview_by_session_id.get(item.id, {}).get("user"),
+                first_assistant_message=preview_by_session_id.get(item.id, {}).get("assistant"),
+            )
             for item in sessions
         ]
 
@@ -236,7 +241,17 @@ class ChatService:
         chat_session: ChatSession,
         *,
         first_user_message: str | None = None,
+        first_assistant_message: str | None = None,
     ) -> str:
+        is_auto_question_title = bool(
+            first_user_message and chat_session.title == cls._truncate_session_title(first_user_message)
+        )
+        if cls._is_generic_session_title(chat_session.title) or is_auto_question_title:
+            summarized_from_question = cls._summarize_session_title_from_question(first_user_message)
+            if summarized_from_question:
+                return summarized_from_question
+            if first_assistant_message:
+                return cls._summarize_session_title_from_answer(first_assistant_message)
         if cls._is_generic_session_title(chat_session.title) and first_user_message:
             return cls._truncate_session_title(first_user_message)
         return chat_session.title
@@ -247,21 +262,119 @@ class ChatService:
         chat_session: ChatSession,
         *,
         first_user_message: str | None = None,
+        first_assistant_message: str | None = None,
     ) -> ChatSessionRead:
-        if first_user_message is None and "messages" in chat_session.__dict__:
-            first_user_message = next(
-                (message.content for message in chat_session.messages if message.role == MessageRole.USER),
-                None,
-            )
+        if "messages" in chat_session.__dict__:
+            if first_user_message is None:
+                first_user_message = next(
+                    (message.content for message in chat_session.messages if message.role == MessageRole.USER),
+                    None,
+                )
+            if first_assistant_message is None:
+                first_assistant_message = next(
+                    (message.content for message in chat_session.messages if message.role == MessageRole.ASSISTANT),
+                    None,
+                )
         payload = {
             "id": chat_session.id,
             "user_id": chat_session.user_id,
             "title": chat_session.title,
-            "display_title": cls._resolve_display_title(chat_session, first_user_message=first_user_message),
+            "display_title": cls._resolve_display_title(
+                chat_session,
+                first_user_message=first_user_message,
+                first_assistant_message=first_assistant_message,
+            ),
             "created_at": chat_session.created_at,
             "updated_at": chat_session.updated_at,
         }
         return ChatSessionRead.model_validate(payload)
+
+    @classmethod
+    def _summarize_session_title_from_answer(cls, answer: str, limit: int = 34) -> str:
+        compact = " ".join(answer.strip().split())
+        if not compact:
+            return DEFAULT_CHAT_SESSION_TITLE
+        compact = re.sub(r"^(根据当前可访问文档中的证据[，,:： ]*|根据证据[，,:： ]*|当前可访问文档显示[，,:： ]*)", "", compact)
+        sentence = re.split(r"[。！？!?；;\n]+", compact, maxsplit=1)[0].strip(" ，,：:；;")
+        if not sentence:
+            sentence = compact[:limit]
+        if len(sentence) <= limit:
+            return sentence
+        return sentence[: limit - 3].rstrip() + "..."
+
+    @classmethod
+    def _summarize_session_title_from_question(cls, question: str | None, limit: int = 22) -> str | None:
+        if not question:
+            return None
+        compact = " ".join(question.strip().split())
+        if not compact:
+            return None
+        compact = re.sub(r"^《([^》]+)》里[，,:： ]*", "", compact)
+        compact = compact.strip("？?。！!，,；;：:")
+        normalized = re.sub(r"\s+", "", compact)
+
+        if "节假日" in compact:
+            return "节假日安排与值班要求"
+        if "面向客户" in compact and "事故" in compact:
+            return "客户事故响应要求"
+        if "安全例外登记" in compact and "补偿控制" in compact and ("待办" in compact or "整理" in compact):
+            return "安全例外补偿控制待办"
+        if "安全例外登记" in compact:
+            return "安全例外登记要求"
+        if "临时高权限" in compact or "高权限访问" in compact:
+            return "临时高权限访问审批"
+        if "供应商" in compact and ("导出" in compact or "客户数据" in compact or "生产系统" in compact):
+            return "供应商紧急接入与导出限制"
+        if "客户" in compact and "手机号" in compact and "导出" in compact:
+            return "客户数据导出审批与脱敏要求"
+        if "客户" in compact and "数据导出" in compact and "审批" in compact:
+            return "客户数据导出审批要求"
+        if "数据导出" in compact and "审批" in compact:
+            return "数据导出审批要求"
+        if "工单" in compact and "首次响应时间" in compact:
+            return "工单首次响应要求"
+        if any(token in normalized for token in ("要注意的地方", "注意事项", "注意什么", "有什么要注意")):
+            subject = cls._extract_question_subject(compact)
+            if subject:
+                return cls._truncate_phrase(f"{subject}注意事项", limit)
+        if "检查清单" in compact and any(token in normalized for token in ("使用", "怎么用", "如何用", "注意")):
+            subject = cls._extract_question_subject(compact)
+            if subject:
+                return cls._truncate_phrase(f"{subject}使用注意事项", limit)
+        if "平台发布检查清单" in compact:
+            return "平台发布检查清单要求"
+        if "审批" in compact:
+            subject = cls._extract_question_subject(compact)
+            if subject:
+                return cls._truncate_phrase(f"{subject}审批要求", limit)
+        if "要求" in compact or "怎么" in compact or "什么" in compact or "多久" in compact or "哪些" in compact:
+            subject = cls._extract_question_subject(compact)
+            if subject:
+                return cls._truncate_phrase(f"{subject}要求", limit)
+        return cls._truncate_phrase(compact, limit)
+
+    @staticmethod
+    def _extract_question_subject(text: str) -> str | None:
+        subject = text
+        subject = re.sub(r"^(我想|我要|我需要|我想要|请问|想问一下|想问|帮我看下|帮我看看)", "", subject)
+        subject = re.sub(r"^(使用|查看|阅读|了解|看下|看看)", "", subject)
+        subject = re.sub(r"如果为了.*?[,，]", "", subject)
+        subject = re.sub(r"(有什么要注意的地方|有什么要注意|有哪些注意事项|注意事项是什么|怎么用|如何用)$", "", subject)
+        subject = re.sub(r"(由谁审批|谁来批|谁审批|处理时限.*|多久.*|哪些.*|什么.*|怎么.*)$", "", subject)
+        subject = re.sub(r"(是什么样的|是什么|是怎样的)$", "", subject)
+        subject = re.sub(r"(能不能|可不可以|是否)", "", subject)
+        subject = re.sub(r"[，,]\s*有$", "", subject)
+        subject = subject.strip(" ，,；;：:")
+        if len(subject) < 2:
+            return None
+        return subject
+
+    @staticmethod
+    def _truncate_phrase(text: str, limit: int) -> str:
+        compact = text.strip(" ，,；;：:")
+        if len(compact) <= limit:
+            return compact
+        return compact[: limit - 1].rstrip() + "…"
 
     def _serialize_message(self, message: ChatMessage) -> ChatMessageRead:
         return ChatMessageRead.model_validate(

@@ -47,7 +47,7 @@ services:
       API_V1_PREFIX: /api/v1
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/enterprise_knowledge_assistant
       REDIS_URL: redis://redis:6379/0
-      CORS_ORIGINS: '["http://localhost:5173","http://127.0.0.1:5173"]'
+      CORS_ORIGINS: '["http://localhost:${FRONTEND_PORT:-18073}","http://127.0.0.1:${FRONTEND_PORT:-18073}"]'
       JWT_SECRET_KEY: dev-enterprise-knowledge-assistant-secret-key-2026
       SEED_MOCK_DATA: "true"
       SEED_DEMO_EVAL_CASES: "true"
@@ -72,8 +72,10 @@ services:
     container_name: eka-frontend
     depends_on:
       - backend
+    environment:
+      FRONTEND_PORT: ${FRONTEND_PORT:-18073}
     ports:
-      - "5173:5173"
+      - "${FRONTEND_PORT:-18073}:${FRONTEND_PORT:-18073}"
     volumes:
       - ./frontend:/app/frontend
       - /app/frontend/node_modules

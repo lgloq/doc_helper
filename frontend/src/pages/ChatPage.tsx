@@ -339,7 +339,7 @@ export function ChatPage() {
                     type="button"
                   >
                     <div className="list-card-topline">
-                      <strong>{session.display_title}</strong>
+                      <span className="session-card-title">{session.display_title}</span>
                     </div>
                     <p>{formatDateTime(session.updated_at)}</p>
                   </button>

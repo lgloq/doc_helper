@@ -239,7 +239,9 @@ docker compose up --build
 - PostgreSQL + pgvector：`localhost:5432`
 - Redis：容器内服务，backend 通过 `redis:6379` 访问
 - FastAPI 后端：`http://localhost:9500`
-- React 前端：`http://localhost:5173`
+- React 前端：`http://localhost:18073`
+
+如需覆盖默认前端端口，可在仓库根目录 `.env` 中设置 `FRONTEND_PORT=xxxxx`，并确保该端口未被占用、也不在 Windows 的保留端口范围内。
 
 ### 初始化演示数据
 容器启动后执行：
@@ -287,7 +289,7 @@ npm run dev
 ## 演示流程
 1. 执行 `docker compose up --build`
 2. 执行 `docker compose exec backend python /app/scripts/seed_demo_data.py`
-3. 打开 `http://localhost:5173`
+3. 打开 `http://localhost:18073`
 4. 使用 `admin@local.test` 登录
 5. 在 `Documents` 页面查看文档、版本、ACL 和 chunk
 6. 在 `Chat` 页面提问并查看 citation
