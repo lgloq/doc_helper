@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from uuid import uuid4
 
+from app.core.config import Settings
 from app.repositories.retrieval_repository import RetrievalCandidate, RetrievalRepository
-from app.services.retrieval.reranker import HeuristicReranker, RerankCandidate
+from app.services.retrieval.reranker import (
+    HeuristicReranker,
+    LLMReranker,
+    QwenReranker,
+    RerankCandidate,
+    RerankerFactory,
+    _build_rerank_payload,
+    _resolve_qwen_rerank_url,
+)
 
 
 def _candidate(
@@ -43,6 +53,20 @@ def _candidate(
         vector_raw=vector_raw,
         fused_score=fused_score,
     )
+
+
+def _completion_response(content: str) -> SimpleNamespace:
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+
+def _settings(**overrides) -> Settings:
+    defaults = {
+        "rerank_provider": "llm",
+        "llm_api_key": "test-key",
+        "llm_router_model": "deepseek-v4-flash",
+    }
+    defaults.update(overrides)
+    return Settings(**defaults)
 
 
 def test_reranker_prefers_candidate_with_stronger_title_and_content_overlap() -> None:
@@ -310,3 +334,451 @@ def test_reranker_prefers_chinese_ocr_table_row_for_scanned_case_action() -> Non
 
     assert result.candidates[0].candidate.section_title == "PDF page 4 OCR table 1"
     assert "核验 日 志" in result.candidates[0].candidate.content
+
+
+def test_reranker_factory_defaults_to_heuristic() -> None:
+    reranker = RerankerFactory.create(Settings(rerank_provider="heuristic"))
+
+    assert isinstance(reranker, HeuristicReranker)
+
+
+def test_reranker_factory_auto_prefers_qwen_when_qwen_credentials_exist() -> None:
+    reranker = RerankerFactory.create(
+        Settings(rerank_provider="auto", qwen_api_key="qwen-key", llm_api_key="llm-key"),
+    )
+
+    assert isinstance(reranker, QwenReranker)
+
+
+def test_rerank_settings_defaults_match_latency_budget() -> None:
+    settings = Settings()
+
+    assert settings.rerank_max_candidates == 10
+    assert settings.rerank_timeout_seconds == 8.0
+
+
+def test_qwen_rerank_url_appends_reranks_for_compatible_base() -> None:
+    settings = Settings(qwen_base_url="https://dashscope.aliyuncs.com/compatible-api/v1")
+
+    assert _resolve_qwen_rerank_url(settings) == "https://dashscope.aliyuncs.com/compatible-api/v1/reranks"
+
+
+def test_llm_rerank_payload_keeps_relevant_table_row_even_when_late_in_chunk() -> None:
+    table_candidate = _candidate(
+        document_title="客户支持、数据导出与知识库维护协作规范",
+        section_title="数据导出审批与脱敏矩阵",
+        content=(
+            "数据导出申请需要根据字段敏感程度、客户范围和交付渠道判断审批人。"
+            "普通运营报表由部门负责人审批。包含客户邮箱时由管理员审批。"
+            "其他说明用于拉长 chunk，避免答案总在开头。"
+            "交付记录需要包含导出编号、审批人、生成时间、字段说明、脱敏方式和接收确认状态。"
+            "Table row: 数据导出审批与脱敏矩阵. 数据范围=普通运营数据; 审批人=部门负责人; 处理时限=1 个工作日."
+            "Table row: 数据导出审批与脱敏矩阵. 数据范围=包含客户邮箱; 审批人=管理员; 处理时限=1 个工作日."
+            "Table row: 数据导出审批与脱敏矩阵. 数据范围=包含客户手机号; 审批人=管理员; "
+            "处理时限=2 个工作日; 脱敏要求=保留前三位和后四位; 允许交付渠道=加密邮件."
+        ),
+        fused_score=0.51,
+        lexical_raw=0.03,
+        vector_raw=0.51,
+        chunk_index=8,
+    )
+
+    payload = _build_rerank_payload(
+        "包含客户手机号的数据导出由谁审批，处理时限和脱敏要求是什么？",
+        [table_candidate],
+    )
+    preview = payload["candidates"][0]["content_preview"]
+
+    assert "数据范围=包含客户手机号" in preview
+    assert "脱敏要求=保留前三位和后四位" in preview
+    assert len(preview) <= 800
+
+
+def test_llm_rerank_payload_keeps_normal_text_preview_short() -> None:
+    content = ("发布工单需要记录回滚联系人和值班信息。" * 80).strip()
+    text_candidate = _candidate(
+        document_title="平台发布手册",
+        section_title="回滚安排",
+        content=content,
+        fused_score=0.71,
+        lexical_raw=0.14,
+        vector_raw=0.7,
+        chunk_index=0,
+    )
+
+    payload = _build_rerank_payload("回滚联系人和值班信息要求什么", [text_candidate])
+    preview = payload["candidates"][0]["content_preview"]
+
+    assert preview == content[:600]
+    assert len(preview) == 600
+
+
+def test_llm_reranker_uses_chat_completion_and_applies_llm_order() -> None:
+    captured: dict[str, object] = {}
+
+    first_candidate = _candidate(
+        document_title="平台发布手册",
+        section_title="回滚安排",
+        content="发布前确认回滚联系人和值班信息。",
+        fused_score=0.71,
+        lexical_raw=0.14,
+        vector_raw=0.7,
+        chunk_index=0,
+    )
+    second_candidate = _candidate(
+        document_title="平台发布手册",
+        section_title="验收检查项",
+        content="发布工单需要记录验收检查项和结束时间。",
+        fused_score=0.66,
+        lexical_raw=0.09,
+        vector_raw=0.64,
+        chunk_index=1,
+    )
+
+    def completion_request(_client, **kwargs):
+        captured.update(kwargs)
+        return _completion_response(
+            '{"ranked":['
+            f'{{"chunk_id":"{second_candidate.candidate.chunk_id}","score":0.97,"reason":"direct answer"}},'
+            f'{{"chunk_id":"{first_candidate.candidate.chunk_id}","score":0.81,"reason":"supporting detail"}}'
+            "]}"
+        )
+
+    reranker = LLMReranker(
+        settings=_settings(),
+        client_factory=lambda _settings: object(),
+        completion_request=completion_request,
+    )
+
+    result = reranker.rerank(
+        "平台发布检查清单里回滚联系人和验收检查项要求什么",
+        [first_candidate, second_candidate],
+        top_k=2,
+    )
+
+    assert result.strategy == "llm-json"
+    assert result.candidates[0].candidate.chunk_id == second_candidate.candidate.chunk_id
+    assert result.candidates[0].rerank_score == 0.97
+    assert captured["model"] == "deepseek-v4-flash"
+    assert captured["temperature"] == 0.0
+    assert "top_p" not in captured
+    assert captured["response_format"] == {"type": "json_object"}
+
+
+def test_llm_reranker_ignores_unknown_and_duplicate_chunk_ids() -> None:
+    first_candidate = _candidate(
+        document_title="事故响应指南",
+        section_title="联系人同步",
+        content="需要同步负责人和相关联系人。",
+        fused_score=0.74,
+        vector_raw=0.74,
+        chunk_index=0,
+    )
+    second_candidate = _candidate(
+        document_title="平台发布手册",
+        section_title="回滚与验收检查项",
+        content="发布工单中需要记录回滚联系人名单和验收检查项。",
+        fused_score=0.63,
+        lexical_raw=0.12,
+        vector_raw=0.62,
+        chunk_index=1,
+    )
+    third_candidate = _candidate(
+        document_title="平台发布手册",
+        section_title="发布时间线",
+        content="发布结束后补全时间线和验收结果。",
+        fused_score=0.58,
+        lexical_raw=0.05,
+        vector_raw=0.57,
+        chunk_index=2,
+    )
+
+    reranker = LLMReranker(
+        settings=_settings(),
+        client_factory=lambda _settings: object(),
+        completion_request=lambda _client, **kwargs: _completion_response(
+            '{"ranked":['
+            '{"chunk_id":"00000000-0000-0000-0000-000000000000","score":1.0,"reason":"unknown"},'
+            f'{{"chunk_id":"{second_candidate.candidate.chunk_id}","score":0.93,"reason":"best match"}},'
+            f'{{"chunk_id":"{second_candidate.candidate.chunk_id}","score":0.61,"reason":"duplicate"}},'
+            f'{{"chunk_id":"{third_candidate.candidate.chunk_id}","score":0.55,"reason":"secondary"}}'
+            "]}"
+        ),
+    )
+
+    result = reranker.rerank(
+        "平台发布检查清单里回滚联系人和验收检查项要求什么",
+        [first_candidate, second_candidate, third_candidate],
+        top_k=3,
+    )
+
+    ordered_chunk_ids = [item.candidate.chunk_id for item in result.candidates]
+
+    assert result.strategy == "llm-json"
+    assert ordered_chunk_ids[0] == second_candidate.candidate.chunk_id
+    assert ordered_chunk_ids[1] == third_candidate.candidate.chunk_id
+    assert ordered_chunk_ids[2] == first_candidate.candidate.chunk_id
+
+
+def test_llm_reranker_falls_back_to_heuristic_on_llm_failure() -> None:
+    first_candidate = _candidate(
+        document_title="事故响应指南",
+        section_title="值班安排",
+        content="出现异常后需要同步负责人、确认联系人，并在处置结束后补充记录。",
+        fused_score=0.57,
+        vector_raw=0.57,
+        chunk_index=1,
+    )
+    second_candidate = _candidate(
+        document_title="平台发布手册",
+        section_title="回滚与验收检查项",
+        content="发布工单中需要记录回滚联系人名单和验收检查项，并在发布结束后补全时间线。",
+        fused_score=0.52,
+        lexical_raw=0.11,
+        vector_raw=0.5,
+        chunk_index=0,
+    )
+
+    heuristic_result = HeuristicReranker().rerank(
+        "平台发布检查清单里回滚联系人和验收检查项要求什么",
+        [first_candidate, second_candidate],
+        top_k=2,
+    )
+    reranker = LLMReranker(
+        settings=_settings(),
+        client_factory=lambda _settings: object(),
+        completion_request=lambda _client, **kwargs: _completion_response('{"ranked":[]}'),
+    )
+
+    result = reranker.rerank(
+        "平台发布检查清单里回滚联系人和验收检查项要求什么",
+        [first_candidate, second_candidate],
+        top_k=2,
+    )
+
+    assert result.strategy == "llm-json-fallback-heuristic"
+    assert [item.candidate.chunk_id for item in result.candidates] == [
+        item.candidate.chunk_id for item in heuristic_result.candidates
+    ]
+
+
+def test_qwen_reranker_orders_candidates_by_score() -> None:
+    first_candidate = _candidate(
+        document_title="平台发布手册",
+        section_title="回滚安排",
+        content="发布前确认回滚联系人和值班信息。",
+        fused_score=0.71,
+        lexical_raw=0.14,
+        vector_raw=0.7,
+        chunk_index=0,
+    )
+    second_candidate = _candidate(
+        document_title="平台发布手册",
+        section_title="验收检查项",
+        content="发布工单需要记录验收检查项和结束时间。",
+        fused_score=0.66,
+        lexical_raw=0.09,
+        vector_raw=0.64,
+        chunk_index=1,
+    )
+
+    reranker = QwenReranker(
+        settings=_settings(rerank_provider="qwen", qwen_api_key="qwen-key"),
+        request_rerank=lambda settings, *, query, documents, timeout: {
+            "results": [
+                {"index": 1, "relevance_score": 0.98},
+                {"index": 0, "relevance_score": 0.77},
+            ]
+        },
+    )
+
+    result = reranker.rerank(
+        "平台发布检查清单里回滚联系人和验收检查项要求什么",
+        [first_candidate, second_candidate],
+        top_k=2,
+    )
+
+    assert result.strategy == "qwen-rerank"
+    assert result.candidates[0].candidate.chunk_id == second_candidate.candidate.chunk_id
+    assert result.candidates[0].rerank_score == 0.98
+
+
+def test_qwen_reranker_maps_scores_by_sorted_candidate_index() -> None:
+    highest_fused = _candidate(
+        document_title="事故响应指南",
+        section_title="联系人同步",
+        content="需要同步负责人和相关联系人。",
+        fused_score=0.9,
+        vector_raw=0.9,
+        chunk_index=0,
+    )
+    lowest_fused = _candidate(
+        document_title="平台发布手册",
+        section_title="验收检查项",
+        content="发布工单需要记录验收检查项和结束时间。",
+        fused_score=0.4,
+        lexical_raw=0.2,
+        vector_raw=0.35,
+        chunk_index=1,
+    )
+
+    reranker = QwenReranker(
+        settings=_settings(rerank_provider="qwen", qwen_api_key="qwen-key"),
+        request_rerank=lambda settings, *, query, documents, timeout: {
+            "results": [{"index": 1, "relevance_score": 0.95}]
+        },
+    )
+
+    result = reranker.rerank(
+        "平台发布检查清单里回滚联系人和验收检查项要求什么",
+        [lowest_fused, highest_fused],
+        top_k=2,
+    )
+
+    assert result.candidates[0].candidate.chunk_id == lowest_fused.candidate.chunk_id
+    assert result.candidates[0].rerank_score == 0.95
+
+
+def test_qwen_reranker_ignores_duplicate_missing_and_out_of_range_indexes() -> None:
+    first_candidate = _candidate(
+        document_title="事故响应指南",
+        section_title="联系人同步",
+        content="需要同步负责人和相关联系人。",
+        fused_score=0.74,
+        vector_raw=0.74,
+        chunk_index=0,
+    )
+    second_candidate = _candidate(
+        document_title="平台发布手册",
+        section_title="回滚与验收检查项",
+        content="发布工单中需要记录回滚联系人名单和验收检查项。",
+        fused_score=0.63,
+        lexical_raw=0.12,
+        vector_raw=0.62,
+        chunk_index=1,
+    )
+    third_candidate = _candidate(
+        document_title="平台发布手册",
+        section_title="发布时间线",
+        content="发布结束后补全时间线和验收结果。",
+        fused_score=0.58,
+        lexical_raw=0.05,
+        vector_raw=0.57,
+        chunk_index=2,
+    )
+
+    reranker = QwenReranker(
+        settings=_settings(rerank_provider="qwen", qwen_api_key="qwen-key"),
+        request_rerank=lambda settings, *, query, documents, timeout: {
+            "results": [
+                {"index": 99, "relevance_score": 1.0},
+                {"index": 1, "relevance_score": 0.91},
+                {"index": 1, "relevance_score": 0.3},
+            ]
+        },
+    )
+
+    heuristic_result = HeuristicReranker().rerank(
+        "平台发布检查清单里回滚联系人和验收检查项要求什么",
+        [first_candidate, second_candidate, third_candidate],
+        top_k=3,
+    )
+    result = reranker.rerank(
+        "平台发布检查清单里回滚联系人和验收检查项要求什么",
+        [first_candidate, second_candidate, third_candidate],
+        top_k=3,
+    )
+
+    assert result.strategy == "qwen-rerank"
+    assert result.candidates[0].candidate.chunk_id == second_candidate.candidate.chunk_id
+    assert [item.candidate.chunk_id for item in result.candidates[1:]] == [
+        item.candidate.chunk_id
+        for item in heuristic_result.candidates
+        if item.candidate.chunk_id != second_candidate.candidate.chunk_id
+    ]
+
+
+def test_qwen_reranker_falls_back_to_heuristic_on_empty_or_invalid_results() -> None:
+    first_candidate = _candidate(
+        document_title="事故响应指南",
+        section_title="值班安排",
+        content="出现异常后需要同步负责人、确认联系人，并在处置结束后补充记录。",
+        fused_score=0.57,
+        vector_raw=0.57,
+        chunk_index=1,
+    )
+    second_candidate = _candidate(
+        document_title="平台发布手册",
+        section_title="回滚与验收检查项",
+        content="发布工单中需要记录回滚联系人名单和验收检查项，并在发布结束后补全时间线。",
+        fused_score=0.52,
+        lexical_raw=0.11,
+        vector_raw=0.5,
+        chunk_index=0,
+    )
+
+    heuristic_result = HeuristicReranker().rerank(
+        "平台发布检查清单里回滚联系人和验收检查项要求什么",
+        [first_candidate, second_candidate],
+        top_k=2,
+    )
+    reranker = QwenReranker(
+        settings=_settings(rerank_provider="qwen", qwen_api_key="qwen-key"),
+        request_rerank=lambda settings, *, query, documents, timeout: {"results": []},
+    )
+
+    result = reranker.rerank(
+        "平台发布检查清单里回滚联系人和验收检查项要求什么",
+        [first_candidate, second_candidate],
+        top_k=2,
+    )
+
+    assert result.strategy == "qwen-rerank-fallback-heuristic"
+    assert [item.candidate.chunk_id for item in result.candidates] == [
+        item.candidate.chunk_id for item in heuristic_result.candidates
+    ]
+
+
+def test_qwen_reranker_falls_back_to_heuristic_on_request_error() -> None:
+    first_candidate = _candidate(
+        document_title="事故响应指南",
+        section_title="值班安排",
+        content="出现异常后需要同步负责人、确认联系人，并在处置结束后补充记录。",
+        fused_score=0.57,
+        vector_raw=0.57,
+        chunk_index=1,
+    )
+    second_candidate = _candidate(
+        document_title="平台发布手册",
+        section_title="回滚与验收检查项",
+        content="发布工单中需要记录回滚联系人名单和验收检查项，并在发布结束后补全时间线。",
+        fused_score=0.52,
+        lexical_raw=0.11,
+        vector_raw=0.5,
+        chunk_index=0,
+    )
+
+    heuristic_result = HeuristicReranker().rerank(
+        "平台发布检查清单里回滚联系人和验收检查项要求什么",
+        [first_candidate, second_candidate],
+        top_k=2,
+    )
+
+    def raising_request(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    reranker = QwenReranker(
+        settings=_settings(rerank_provider="qwen", qwen_api_key="qwen-key"),
+        request_rerank=raising_request,
+    )
+
+    result = reranker.rerank(
+        "平台发布检查清单里回滚联系人和验收检查项要求什么",
+        [first_candidate, second_candidate],
+        top_k=2,
+    )
+
+    assert result.strategy == "qwen-rerank-fallback-heuristic"
+    assert [item.candidate.chunk_id for item in result.candidates] == [
+        item.candidate.chunk_id for item in heuristic_result.candidates
+    ]

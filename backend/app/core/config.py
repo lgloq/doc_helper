@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     query_rewrite_provider: str = "auto"
     query_rewrite_model: str | None = None
     query_rewrite_max_variants: int = 3
+    rerank_provider: str = "heuristic"
+    rerank_model: str | None = None
+    rerank_max_candidates: int = 10
+    rerank_timeout_seconds: float = 8.0
+    qwen_api_key: str | None = None
+    qwen_base_url: str | None = None
+    qwen_rerank_model: str = "qwen3-rerank"
     llm_api_key: str | None = None
     llm_base_url: str | None = None
     llm_router_model: str | None = None
@@ -120,6 +127,28 @@ class Settings(BaseSettings):
     @property
     def effective_query_rewrite_model(self) -> str:
         return self.query_rewrite_model or self.effective_llm_router_model
+
+    @property
+    def effective_rerank_model(self) -> str:
+        return self.rerank_model or self.effective_llm_router_model
+
+    @property
+    def effective_qwen_api_key(self) -> str | None:
+        if not self.qwen_api_key:
+            return None
+        cleaned = self.qwen_api_key.strip()
+        return cleaned or None
+
+    @property
+    def effective_qwen_base_url(self) -> str | None:
+        if not self.qwen_base_url:
+            return None
+        cleaned = self.qwen_base_url.strip()
+        return cleaned or None
+
+    @property
+    def effective_qwen_rerank_model(self) -> str:
+        return self.qwen_rerank_model.strip() or "qwen3-rerank"
 
 
 @lru_cache

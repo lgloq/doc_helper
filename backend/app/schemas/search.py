@@ -54,6 +54,12 @@ class SearchDebugInfo(BaseModel):
     query_rewrite_provider: str | None = None
     query_rewrite_model: str | None = None
     query_rewrite_latency_ms: int | None = None
+    lexical_retrieval_latency_ms: int | None = None
+    vector_embedding_latency_ms: int | None = None
+    vector_retrieval_latency_ms: int | None = None
+    fusion_latency_ms: int | None = None
+    rerank_latency_ms: int | None = None
+    search_total_latency_ms: int | None = None
     query_plan_candidate_count: int = 1
     query_plan_selected: str | None = None
     query_plan_selection_reason: str | None = None

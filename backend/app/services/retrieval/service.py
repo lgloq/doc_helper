@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from statistics import mean
+from time import perf_counter
 from typing import Iterable
 from uuid import UUID
 
@@ -13,7 +14,7 @@ from app.schemas.search import SearchDebugInfo, SearchRequest, SearchResponse, S
 from app.services.ingestion.embeddings import EmbeddingProviderFactory
 from app.services.permissions.service import PermissionFilterBuilder
 from app.services.retrieval.query_optimizer import QueryOptimizer, QueryOptimizationPlan, QueryPlanCandidate
-from app.services.retrieval.reranker import HeuristicReranker, RerankCandidate
+from app.services.retrieval.reranker import RerankCandidate, RerankerFactory
 
 LEXICAL_WEIGHT = 0.45
 VECTOR_WEIGHT = 0.55
@@ -38,7 +39,7 @@ class RetrievalService:
         self.permission_builder = PermissionFilterBuilder()
         self.retrieval_repository = RetrievalRepository(session)
         self.embedding_provider = EmbeddingProviderFactory.create()
-        self.reranker = HeuristicReranker()
+        self.reranker = RerankerFactory.create()
         self.query_optimizer = QueryOptimizer()
 
     def search(
@@ -48,6 +49,7 @@ class RetrievalService:
         scoped_document_ids: list[UUID] | None = None,
         target_document_title: str | None = None,
     ) -> SearchResponse:
+        search_started = perf_counter()
         accessible_document_ids = self.permission_builder.resolve_accessible_document_ids(self.session, actor, require_manage=False)
         if scoped_document_ids is not None:
             scoped_set = {item for item in scoped_document_ids}
@@ -80,6 +82,7 @@ class RetrievalService:
                     query_rewrite_provider=query_plan.rewrite_provider,
                     query_rewrite_model=query_plan.rewrite_model,
                     query_rewrite_latency_ms=query_plan.rewrite_latency_ms,
+                    search_total_latency_ms=int((perf_counter() - search_started) * 1000),
                     query_plan_candidate_count=query_plan.candidate_count,
                     query_plan_selected=query_plan.selected_candidate.label,
                     query_plan_selection_reason=query_plan.selected_candidate_reason,
@@ -88,17 +91,28 @@ class RetrievalService:
             )
 
         candidate_pool = max(payload.top_k * 5, 20)
+        lexical_started = perf_counter()
         lexical_hits = self._collect_lexical_hits(query_plan.lexical_queries, accessible_document_ids, candidate_pool)
+        lexical_latency_ms = int((perf_counter() - lexical_started) * 1000)
+        vector_embedding_started = perf_counter()
         query_embedding = self.embedding_provider.embed_texts([query_plan.retrieval_query])[0]
+        vector_embedding_latency_ms = int((perf_counter() - vector_embedding_started) * 1000)
+        vector_retrieval_started = perf_counter()
         vector_hits = self.retrieval_repository.search_vector(query_embedding, accessible_document_ids, candidate_pool)
+        vector_retrieval_latency_ms = int((perf_counter() - vector_retrieval_started) * 1000)
+        fusion_started = perf_counter()
         fused_candidates = self._fuse_hits(lexical_hits, vector_hits)
+        fusion_latency_ms = int((perf_counter() - fusion_started) * 1000)
         target_document_id = scoped_document_ids[0] if scoped_document_ids and len(scoped_document_ids) == 1 else None
+        rerank_started = perf_counter()
         reranked = self.reranker.rerank(
             payload.query,
             list(fused_candidates.values()),
             payload.top_k,
             target_document_id=target_document_id,
         )
+        rerank_latency_ms = int((perf_counter() - rerank_started) * 1000)
+        search_total_latency_ms = int((perf_counter() - search_started) * 1000)
 
         return SearchResponse(
             query=payload.query,
@@ -119,6 +133,12 @@ class RetrievalService:
                 query_rewrite_provider=query_plan.rewrite_provider,
                 query_rewrite_model=query_plan.rewrite_model,
                 query_rewrite_latency_ms=query_plan.rewrite_latency_ms,
+                lexical_retrieval_latency_ms=lexical_latency_ms,
+                vector_embedding_latency_ms=vector_embedding_latency_ms,
+                vector_retrieval_latency_ms=vector_retrieval_latency_ms,
+                fusion_latency_ms=fusion_latency_ms,
+                rerank_latency_ms=rerank_latency_ms,
+                search_total_latency_ms=search_total_latency_ms,
                 query_plan_candidate_count=query_plan.candidate_count,
                 query_plan_selected=query_plan.selected_candidate.label,
                 query_plan_selection_reason=query_plan.selected_candidate_reason,

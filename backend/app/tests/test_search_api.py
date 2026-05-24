@@ -9,6 +9,8 @@ from app.core.security import hash_password
 from app.models.enums import RoleName
 from app.models.role import Role
 from app.models.user import User
+from app.services.retrieval.reranker import HeuristicReranker
+from app.services.retrieval import service as retrieval_service_module
 
 
 def _create_user(db_session: Session, role: Role, email: str, team_name: str | None, password: str) -> User:
@@ -144,6 +146,12 @@ def test_search_returns_chat_ready_scores_and_citation_metadata(client: TestClie
     assert "paragraph_start" in first
     assert payload["debug"]["pre_rerank_count"] >= payload["debug"]["post_rerank_count"] >= 1
     assert payload["debug"]["rerank_strategy"] == "heuristic-overlap"
+    assert payload["debug"]["lexical_retrieval_latency_ms"] is not None
+    assert payload["debug"]["vector_embedding_latency_ms"] is not None
+    assert payload["debug"]["vector_retrieval_latency_ms"] is not None
+    assert payload["debug"]["fusion_latency_ms"] is not None
+    assert payload["debug"]["rerank_latency_ms"] is not None
+    assert payload["debug"]["search_total_latency_ms"] is not None
 
 
 def test_search_debug_exposes_query_rewrite_plan(client: TestClient, db_session: Session) -> None:
@@ -178,3 +186,80 @@ def test_search_debug_exposes_query_rewrite_plan(client: TestClient, db_session:
     assert payload["debug"]["query_plan_probe_applied"] is True
     assert payload["debug"]["query_plan_selected"]
     assert payload["debug"]["query_plan_selection_reason"]
+
+
+def test_search_qwen_rerank_only_receives_acl_safe_candidates(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+) -> None:
+    captured_document_ids: list[str] = []
+
+    class SpyQwenReranker:
+        def __init__(self) -> None:
+            self.delegate = HeuristicReranker()
+
+        def rerank(self, query, candidates, top_k, *, target_document_id=None):
+            captured_document_ids[:] = [str(item.candidate.document_id) for item in candidates]
+            return self.delegate.rerank(
+                query,
+                candidates,
+                top_k,
+                target_document_id=target_document_id,
+            )
+
+    monkeypatch.setattr(
+        retrieval_service_module.RerankerFactory,
+        "create",
+        staticmethod(lambda settings=None: SpyQwenReranker()),
+    )
+
+    viewer_role = Role(name=RoleName.VIEWER, description="Viewer")
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add_all([viewer_role, admin_role])
+    db_session.flush()
+
+    _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+    _create_user(db_session, viewer_role, "viewer@example.com", "sales", "viewer-pass")
+    db_session.commit()
+
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    viewer_token = _login(client, "viewer@example.com", "viewer-pass")
+
+    restricted_doc_id = _upload_and_ingest(
+        client,
+        admin_token,
+        "Platform Runbook",
+        "Platform release checklist and deployment runbook",
+    )
+    public_doc_id = _upload_and_ingest(
+        client,
+        admin_token,
+        "Public Handbook",
+        "Company handbook and holiday schedule",
+    )
+
+    acl_team = client.post(
+        f"/api/v1/documents/{restricted_doc_id}/acl",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"principal_type": "team", "team_name": "platform", "can_view": True, "can_manage": False},
+    )
+    assert acl_team.status_code == 200
+
+    acl_public = client.post(
+        f"/api/v1/documents/{public_doc_id}/acl",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"principal_type": "public", "can_view": True, "can_manage": False},
+    )
+    assert acl_public.status_code == 200
+
+    response = client.post(
+        "/api/v1/search",
+        headers={"Authorization": f"Bearer {viewer_token}"},
+        json={"query": "Platform release checklist and deployment runbook", "top_k": 3},
+    )
+
+    assert response.status_code == 200
+    assert captured_document_ids
+    assert restricted_doc_id not in captured_document_ids
+    assert set(captured_document_ids) == {public_doc_id}

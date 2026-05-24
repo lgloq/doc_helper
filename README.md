@@ -151,7 +151,7 @@ docker-compose.yml
 - 低清扫描、旋转拍照、复杂合并单元格、复杂跨页表格和图片型复杂版面的稳定结构化
 - 复杂 Excel、多 sheet XLSX 和合并单元格表格解析
 - Slack / 飞书 / 邮件等外部协作集成
-- cross-encoder rerank 或更高级 judge 评测
+- 更大规模的 rerank / judge benchmark 与自动化报告沉淀
 - 完整的生产部署与安全加固
 
 ## 运行与验证
@@ -161,6 +161,67 @@ docker-compose.yml
 - 已覆盖 `admin / manager / viewer` 三类角色的演示与回归验证，并补充 `viewer2` 作为团队权限演示账号
 - 当前后端测试已覆盖多工具串联、版本对比后停止、未知工具拒绝、`max_steps` 生效、无权限追问拒答与证据不足阻断结构化生成等场景
 - 检索结果 debug 现已记录 `pre_rerank_count / post_rerank_count / rerank_strategy`，便于回看召回后重排阶段
+
+## Rerank Provider 对比
+当前检索链路仍然保持 `ACL -> hybrid retrieval -> rerank -> grounded answer`，其中 rerank provider 支持以下三种模式：
+
+- `heuristic`：默认方案，零外部依赖，最稳，配置为 `RERANK_PROVIDER=heuristic`
+- `llm`：基于 `deepseek-v4-flash` 的 Chat Completion JSON rerank，把候选 chunk 打包进 prompt 后返回 JSON 排序；当前保留为实验 baseline
+- `qwen`：基于 `qwen3-rerank` 的专用 rerank provider，输入 `query + documents[]` 并直接返回相关性分数；当前更推荐作为可选 rerank provider
+
+默认配置为：
+
+```env
+RERANK_PROVIDER=heuristic
+```
+
+在该模式下，系统默认使用本地 heuristic rerank，不依赖额外的外部 rerank 服务。`llm` 和 `qwen` provider 作为可选能力提供，需在 `backend/.env` 中完成相应模型参数与访问凭证配置后显式启用。
+
+### 小规模对比结果
+下面这组结果来自同一批小规模 demo/eval case，对比的是：
+
+- `RERANK_PROVIDER=heuristic`
+- `RERANK_PROVIDER=llm` + `RERANK_MODEL=deepseek-v4-flash`
+- `RERANK_PROVIDER=qwen` + `QWEN_RERANK_MODEL=qwen3-rerank`
+
+这是一组面向当前演示数据和权限场景的小规模对比，不是大规模 benchmark。
+
+| Profile | Avg Total (ms) | Avg Rerank (ms) | Fallback | Permission Leak | Target Hit |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `heuristic` | 4640.9 | 24.5 | 0 | 0 | 5 / 5 |
+| `llm` | 9957.6 | 5165.4 | 1 | 0 | 5 / 5 |
+| `qwen` | 4700.1 | 362.8 | 0 | 0 | 5 / 5 |
+
+这组结果表明：
+
+- `heuristic` 仍然适合作为默认值，最稳，也没有外部依赖
+- `deepseek-v4-flash` chat-JSON rerank 可以保留，但更适合作为实验 baseline，而不是默认同步链路方案
+- `qwen3-rerank` 的真实 rerank 延迟大约在几百毫秒量级，这轮没有出现 fallback，权限隔离也保持通过，因此更适合作为推荐的可选 rerank provider
+- 当前总耗时瓶颈主要不在 `qwen` rerank 本身，而在 query rewrite 和 vector embedding 阶段
+
+### 复跑命令
+完整对比三组 provider：
+
+```powershell
+docker compose exec -T backend python /app/scripts/compare_rerank_providers.py
+```
+
+只对比 `heuristic` 和 `qwen`：
+
+```powershell
+docker compose exec -T backend python /app/scripts/compare_rerank_providers.py --profiles heuristic qwen
+```
+
+脚本会把每一轮结果落盘到：
+
+```text
+backend/data/eval_outputs/
+```
+
+每次运行都会生成两份带时间戳的产物，不覆盖历史结果：
+
+- JSON：保留每条 case、每个 profile 的 query、actor、预期目标/拒答、rerank strategy、latency breakdown、top-k chunk 和 fallback / permission leak 标记
+- Markdown summary：保留 profile 级别的平均耗时、fallback 次数、permission leak 次数和 target hit rate 汇总
 
 ## OCR 与图片表格说明
 - OCR 默认可通过 `ENABLE_OCR` 控制，适合在需要处理扫描件或图片文件时开启；默认关闭时图片和扫描页会降级为空解析结果，不会绕过上传权限或检索 ACL。
@@ -217,7 +278,7 @@ docker-compose.yml
 - 综合得分：`0.98`
 - 权限通过率：`1.0`
 
-这更适合被理解为 ACL-RAG 的小规模回归评测基线，而不是大规模通用 benchmark。页面里偶尔出现的 `连接失败` 记录主要来自上游模型接口抖动。
+这组结果更适合作为 ACL-RAG 的小规模回归评测基线，而不是大规模通用 benchmark。评测过程中若出现 `连接失败` 记录，通常对应上游模型接口的瞬时波动。
 
 四个主指标只保留最必要的含义：
 

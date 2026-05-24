@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import json
+import math
 import re
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Any, Callable, Sequence
 from uuid import UUID
 
+import httpx
+
+from app.core.config import Settings, get_settings
 from app.repositories.retrieval_repository import RetrievalCandidate
+from app.services.llm.openai_compatible import (
+    create_openai_compatible_client,
+    has_openai_compatible_credentials,
+    request_chat_completion,
+)
 
 ENGLISH_STOPWORDS = {
     "a",
@@ -79,6 +89,12 @@ QUERY_REQUIREMENT_HINTS = (
 )
 
 HIGH_PRIORITY_HINTS = ("高优先级", "高优先级工单", "高优先", "高优")
+TEXT_PREVIEW_LIMIT = 600
+TABLE_PREVIEW_LIMIT = 800
+TABLE_CONTEXT_LIMIT = 160
+TABLE_MIN_ROWS = 2
+TABLE_MAX_ROWS = 4
+DEFAULT_QWEN_RERANK_URL = "https://dashscope.aliyuncs.com/compatible-api/v1/reranks"
 
 
 @dataclass
@@ -99,6 +115,23 @@ class RerankResult:
     strategy: str
     pre_rerank_count: int
     post_rerank_count: int
+
+
+@dataclass
+class LLMRerankItem:
+    chunk_id: str
+    score: float
+
+
+@dataclass
+class QwenRerankItem:
+    index: int
+    score: float
+
+
+RerankClientFactory = Callable[[Settings], Any]
+RerankCompletionRequester = Callable[..., Any]
+QwenRerankRequester = Callable[..., Any]
 
 
 class HeuristicReranker:
@@ -187,6 +220,250 @@ class HeuristicReranker:
             pre_rerank_count=len(candidates),
             post_rerank_count=len(top_candidates),
         )
+
+
+class LLMReranker:
+    strategy_name = "llm-json"
+    fallback_strategy_name = "llm-json-fallback-heuristic"
+
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        heuristic_reranker: HeuristicReranker | None = None,
+        client_factory: RerankClientFactory = create_openai_compatible_client,
+        completion_request: RerankCompletionRequester = request_chat_completion,
+    ) -> None:
+        self.settings = settings or get_settings()
+        self.heuristic_reranker = heuristic_reranker or HeuristicReranker()
+        self.client_factory = client_factory
+        self.completion_request = completion_request
+
+    def rerank(
+        self,
+        query: str,
+        candidates: Sequence[RerankCandidate],
+        top_k: int,
+        *,
+        target_document_id: UUID | None = None,
+    ) -> RerankResult:
+        heuristic_result = self.heuristic_reranker.rerank(
+            query,
+            list(candidates),
+            len(candidates),
+            target_document_id=target_document_id,
+        )
+        if not heuristic_result.candidates:
+            return heuristic_result
+
+        llm_candidates = self._select_llm_candidates(candidates)
+        if not llm_candidates or not has_openai_compatible_credentials(self.settings):
+            return self._fallback_result(heuristic_result, top_k)
+
+        try:
+            ranked_items = self._request_llm_ranking(query, llm_candidates)
+        except Exception:
+            return self._fallback_result(heuristic_result, top_k)
+
+        if not ranked_items:
+            return self._fallback_result(heuristic_result, top_k)
+
+        allowed_chunk_ids = {str(item.candidate.chunk_id) for item in llm_candidates}
+        candidate_by_chunk_id = {str(item.candidate.chunk_id): item for item in heuristic_result.candidates}
+        seen_chunk_ids: set[str] = set()
+        ordered_candidates: list[RerankCandidate] = []
+
+        for ranked_item in ranked_items:
+            if ranked_item.chunk_id not in allowed_chunk_ids or ranked_item.chunk_id in seen_chunk_ids:
+                continue
+            candidate = candidate_by_chunk_id.get(ranked_item.chunk_id)
+            if candidate is None:
+                continue
+            candidate.rerank_score = ranked_item.score
+            ordered_candidates.append(candidate)
+            seen_chunk_ids.add(ranked_item.chunk_id)
+
+        if not ordered_candidates:
+            return self._fallback_result(heuristic_result, top_k)
+
+        for candidate in heuristic_result.candidates:
+            chunk_id = str(candidate.candidate.chunk_id)
+            if chunk_id in seen_chunk_ids:
+                continue
+            ordered_candidates.append(candidate)
+
+        return RerankResult(
+            candidates=ordered_candidates[:top_k],
+            strategy=self.strategy_name,
+            pre_rerank_count=len(candidates),
+            post_rerank_count=min(top_k, len(ordered_candidates)),
+        )
+
+    def _select_llm_candidates(self, candidates: Sequence[RerankCandidate]) -> list[RerankCandidate]:
+        return _select_rerank_candidates(candidates, self.settings.rerank_max_candidates)
+
+    def _request_llm_ranking(
+        self,
+        query: str,
+        candidates: Sequence[RerankCandidate],
+    ) -> list[LLMRerankItem]:
+        client = self.client_factory(self.settings)
+        response = self.completion_request(
+            client,
+            max_attempts=1,
+            model=self.settings.effective_rerank_model,
+            messages=_build_rerank_messages(query, candidates),
+            temperature=0.0,
+            response_format={"type": "json_object"},
+            timeout=self.settings.rerank_timeout_seconds,
+        )
+        content = response.choices[0].message.content or "{}"
+        payload = _parse_json_payload(content)
+        ranked = payload.get("ranked")
+        if not isinstance(ranked, list):
+            return []
+
+        items: list[LLMRerankItem] = []
+        for entry in ranked:
+            if not isinstance(entry, dict):
+                continue
+            chunk_id = str(entry.get("chunk_id") or "").strip()
+            if not chunk_id:
+                continue
+            try:
+                score = float(entry.get("score"))
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(score):
+                continue
+            items.append(LLMRerankItem(chunk_id=chunk_id, score=score))
+        return items
+
+    def _fallback_result(self, heuristic_result: RerankResult, top_k: int) -> RerankResult:
+        top_candidates = heuristic_result.candidates[:top_k]
+        return RerankResult(
+            candidates=top_candidates,
+            strategy=self.fallback_strategy_name,
+            pre_rerank_count=heuristic_result.pre_rerank_count,
+            post_rerank_count=len(top_candidates),
+        )
+
+
+class QwenReranker:
+    strategy_name = "qwen-rerank"
+    fallback_strategy_name = "qwen-rerank-fallback-heuristic"
+
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        heuristic_reranker: HeuristicReranker | None = None,
+        request_rerank: QwenRerankRequester | None = None,
+    ) -> None:
+        self.settings = settings or get_settings()
+        self.heuristic_reranker = heuristic_reranker or HeuristicReranker()
+        self.request_rerank = request_rerank or request_qwen_rerank
+
+    def rerank(
+        self,
+        query: str,
+        candidates: Sequence[RerankCandidate],
+        top_k: int,
+        *,
+        target_document_id: UUID | None = None,
+    ) -> RerankResult:
+        heuristic_result = self.heuristic_reranker.rerank(
+            query,
+            list(candidates),
+            len(candidates),
+            target_document_id=target_document_id,
+        )
+        if not heuristic_result.candidates:
+            return heuristic_result
+
+        qwen_candidates = _select_rerank_candidates(candidates, self.settings.rerank_max_candidates)
+        if not qwen_candidates or not has_qwen_rerank_credentials(self.settings):
+            return self._fallback_result(heuristic_result, top_k)
+
+        documents = [_build_content_preview(query, item) for item in qwen_candidates]
+        try:
+            ranked_items = self._request_qwen_ranking(query, documents)
+        except Exception:
+            return self._fallback_result(heuristic_result, top_k)
+
+        if not ranked_items:
+            return self._fallback_result(heuristic_result, top_k)
+
+        candidate_by_chunk_id = {str(item.candidate.chunk_id): item for item in heuristic_result.candidates}
+        selected_chunk_ids: set[str] = set()
+        ordered_candidates: list[RerankCandidate] = []
+        seen_indexes: set[int] = set()
+
+        for ranked_item in ranked_items:
+            if ranked_item.index in seen_indexes or ranked_item.index < 0 or ranked_item.index >= len(qwen_candidates):
+                continue
+            seen_indexes.add(ranked_item.index)
+            candidate = qwen_candidates[ranked_item.index]
+            chunk_id = str(candidate.candidate.chunk_id)
+            heuristic_candidate = candidate_by_chunk_id.get(chunk_id)
+            if heuristic_candidate is None or chunk_id in selected_chunk_ids:
+                continue
+            heuristic_candidate.rerank_score = ranked_item.score
+            ordered_candidates.append(heuristic_candidate)
+            selected_chunk_ids.add(chunk_id)
+
+        if not ordered_candidates:
+            return self._fallback_result(heuristic_result, top_k)
+
+        for candidate in heuristic_result.candidates:
+            chunk_id = str(candidate.candidate.chunk_id)
+            if chunk_id in selected_chunk_ids:
+                continue
+            ordered_candidates.append(candidate)
+
+        return RerankResult(
+            candidates=ordered_candidates[:top_k],
+            strategy=self.strategy_name,
+            pre_rerank_count=len(candidates),
+            post_rerank_count=min(top_k, len(ordered_candidates)),
+        )
+
+    def _request_qwen_ranking(self, query: str, documents: Sequence[str]) -> list[QwenRerankItem]:
+        payload = self.request_rerank(
+            self.settings,
+            query=query,
+            documents=list(documents),
+            timeout=self.settings.rerank_timeout_seconds,
+        )
+        return _parse_qwen_rerank_items(payload)
+
+    def _fallback_result(self, heuristic_result: RerankResult, top_k: int) -> RerankResult:
+        top_candidates = heuristic_result.candidates[:top_k]
+        return RerankResult(
+            candidates=top_candidates,
+            strategy=self.fallback_strategy_name,
+            pre_rerank_count=heuristic_result.pre_rerank_count,
+            post_rerank_count=len(top_candidates),
+        )
+
+
+class RerankerFactory:
+    @classmethod
+    def create(cls, settings: Settings | None = None) -> HeuristicReranker | LLMReranker | QwenReranker:
+        resolved_settings = settings or get_settings()
+        provider = (resolved_settings.rerank_provider or "heuristic").strip().lower()
+        if provider == "heuristic":
+            return HeuristicReranker()
+        if provider == "llm":
+            return LLMReranker(settings=resolved_settings)
+        if provider == "qwen":
+            return QwenReranker(settings=resolved_settings)
+        if provider == "auto":
+            if has_qwen_rerank_credentials(resolved_settings):
+                return QwenReranker(settings=resolved_settings)
+            if has_openai_compatible_credentials(resolved_settings):
+                return LLMReranker(settings=resolved_settings)
+        return HeuristicReranker()
 
 
 def _feature_tokens(value: str) -> set[str]:
@@ -379,3 +656,214 @@ def _feature_overlap(left: set[str], right: set[str]) -> float:
     if not overlap:
         return 0.0
     return len(overlap) / max(min(len(left), len(right)), 1)
+
+
+def _build_rerank_messages(query: str, candidates: Sequence[RerankCandidate]) -> list[dict[str, str]]:
+    payload = _build_rerank_payload(query, candidates)
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You rerank enterprise knowledge retrieval candidates. "
+                "Use only the provided chunk_id values. "
+                "Do not invent chunk_id values. "
+                "Return only JSON with the shape "
+                '{"ranked":[{"chunk_id":"...","score":0.92}]}. '
+                "If multiple candidates are relevant, rank the most relevant first."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Rank the candidates for answering the query. "
+                "Only include chunk_id values from the input.\n"
+                f"{json.dumps(payload, ensure_ascii=False)}"
+            ),
+        },
+    ]
+
+
+def _build_rerank_payload(query: str, candidates: Sequence[RerankCandidate]) -> dict[str, Any]:
+    return {
+        "query": query,
+        "candidates": [
+            {
+                "chunk_id": str(item.candidate.chunk_id),
+                "document_title": item.candidate.document_title,
+                "section_title": item.candidate.section_title,
+                "chunk_index": item.candidate.chunk_index,
+                "content_preview": _build_content_preview(query, item),
+                "scores": {
+                    "lexical_raw": item.lexical_raw,
+                    "vector_raw": item.vector_raw,
+                    "fused_score": item.fused_score,
+                },
+            }
+            for item in candidates
+        ],
+    }
+
+
+def has_qwen_rerank_credentials(settings: Settings) -> bool:
+    return bool(settings.effective_qwen_api_key)
+
+
+def request_qwen_rerank(
+    settings: Settings,
+    *,
+    query: str,
+    documents: Sequence[str],
+    timeout: float,
+) -> Any:
+    headers = {
+        "Authorization": f"Bearer {settings.effective_qwen_api_key or ''}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": settings.effective_qwen_rerank_model,
+        "query": query,
+        "documents": list(documents),
+        "top_n": len(documents),
+    }
+    with httpx.Client(timeout=timeout) as client:
+        response = client.post(_resolve_qwen_rerank_url(settings), headers=headers, json=payload)
+        response.raise_for_status()
+        return response.json()
+
+
+def _resolve_qwen_rerank_url(settings: Settings) -> str:
+    base_url = settings.effective_qwen_base_url
+    if not base_url:
+        return DEFAULT_QWEN_RERANK_URL
+    cleaned = base_url.rstrip("/")
+    if cleaned.endswith("/reranks"):
+        return cleaned
+    return f"{cleaned}/reranks"
+
+
+def _parse_qwen_rerank_items(payload: Any) -> list[QwenRerankItem]:
+    if not isinstance(payload, dict):
+        return []
+    results = payload.get("results")
+    if not isinstance(results, list):
+        output = payload.get("output")
+        if isinstance(output, dict):
+            results = output.get("results")
+    if not isinstance(results, list):
+        return []
+
+    items: list[QwenRerankItem] = []
+    for entry in results:
+        if not isinstance(entry, dict):
+            continue
+        index = entry.get("index", entry.get("document_index"))
+        score = entry.get("relevance_score", entry.get("score"))
+        if not isinstance(index, int):
+            continue
+        try:
+            numeric_score = float(score)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(numeric_score):
+            continue
+        items.append(QwenRerankItem(index=index, score=numeric_score))
+    items.sort(key=lambda item: item.score, reverse=True)
+    return items
+
+
+def _build_content_preview(query: str, item: RerankCandidate) -> str:
+    content = item.candidate.content
+    if "Table row:" not in content:
+        return _truncate_preview(_normalize_preview_text(content), TEXT_PREVIEW_LIMIT)
+
+    table_rows = _extract_table_rows(content)
+    if not table_rows:
+        return _truncate_preview(_normalize_preview_text(content), TEXT_PREVIEW_LIMIT)
+
+    intro = _extract_non_table_context(content)
+    selected_rows = _select_relevant_table_rows(query, table_rows)
+    parts: list[str] = []
+    if intro:
+        parts.append(_truncate_preview(intro, TABLE_CONTEXT_LIMIT))
+    parts.extend(selected_rows)
+    preview = "\n".join(part for part in parts if part)
+    return _truncate_preview(preview, TABLE_PREVIEW_LIMIT)
+
+
+def _extract_table_rows(content: str) -> list[str]:
+    return [
+        _normalize_preview_text(match.group(0))
+        for match in re.finditer(r"Table row:.*?(?=Table row:|$)", content, flags=re.DOTALL)
+    ]
+
+
+def _extract_non_table_context(content: str) -> str:
+    prefix = content.split("Table row:", 1)[0]
+    return _normalize_preview_text(prefix)
+
+
+def _select_relevant_table_rows(query: str, rows: Sequence[str]) -> list[str]:
+    if len(rows) <= 1:
+        return [_truncate_preview(row, TABLE_PREVIEW_LIMIT) for row in rows]
+
+    query_features = _expand_domain_features(query, _feature_tokens(query))
+    normalized_query = re.sub(r"\s+", "", query.casefold())
+    scored_rows: list[tuple[float, int, str]] = []
+    for index, row in enumerate(rows):
+        row_features = _expand_domain_features(row, _feature_tokens(row))
+        overlap = _feature_overlap(query_features, row_features)
+        direct_hits = sum(
+            1 for token in query_features
+            if len(token) >= 2 and token in normalized_query and token in re.sub(r"\s+", "", row.casefold())
+        )
+        domain_bonus = _domain_alignment_bonus(query, row)
+        score = (overlap * 10.0) + (direct_hits * 0.3) + domain_bonus
+        scored_rows.append((score, index, row))
+
+    positive_count = sum(1 for score, _, _ in scored_rows if score > 0)
+    selected_count = min(
+        len(rows),
+        TABLE_MAX_ROWS,
+        max(TABLE_MIN_ROWS, positive_count if positive_count > 0 else TABLE_MIN_ROWS),
+    )
+    selected = sorted(
+        sorted(scored_rows, key=lambda item: (item[0], -item[1]), reverse=True)[:selected_count],
+        key=lambda item: item[1],
+    )
+    return [row for _, _, row in selected]
+
+
+def _normalize_preview_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _truncate_preview(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:limit].rstrip()
+
+
+def _select_rerank_candidates(candidates: Sequence[RerankCandidate], limit: int) -> list[RerankCandidate]:
+    sorted_candidates = sorted(
+        candidates,
+        key=lambda item: (
+            item.fused_score,
+            item.lexical_raw,
+            item.vector_raw,
+            -item.candidate.chunk_index,
+        ),
+        reverse=True,
+    )
+    return sorted_candidates[: max(int(limit), 1)]
+
+
+def _parse_json_payload(content: str) -> dict[str, Any]:
+    cleaned = content.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?", "", cleaned).strip()
+        cleaned = re.sub(r"```$", "", cleaned).strip()
+    try:
+        loaded = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
