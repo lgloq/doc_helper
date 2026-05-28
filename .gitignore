@@ -38,3 +38,8 @@ scripts/rewrite*
 
 # local private notes
 private/
+
+# others
+.codegraph
+.claude
+.mcp.json
