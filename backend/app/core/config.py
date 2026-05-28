@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 120
     seed_mock_data: bool = True
     seed_demo_eval_cases: bool = True
+    enable_embedded_worker: bool = False
     data_dir: Path = BASE_DIR / "data"
     embedding_provider: str = "deterministic"
     answer_provider: str = "deterministic"
@@ -77,6 +78,10 @@ class Settings(BaseSettings):
     ocr_image_min_text_chars: int = 20
     ocr_image_min_tokens: int = 5
     ocr_filter_noise_text: bool = True
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
+    langfuse_host: str | None = None
+    enable_langfuse: bool = False
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -156,4 +161,3 @@ def get_settings() -> Settings:
     settings = Settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     return settings
-

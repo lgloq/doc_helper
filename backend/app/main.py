@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+import asyncio
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,13 +14,35 @@ from app.core.logging import configure_logging
 from app.db.redis import close_redis_client
 from app.services.auth.bootstrap import seed_mock_data
 from app.services.eval.bootstrap import seed_demo_eval_cases
+from app.services.observability.langfuse_adapter import get_langfuse_client, shutdown_langfuse
 
 logger = logging.getLogger(__name__)
 
 
+async def _start_arq_worker(app: FastAPI) -> None:
+    """在 API 进程内运行 ARQ Worker，用于不启动独立 worker 的本地开发场景。"""
+    try:
+        from arq.worker import create_worker
+
+        from app.workers.tasks import WorkerSettings
+
+        app.state.arq_worker = create_worker(WorkerSettings)
+        app.state.arq_worker_task = asyncio.create_task(app.state.arq_worker.async_run())
+        logger.info("ARQ Worker 已在 API 进程内启动")
+    except Exception:
+        logger.exception("启动 ARQ Worker 失败")
+
+
+async def _stop_arq_worker(app: FastAPI) -> None:
+    worker = getattr(app.state, "arq_worker", None)
+    if worker is not None:
+        await worker.close()
+
+
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app: FastAPI):
     configure_logging()
+    settings = get_settings()
     try:
         seed_mock_data()
     except Exception:
@@ -28,7 +51,24 @@ async def lifespan(_: FastAPI):
         seed_demo_eval_cases()
     except Exception:
         logger.exception("Failed to seed demo eval cases during startup.")
+
+    # 初始化 Langfuse 可观测性
+    try:
+        get_langfuse_client()
+    except Exception:
+        logger.exception("Failed to initialize Langfuse client.")
+
+    # 默认通过独立 worker 进程消费 ARQ 队列；只在显式启用时嵌入 API 进程。
+    _is_sqlite = settings.database_url.startswith("sqlite")
+    should_start_embedded_worker = settings.enable_embedded_worker and not _is_sqlite
+    if should_start_embedded_worker:
+        await _start_arq_worker(app)
+
     yield
+
+    if should_start_embedded_worker:
+        await _stop_arq_worker(app)
+    shutdown_langfuse()
     close_redis_client()
 
 

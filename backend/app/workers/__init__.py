@@ -1,1 +1,1 @@
-"""Worker layer placeholder for future ingestion and eval jobs."""
+"""ARQ Worker 异步任务处理层。"""

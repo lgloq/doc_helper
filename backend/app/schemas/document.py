@@ -145,6 +145,14 @@ class IngestionResultRead(BaseModel):
     page_count: int | None = None
 
 
+class AsyncIngestResponse(BaseModel):
+    document_id: UUID
+    document_version_id: UUID
+    job_id: str
+    ingest_status: IngestStatus
+    message: str
+
+
 class ChunkRead(ORMModel):
     id: UUID
     document_id: UUID

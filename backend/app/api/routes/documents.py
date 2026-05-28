@@ -10,6 +10,7 @@ from app.db.session import get_db_session
 from app.models.enums import DocumentStatus
 from app.models.user import User
 from app.schemas.document import (
+    AsyncIngestResponse,
     ChunkRead,
     DocumentACLCreate,
     DocumentACLRead,
@@ -26,6 +27,7 @@ from app.schemas.document import (
 )
 from app.services.diff.service import DocumentDiffService
 from app.services.documents.service import DocumentService
+from app.services.ingestion.async_service import AsyncIngestionService
 from app.services.ingestion.service import DocumentIngestionService
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -137,6 +139,20 @@ def ingest_document(
 ) -> IngestionResultRead:
     service = DocumentIngestionService(session)
     return service.ingest_document(current_user, document_id, payload)
+
+
+@router.post("/{document_id}/ingest/async", response_model=AsyncIngestResponse)
+async def ingest_document_async(
+    document_id: UUID,
+    payload: DocumentIngestRequest | None = None,
+    current_user: User = Depends(require_admin),
+    session: Session = Depends(get_db_session),
+) -> AsyncIngestResponse:
+    """异步入库：提交后台任务后立即返回，通过轮询版本状态获取进度。"""
+    service = AsyncIngestionService(session)
+    version_id = payload.version_id if payload else None
+    result = await service.enqueue_ingest(current_user, document_id, version_id)
+    return AsyncIngestResponse.model_validate(result)
 
 
 @router.get("/{document_id}/chunks", response_model=list[ChunkRead])
