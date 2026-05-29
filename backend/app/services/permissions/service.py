@@ -120,7 +120,7 @@ class PermissionFilterBuilder:
             user_dept = session.get(Department, user.department_id)
             if user_dept:
                 repo = DepartmentRepository(session)
-                ancestor_ids = set(repo.get_ancestor_ids(user_dept.path))
+                ancestor_ids = set(repo.get_ancestor_ids(user_dept.id_path))
 
         legacy_team_name = user.team_name if user.team_name else None
         return ancestor_ids, legacy_team_name

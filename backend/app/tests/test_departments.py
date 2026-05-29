@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from uuid import UUID
 
 from fastapi.testclient import TestClient
@@ -34,6 +35,10 @@ def _login(client: TestClient, email: str, password: str) -> str:
     return response.json()["access_token"]
 
 
+def _assert_stable_code(value: str) -> None:
+    assert re.fullmatch(r"[A-Z][0-9A-Z]{4}", value)
+
+
 class TestDepartmentCRUD:
     def test_create_department(self, client: TestClient, db_session: Session) -> None:
         admin_role = Role(name=RoleName.ADMIN, description="Admin")
@@ -52,6 +57,10 @@ class TestDepartmentCRUD:
         data = response.json()
         assert data["name"] == "技术部"
         assert data["path"] == "/技术部"
+        assert data["id_path"] == f"/{data['id']}"
+        _assert_stable_code(data["stable_code"])
+        assert re.fullmatch(r"[A-Z][0-9A-Z]", data["org_code"])
+        assert data["org_code_path"] == f"/{data['org_code']}"
         assert data["depth"] == 0
         assert data["parent_id"] is None
 
@@ -71,6 +80,9 @@ class TestDepartmentCRUD:
             json={"name": "技术部"},
         )
         parent_id = parent_resp.json()["id"]
+        parent_id_path = parent_resp.json()["id_path"]
+        parent_org_code = parent_resp.json()["org_code"]
+        parent_org_code_path = parent_resp.json()["org_code_path"]
 
         # 创建子部门
         child_resp = client.post(
@@ -82,8 +94,44 @@ class TestDepartmentCRUD:
         data = child_resp.json()
         assert data["name"] == "后端组"
         assert data["path"] == "/技术部/后端组"
+        assert data["id_path"] == f"{parent_id_path}/{data['id']}"
+        _assert_stable_code(data["stable_code"])
+        assert len(data["org_code"]) == len(parent_org_code) + 1
+        assert data["org_code"].startswith(parent_org_code)
+        assert data["org_code_path"] == f"{parent_org_code_path}/{data['org_code']}"
         assert data["depth"] == 1
         assert data["parent_id"] == parent_id
+
+    def test_sibling_org_code_space_limit_returns_409(self, client: TestClient, db_session: Session) -> None:
+        admin_role = Role(name=RoleName.ADMIN, description="Admin")
+        db_session.add(admin_role)
+        db_session.flush()
+        _create_user(db_session, admin_role, "admin@example.com", "admin-pass")
+        db_session.commit()
+
+        token = _login(client, "admin@example.com", "admin-pass")
+        parent_resp = client.post(
+            "/api/v1/departments",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"name": "技术部"},
+        )
+        parent_id = parent_resp.json()["id"]
+
+        for index in range(36):
+            response = client.post(
+                "/api/v1/departments",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"name": f"子部门{index}", "parent_id": parent_id},
+            )
+            assert response.status_code == 200
+
+        overflow_response = client.post(
+            "/api/v1/departments",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"name": "额外部门", "parent_id": parent_id},
+        )
+        assert overflow_response.status_code == 409
+        assert "同级部门数量" in overflow_response.json()["detail"]
 
     def test_list_departments(self, client: TestClient, db_session: Session) -> None:
         admin_role = Role(name=RoleName.ADMIN, description="Admin")
@@ -129,6 +177,10 @@ class TestDepartmentCRUD:
             json={"name": "技术部"},
         )
         dept_id = create_resp.json()["id"]
+        old_id_path = create_resp.json()["id_path"]
+        old_stable_code = create_resp.json()["stable_code"]
+        old_org_code = create_resp.json()["org_code"]
+        old_org_code_path = create_resp.json()["org_code_path"]
 
         update_resp = client.put(
             f"/api/v1/departments/{dept_id}",
@@ -138,6 +190,10 @@ class TestDepartmentCRUD:
         assert update_resp.status_code == 200
         assert update_resp.json()["name"] == "研发部"
         assert update_resp.json()["path"] == "/研发部"
+        assert update_resp.json()["id_path"] == old_id_path
+        assert update_resp.json()["stable_code"] == old_stable_code
+        assert update_resp.json()["org_code"] == old_org_code
+        assert update_resp.json()["org_code_path"] == old_org_code_path
 
     def test_delete_department(self, client: TestClient, db_session: Session) -> None:
         admin_role = Role(name=RoleName.ADMIN, description="Admin")
@@ -306,6 +362,10 @@ class TestDepartmentCRUD:
             json={"name": "child", "parent_id": root_id},
         )
         child_id = child_resp.json()["id"]
+        old_child_id_path = child_resp.json()["id_path"]
+        old_child_stable_code = child_resp.json()["stable_code"]
+        old_child_org_code = child_resp.json()["org_code"]
+        old_child_org_code_path = child_resp.json()["org_code_path"]
         gc_resp = client.post(
             "/api/v1/departments",
             headers={"Authorization": f"Bearer {token}"},
@@ -323,6 +383,13 @@ class TestDepartmentCRUD:
         data = update_resp.json()
         assert data["name"] == "renamed"
         assert data["path"] == "/renamed"
+        assert data["id_path"] == f"/{child_id}"
+        assert data["id_path"] != old_child_id_path
+        assert data["stable_code"] == old_child_stable_code
+        assert len(data["org_code"]) == 2
+        assert data["org_code"] != old_child_org_code
+        assert data["org_code_path"] == f"/{data['org_code']}"
+        assert data["org_code_path"] != old_child_org_code_path
         assert data["parent_id"] is None
 
         # grandchild 的 path 应级联更新
@@ -332,6 +399,9 @@ class TestDepartmentCRUD:
         )
         gc_data = next(d for d in gc_check.json() if d["id"] == gc_id)
         assert gc_data["path"] == "/renamed/grandchild"
+        assert gc_data["id_path"] == f"/{child_id}/{gc_id}"
+        assert gc_data["org_code"].startswith(data["org_code"])
+        assert gc_data["org_code_path"] == f"{data['org_code_path']}/{gc_data['org_code']}"
 
 
 def test_acl_invalid_department_returns_404(client: TestClient, db_session: Session) -> None:

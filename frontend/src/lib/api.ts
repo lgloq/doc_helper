@@ -18,7 +18,9 @@ import type {
   TaskExtractResponse,
   TaskItemRead,
   TokenResponse,
+  UserCreatePayload,
   TraceLogRead,
+  UserUpdatePayload,
   UserRead,
   WeeklyReportDraftRead,
   WeeklyReportGenerateResponse,
@@ -40,7 +42,7 @@ export class ApiError extends Error {
 
 interface RequestOptions extends Omit<RequestInit, "body"> {
   token?: string | null;
-  body?: BodyInit | Record<string, unknown> | null;
+  body?: BodyInit | object | null;
 }
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
@@ -154,6 +156,64 @@ export const api = {
   },
   listDepartments(token: string) {
     return request<DepartmentRead[]>("/api/v1/departments", { token });
+  },
+  createDepartment(token: string, payload: { name: string; parent_id?: string | null }) {
+    return request<DepartmentRead>("/api/v1/departments", {
+      method: "POST",
+      token,
+      body: payload,
+    });
+  },
+  updateDepartment(token: string, departmentId: string, payload: { name?: string; parent_id?: string | null }) {
+    return request<DepartmentRead>(`/api/v1/departments/${departmentId}`, {
+      method: "PUT",
+      token,
+      body: payload,
+    });
+  },
+  deleteDepartment(token: string, departmentId: string) {
+    return request<void>(`/api/v1/departments/${departmentId}`, {
+      method: "DELETE",
+      token,
+    });
+  },
+  listUsers(token: string, filters?: { q?: string; is_active?: boolean | null }) {
+    const params = new URLSearchParams();
+    if (filters?.q?.trim()) {
+      params.set("q", filters.q.trim());
+    }
+    if (filters?.is_active !== undefined && filters.is_active !== null) {
+      params.set("is_active", String(filters.is_active));
+    }
+    const query = params.toString();
+    return request<UserRead[]>(`/api/v1/users${query ? `?${query}` : ""}`, { token });
+  },
+  createUser(token: string, payload: UserCreatePayload) {
+    return request<UserRead>("/api/v1/users", {
+      method: "POST",
+      token,
+      body: payload,
+    });
+  },
+  updateUser(token: string, userId: string, payload: UserUpdatePayload) {
+    return request<UserRead>(`/api/v1/users/${userId}`, {
+      method: "PUT",
+      token,
+      body: payload,
+    });
+  },
+  deleteUser(token: string, userId: string) {
+    return request<void>(`/api/v1/users/${userId}`, {
+      method: "DELETE",
+      token,
+    });
+  },
+  updateUserDepartment(token: string, userId: string, departmentId: string | null) {
+    return request<UserRead>(`/api/v1/users/${userId}/department`, {
+      method: "PATCH",
+      token,
+      body: { department_id: departmentId },
+    });
   },
   listChunks(token: string, documentId: string, versionId?: string) {
     const query = versionId ? `?version_id=${encodeURIComponent(versionId)}` : "";

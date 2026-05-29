@@ -3,6 +3,7 @@ from __future__ import annotations
 from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
@@ -12,6 +13,8 @@ from app.models.enums import DocumentStatus, PrincipalType, RoleName
 from app.models.role import Role
 from app.models.user import User
 from app.services.permissions.service import PermissionFilterBuilder
+
+ORG_CODE_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
 def _login(client: TestClient, email: str, password: str = "pass") -> str:
@@ -27,7 +30,29 @@ def _make_department(session: Session, name: str, parent: Department | None = No
     else:
         path = f"/{name}"
         depth = 0
-    dept = Department(id=uuid4(), name=name, parent_id=parent.id if parent else None, path=path, depth=depth)
+    dept_id = uuid4()
+    id_path = f"{parent.id_path}/{dept_id}" if parent else f"/{dept_id}"
+    if parent:
+        sibling_count = session.scalar(
+            select(func.count()).select_from(Department).where(Department.parent_id == parent.id)
+        )
+    else:
+        sibling_count = session.scalar(
+            select(func.count()).select_from(Department).where(Department.parent_id.is_(None))
+        )
+    suffix = ORG_CODE_CHARS[sibling_count or 0]
+    org_code = f"{parent.org_code}{suffix}" if parent else f"A{suffix}"
+    dept = Department(
+        id=dept_id,
+        name=name,
+        parent_id=parent.id if parent else None,
+        path=path,
+        id_path=id_path,
+        stable_code=f"S{dept_id.hex[:4].upper()}",
+        org_code=org_code,
+        org_code_path=f"{parent.org_code_path}/{org_code}" if parent else f"/{org_code}",
+        depth=depth,
+    )
     session.add(dept)
     session.flush()
     return dept
@@ -335,9 +360,22 @@ def test_path_cascade_after_rename(db_session: Session) -> None:
     # 改名
     repo = DepartmentRepository(db_session)
     old_path = parent.path
+    old_id_path = parent.id_path
+    old_org_code = parent.org_code
+    old_org_code_path = parent.org_code_path
     parent.name = "new_name"
     parent.path = "/new_name"
-    repo.update_descendant_paths(old_path, "/new_name", 0)
+    repo.update_descendant_paths(
+        old_path,
+        "/new_name",
+        old_id_path,
+        old_id_path,
+        old_org_code,
+        old_org_code,
+        old_org_code_path,
+        old_org_code_path,
+        0,
+    )
     db_session.commit()
 
     db_session.refresh(child)

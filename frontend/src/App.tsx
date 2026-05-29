@@ -8,6 +8,7 @@ import { ChatPage } from "./pages/ChatPage";
 import { DocumentsPage } from "./pages/DocumentsPage";
 import { InsightsPage } from "./pages/InsightsPage";
 import { LoginPage } from "./pages/LoginPage";
+import { UsersPage } from "./pages/UsersPage";
 import { VersionsPage } from "./pages/VersionsPage";
 
 export default function App() {
@@ -24,6 +25,7 @@ export default function App() {
               <Route path="/artifacts" element={<ArtifactsPage />} />
               <Route path="/versions" element={<VersionsPage />} />
               <Route path="/insights" element={<InsightsPage />} />
+              <Route path="/users" element={<UsersPage />} />
             </Route>
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />

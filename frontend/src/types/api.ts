@@ -25,6 +25,24 @@ export interface UserRead {
   updated_at: string;
 }
 
+export interface UserCreatePayload {
+  email: string;
+  full_name: string;
+  password: string;
+  role_name: RoleName;
+  department_id?: string | null;
+  is_active?: boolean;
+}
+
+export interface UserUpdatePayload {
+  email?: string;
+  full_name?: string;
+  password?: string;
+  role_name?: RoleName;
+  department_id?: string | null;
+  is_active?: boolean;
+}
+
 export interface TokenResponse {
   access_token: string;
   token_type: "bearer";
@@ -66,6 +84,10 @@ export interface DepartmentRead {
   name: string;
   parent_id: string | null;
   path: string;
+  id_path: string;
+  stable_code: string;
+  org_code: string;
+  org_code_path: string;
   depth: number;
 }
 

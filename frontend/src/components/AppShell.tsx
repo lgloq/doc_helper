@@ -14,6 +14,9 @@ const navItems = [
 
 export function AppShell() {
   const { user, logout } = useAppContext();
+  const isAdmin = user?.role?.name === "admin";
+
+  const visibleNavItems = isAdmin ? [...navItems, { to: "/users", label: "用户管理" }] : navItems;
 
   return (
     <div className="app-shell">
@@ -25,7 +28,7 @@ export function AppShell() {
             <p className="muted">面向企业知识库的权限感知检索、引用溯源、版本对比与结构化工作流生成。</p>
           </div>
           <nav className="sidebar-nav">
-            {navItems.map((item) => (
+            {visibleNavItems.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}
@@ -41,8 +44,9 @@ export function AppShell() {
             <div>
               <strong>{user?.full_name ?? "未知用户"}</strong>
               <p>{user?.email}</p>
+              <p className="muted">部门：{user?.department?.path ?? "未设置"}</p>
             </div>
-            <StatusBadge tone={user?.role?.name === "admin" ? "warning" : "neutral"}>
+            <StatusBadge tone={isAdmin ? "warning" : "neutral"}>
               {formatRoleName(user?.role?.name, "访客")}
             </StatusBadge>
           </div>
@@ -57,7 +61,6 @@ export function AppShell() {
     </div>
   );
 }
-
 
 
 

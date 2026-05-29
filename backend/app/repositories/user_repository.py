@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.user import User
+
+_user_loader_options = [selectinload(User.role), selectinload(User.department)]
 
 
 class UserRepository:
@@ -14,15 +16,20 @@ class UserRepository:
         self.session = session
 
     def get_by_email(self, email: str) -> User | None:
-        statement = select(User).options(selectinload(User.role)).where(User.email == email)
+        statement = select(User).options(*_user_loader_options).where(User.email == email)
         return self.session.scalar(statement)
 
     def get_by_id(self, user_id: UUID) -> User | None:
-        statement = select(User).options(selectinload(User.role)).where(User.id == user_id)
+        statement = select(User).options(*_user_loader_options).where(User.id == user_id)
         return self.session.scalar(statement)
 
-    def list_all(self) -> Sequence[User]:
-        statement = select(User).options(selectinload(User.role)).order_by(User.email.asc())
+    def list_all(self, query: str | None = None, is_active: bool | None = None) -> Sequence[User]:
+        statement = select(User).options(*_user_loader_options).order_by(User.email.asc())
+        if query:
+            pattern = f"%{query.strip()}%"
+            statement = statement.where(or_(User.email.ilike(pattern), User.full_name.ilike(pattern)))
+        if is_active is not None:
+            statement = statement.where(User.is_active.is_(is_active))
         return list(self.session.scalars(statement).all())
 
     def add(self, user: User) -> User:

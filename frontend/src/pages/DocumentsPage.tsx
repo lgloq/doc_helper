@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
+import { DepartmentTreeSelect } from "../components/DepartmentTreeSelect";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
@@ -67,6 +68,10 @@ export function DocumentsPage() {
   const [latestIngestion, setLatestIngestion] = useState<IngestionResultRead | null>(null);
   const canManageLibrary = canManageDocumentLibrary(user);
   const showPermissionsPanel = canManageLibrary;
+  const selectedAclDepartment = aclForm.department_id
+    ? departments.find((department) => department.id === aclForm.department_id) ?? null
+    : null;
+  const canSubmitAcl = aclForm.principal_type !== "team" || Boolean(aclForm.department_id);
   const chunkRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const requestedDocumentId = searchParams.get("documentId");
   const requestedVersionId = searchParams.get("versionId");
@@ -650,20 +655,20 @@ export function DocumentsPage() {
                       </select>
                     </label>
                     {aclForm.principal_type === "team" ? (
-                      <label>
-                        <span>部门</span>
-                        <select
-                          value={aclForm.department_id}
-                          onChange={(event) => setAclForm((current) => ({ ...current, department_id: event.target.value }))}
-                        >
-                          <option value="">请选择部门</option>
-                          {departments.map((dept) => (
-                            <option key={dept.id} value={dept.id}>
-                              {dept.path}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
+                      <div className="acl-department-field">
+                        <div className="acl-department-summary">
+                          <span>部门</span>
+                          <strong>{selectedAclDepartment?.path ?? "请选择部门"}</strong>
+                        </div>
+                        <DepartmentTreeSelect
+                          className="acl-department-tree"
+                          departments={departments}
+                          emptyDescription="保存前需要选择一个部门"
+                          emptyLabel="请选择部门"
+                          selectedId={aclForm.department_id || null}
+                          onSelect={(id) => setAclForm((current) => ({ ...current, department_id: id ?? "" }))}
+                        />
+                      </div>
                     ) : null}
                     {aclForm.principal_type === "role" ? (
                       <label>
@@ -706,7 +711,7 @@ export function DocumentsPage() {
                       />
                       <span>可管理</span>
                     </label>
-                    <button className="primary-button" type="submit">
+                    <button className="primary-button" disabled={!canSubmitAcl} type="submit">
                       保存权限
                     </button>
                   </form>

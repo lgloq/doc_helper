@@ -12,6 +12,10 @@ class DepartmentRead(ORMModel):
     name: str
     parent_id: UUID | None = None
     path: str
+    id_path: str
+    stable_code: str
+    org_code: str
+    org_code_path: str
     depth: int
 
 
