@@ -119,6 +119,12 @@ class DocumentACL(UUIDPrimaryKeyMixin, Base):
         index=True,
     )
     team_name: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    department_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("departments.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
     can_view: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     can_manage: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -126,3 +132,4 @@ class DocumentACL(UUIDPrimaryKeyMixin, Base):
     document = relationship("Document", back_populates="acl_entries")
     user = relationship("User", back_populates="acl_entries")
     role = relationship("Role", back_populates="acl_entries")
+    department = relationship("Department")

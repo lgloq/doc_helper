@@ -128,6 +128,7 @@ class DocumentRepository:
         user_id: UUID | None = None,
         role_id: UUID | None = None,
         team_name: str | None = None,
+        department_id: UUID | None = None,
     ) -> DocumentACL | None:
         statement = select(DocumentACL).where(
             and_(
@@ -136,6 +137,7 @@ class DocumentRepository:
                 DocumentACL.user_id == user_id,
                 DocumentACL.role_id == role_id,
                 DocumentACL.team_name == team_name,
+                DocumentACL.department_id == department_id,
             )
         )
         return self.session.scalar(statement)

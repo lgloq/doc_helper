@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.models.document import Document, DocumentACL
 from app.models.user import User
+from app.repositories.department_repository import DepartmentRepository
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.role_repository import RoleRepository
 from app.repositories.user_repository import UserRepository
@@ -35,20 +36,26 @@ class DocumentService:
         return self._serialize_document(document, current_user_can_manage=True)
 
     def list_visible_documents(self, actor: User) -> list[DocumentRead]:
-        visibility_query = self.permission_builder.build_accessible_document_ids_query(actor, require_manage=False)
+        visibility_query = self.permission_builder.build_accessible_document_ids_query(
+            self.session, actor, require_manage=False
+        )
         documents = self.document_repository.list_visible(visibility_query)
         return [
-            self._serialize_document(document, self.permission_builder.get_document_decision(actor, document).can_manage)
+            self._serialize_document(
+                document, self.permission_builder.get_document_decision(self.session, actor, document).can_manage
+            )
             for document in documents
         ]
 
     def get_visible_document(self, actor: User, document_id: UUID) -> DocumentRead:
-        visibility_query = self.permission_builder.build_accessible_document_ids_query(actor, require_manage=False)
+        visibility_query = self.permission_builder.build_accessible_document_ids_query(
+            self.session, actor, require_manage=False
+        )
         document = self.document_repository.get_visible_by_id(document_id, visibility_query)
         if document is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
 
-        decision = self.permission_builder.get_document_decision(actor, document)
+        decision = self.permission_builder.get_document_decision(self.session, actor, document)
         return self._serialize_document(document, decision.can_manage)
 
     def list_acl_entries(self, actor: User, document_id: UUID) -> list[DocumentACLRead]:
@@ -62,6 +69,7 @@ class DocumentService:
         resolved_user = None
         resolved_role = None
         resolved_team_name = None
+        resolved_department_id = None
 
         if payload.principal_type.value == "user":
             resolved_user = self.user_repository.get_by_id(payload.user_id)
@@ -72,7 +80,12 @@ class DocumentService:
             if resolved_role is None:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target role not found.")
         elif payload.principal_type.value == "team":
+            resolved_department_id = payload.department_id
             resolved_team_name = payload.team_name
+            if resolved_department_id is not None:
+                dept_repo = DepartmentRepository(self.session)
+                if dept_repo.get_by_id(resolved_department_id) is None:
+                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target department not found.")
 
         existing = self.document_repository.find_acl_entry(
             document_id=document.id,
@@ -80,6 +93,7 @@ class DocumentService:
             user_id=resolved_user.id if resolved_user else None,
             role_id=resolved_role.id if resolved_role else None,
             team_name=resolved_team_name,
+            department_id=resolved_department_id,
         )
         if existing is None:
             existing = DocumentACL(
@@ -88,6 +102,7 @@ class DocumentService:
                 user_id=resolved_user.id if resolved_user else None,
                 role_id=resolved_role.id if resolved_role else None,
                 team_name=resolved_team_name,
+                department_id=resolved_department_id,
                 can_view=payload.can_view,
                 can_manage=payload.can_manage,
             )
@@ -107,7 +122,9 @@ class DocumentService:
         return self._serialize_acl_entry(hydrated)
 
     def _get_manageable_document(self, actor: User, document_id: UUID) -> Document:
-        visibility_query = self.permission_builder.build_accessible_document_ids_query(actor, require_manage=True)
+        visibility_query = self.permission_builder.build_accessible_document_ids_query(
+            self.session, actor, require_manage=True
+        )
         document = self.document_repository.get_visible_by_id(document_id, visibility_query)
         if document is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
@@ -143,6 +160,7 @@ class DocumentService:
                 "role_id": entry.role_id,
                 "role_name": role_name,
                 "team_name": entry.team_name,
+                "department_id": entry.department_id,
                 "can_view": entry.can_view,
                 "can_manage": entry.can_manage,
                 "created_at": entry.created_at,

@@ -18,6 +18,7 @@ backend/.mypy_cache/
 
 # Data and runtime artifacts
 backend/data/
+backups/
 *.log
 
 # Environment

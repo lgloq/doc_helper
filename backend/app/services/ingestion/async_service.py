@@ -118,7 +118,9 @@ class AsyncIngestionService:
             await redis.aclose()
 
     def _get_manageable_document(self, actor: User, document_id: UUID):
-        visibility_query = self.permission_builder.build_accessible_document_ids_query(actor, require_manage=True)
+        visibility_query = self.permission_builder.build_accessible_document_ids_query(
+            self.session, actor, require_manage=True
+        )
         document = self.document_repository.get_visible_by_id(document_id, visibility_query)
         if document is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")

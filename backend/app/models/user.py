@@ -15,10 +15,17 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     team_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    department_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("departments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     role_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("roles.id", ondelete="RESTRICT"), nullable=False, index=True)
 
     role = relationship("Role", back_populates="users")
+    department = relationship("Department", back_populates="users")
     owned_documents = relationship("Document", back_populates="owner")
     created_versions = relationship("DocumentVersion", back_populates="created_by_user")
     acl_entries = relationship("DocumentACL", back_populates="user")

@@ -2,6 +2,7 @@ from app.models import (
     ChatMessage,
     ChatSession,
     Chunk,
+    Department,
     Document,
     DocumentACL,
     DocumentVersion,
@@ -20,6 +21,7 @@ from app.models.base import Base
 
 __all__ = [
     "Base",
+    "Department",
     "Role",
     "User",
     "Document",

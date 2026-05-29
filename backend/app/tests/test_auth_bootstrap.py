@@ -33,6 +33,7 @@ def test_ensure_users_updates_existing_default_user_team(db_session) -> None:
             RoleName.MANAGER: manager_role,
             RoleName.ADMIN: admin_role,
         },
+        {},
     )
 
     assert viewer.team_name == "sales"
@@ -52,6 +53,7 @@ def test_ensure_users_creates_platform_viewer_default_user(db_session) -> None:
             RoleName.MANAGER: manager_role,
             RoleName.ADMIN: admin_role,
         },
+        {},
     )
     db_session.flush()
 

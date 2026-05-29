@@ -17,6 +17,8 @@ export interface UserRead {
   email: string;
   full_name: string;
   team_name: string | null;
+  department_id: string | null;
+  department: DepartmentRead | null;
   is_active: boolean;
   role: RoleRead | null;
   created_at: string;
@@ -59,6 +61,14 @@ export interface DocumentVersionRead {
   is_current?: boolean;
 }
 
+export interface DepartmentRead {
+  id: string;
+  name: string;
+  parent_id: string | null;
+  path: string;
+  depth: number;
+}
+
 export interface DocumentACLRead {
   id: string;
   document_id: string;
@@ -68,6 +78,7 @@ export interface DocumentACLRead {
   role_id: string | null;
   role_name: RoleName | null;
   team_name: string | null;
+  department_id: string | null;
   can_view: boolean;
   can_manage: boolean;
   created_at: string;

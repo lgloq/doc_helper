@@ -3,6 +3,7 @@ import type {
   ChatSessionDetailRead,
   ChatSessionRead,
   ChunkRead,
+  DepartmentRead,
   DocumentACLRead,
   DocumentDiffRead,
   DocumentDiffSummaryRead,
@@ -139,6 +140,7 @@ export const api = {
       principal_type: string;
       can_view: boolean;
       can_manage: boolean;
+      department_id?: string;
       team_name?: string;
       role_name?: string;
       user_id?: string;
@@ -149,6 +151,9 @@ export const api = {
       token,
       body: payload,
     });
+  },
+  listDepartments(token: string) {
+    return request<DepartmentRead[]>("/api/v1/departments", { token });
   },
   listChunks(token: string, documentId: string, versionId?: string) {
     const query = versionId ? `?version_id=${encodeURIComponent(versionId)}` : "";

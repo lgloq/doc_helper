@@ -17,6 +17,7 @@ import { formatBytes, formatDateTime, truncate } from "../lib/format";
 import { canManageDocumentLibrary } from "../lib/permissions";
 import type {
   ChunkRead,
+  DepartmentRead,
   DocumentACLRead,
   DocumentRead,
   DocumentVersionRead,
@@ -27,7 +28,7 @@ import type {
 
 interface AclFormState {
   principal_type: PrincipalType;
-  team_name: string;
+  department_id: string;
   role_name: RoleName;
   user_id: string;
   can_view: boolean;
@@ -36,7 +37,7 @@ interface AclFormState {
 
 const defaultAclForm: AclFormState = {
   principal_type: "team",
-  team_name: "platform",
+  department_id: "",
   role_name: "viewer",
   user_id: "",
   can_view: true,
@@ -53,6 +54,7 @@ export function DocumentsPage() {
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
   const [selectedVersionDetail, setSelectedVersionDetail] = useState<DocumentVersionRead | null>(null);
   const [aclEntries, setAclEntries] = useState<DocumentACLRead[]>([]);
+  const [departments, setDepartments] = useState<DepartmentRead[]>([]);
   const [chunks, setChunks] = useState<ChunkRead[]>([]);
   const [loading, setLoading] = useState(false);
   const [isDocumentListCollapsed, setIsDocumentListCollapsed] = useState(false);
@@ -76,9 +78,12 @@ export function DocumentsPage() {
     }
     setLoading(true);
     setError(null);
-    api
-      .listDocuments(token)
-      .then((items) => {
+    Promise.all([
+      api.listDocuments(token),
+      api.listDepartments(token).catch(() => [] as DepartmentRead[]),
+    ])
+      .then(([items, depts]) => {
+        setDepartments(depts);
         setDocuments(items);
         setSelectedDocumentId((current) => {
           if (requestedDocumentId && items.some((item) => item.id === requestedDocumentId)) {
@@ -338,7 +343,7 @@ export function DocumentsPage() {
         principal_type: aclForm.principal_type,
         can_view: aclForm.can_view,
         can_manage: aclForm.can_manage,
-        team_name: aclForm.principal_type === "team" ? aclForm.team_name : undefined,
+        department_id: aclForm.principal_type === "team" && aclForm.department_id ? aclForm.department_id : undefined,
         role_name: aclForm.principal_type === "role" ? aclForm.role_name : undefined,
         user_id: aclForm.principal_type === "user" && aclForm.user_id ? aclForm.user_id : undefined,
       });
@@ -610,7 +615,12 @@ export function DocumentsPage() {
                         <div className="list-card-topline">
                           <strong>{formatPrincipalType(entry.principal_type)}</strong>
                           <span>
-                            {entry.user_email ?? (entry.role_name ? formatRoleName(entry.role_name) : entry.team_name ?? "全部用户")}
+                            {entry.user_email
+                              ?? (entry.role_name
+                                ? formatRoleName(entry.role_name)
+                                : entry.department_id
+                                  ? (departments.find((d) => d.id === entry.department_id)?.path ?? entry.team_name ?? "部门")
+                                  : entry.team_name ?? "全部用户")}
                           </span>
                         </div>
                         <p>
@@ -634,18 +644,25 @@ export function DocumentsPage() {
                         }
                       >
                         <option value="public">公开</option>
-                        <option value="team">团队</option>
+                        <option value="team">部门</option>
                         <option value="role">角色</option>
                         <option value="user">指定用户</option>
                       </select>
                     </label>
                     {aclForm.principal_type === "team" ? (
                       <label>
-                        <span>团队名称</span>
-                        <input
-                          value={aclForm.team_name}
-                          onChange={(event) => setAclForm((current) => ({ ...current, team_name: event.target.value }))}
-                        />
+                        <span>部门</span>
+                        <select
+                          value={aclForm.department_id}
+                          onChange={(event) => setAclForm((current) => ({ ...current, department_id: event.target.value }))}
+                        >
+                          <option value="">请选择部门</option>
+                          {departments.map((dept) => (
+                            <option key={dept.id} value={dept.id}>
+                              {dept.path}
+                            </option>
+                          ))}
+                        </select>
                       </label>
                     ) : null}
                     {aclForm.principal_type === "role" ? (

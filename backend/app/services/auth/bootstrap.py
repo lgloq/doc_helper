@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -8,11 +9,17 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core.config import get_settings
 from app.core.security import hash_password
 from app.db.session import SessionLocal
+from app.models.department import Department
 from app.models.enums import RoleName
 from app.models.role import Role
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_DEPARTMENTS = [
+    {"name": "sales", "path": "/sales", "depth": 0},
+    {"name": "platform", "path": "/platform", "depth": 0},
+]
 
 DEFAULT_USERS = [
     {
@@ -20,6 +27,7 @@ DEFAULT_USERS = [
         "full_name": "Default Viewer",
         "password": "viewer123",
         "team_name": "sales",
+        "department_name": "sales",
         "role_name": RoleName.VIEWER,
     },
     {
@@ -27,6 +35,7 @@ DEFAULT_USERS = [
         "full_name": "Platform Viewer",
         "password": "viewer123",
         "team_name": "platform",
+        "department_name": "platform",
         "role_name": RoleName.VIEWER,
     },
     {
@@ -34,6 +43,7 @@ DEFAULT_USERS = [
         "full_name": "Default Manager",
         "password": "manager123",
         "team_name": "platform",
+        "department_name": "platform",
         "role_name": RoleName.MANAGER,
     },
     {
@@ -41,6 +51,7 @@ DEFAULT_USERS = [
         "full_name": "Default Admin",
         "password": "admin123",
         "team_name": None,
+        "department_name": None,
         "role_name": RoleName.ADMIN,
     },
 ]
@@ -54,7 +65,8 @@ def seed_mock_data() -> None:
     session = SessionLocal()
     try:
         roles = _ensure_roles(session)
-        _ensure_users(session, roles)
+        departments = _ensure_departments(session)
+        _ensure_users(session, roles, departments)
         session.commit()
     except SQLAlchemyError:
         session.rollback()
@@ -75,13 +87,32 @@ def _ensure_roles(session) -> dict[RoleName, Role]:
     return roles
 
 
-def _ensure_users(session, roles: dict[RoleName, Role]) -> None:
+def _ensure_departments(session) -> dict[str, Department]:
+    departments: dict[str, Department] = {}
+    for item in DEFAULT_DEPARTMENTS:
+        dept = session.scalar(select(Department).where(Department.name == item["name"]))
+        if dept is None:
+            dept = Department(
+                id=uuid4(),
+                name=item["name"],
+                path=item["path"],
+                depth=item["depth"],
+            )
+            session.add(dept)
+            session.flush()
+        departments[item["name"]] = dept
+    return departments
+
+
+def _ensure_users(session, roles: dict[RoleName, Role], departments: dict[str, Department]) -> None:
     for item in DEFAULT_USERS:
         existing = session.scalar(select(User).where(User.email == item["email"]))
+        dept = departments.get(item["department_name"]) if item.get("department_name") else None
         if existing is not None:
             desired_role_id = roles[item["role_name"]].id
             existing.full_name = item["full_name"]
             existing.team_name = item["team_name"]
+            existing.department_id = dept.id if dept else None
             existing.is_active = True
             existing.role_id = desired_role_id
             continue
@@ -91,6 +122,7 @@ def _ensure_users(session, roles: dict[RoleName, Role]) -> None:
                 full_name=item["full_name"],
                 password_hash=hash_password(item["password"]),
                 team_name=item["team_name"],
+                department_id=dept.id if dept else None,
                 is_active=True,
                 role_id=roles[item["role_name"]].id,
             )

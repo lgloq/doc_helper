@@ -23,7 +23,7 @@ const PRINCIPAL_TYPE_LABELS: Record<PrincipalType, string> = {
   public: "公开",
   user: "指定用户",
   role: "指定角色",
-  team: "团队",
+  team: "部门",
 };
 
 const MESSAGE_ROLE_LABELS: Record<MessageRole, string> = {

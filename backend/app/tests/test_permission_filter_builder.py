@@ -1,4 +1,3 @@
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
@@ -35,15 +34,31 @@ def test_permission_filter_builder_respects_manage_scope(db_session: Session) ->
     db_session.flush()
 
     team_view_doc = Document(title="Team View", description=None, status=DocumentStatus.ACTIVE, owner_user_id=admin.id)
-    team_manage_doc = Document(title="Team Manage", description=None, status=DocumentStatus.ACTIVE, owner_user_id=admin.id)
-    owned_doc = Document(title="Owned By Manager", description=None, status=DocumentStatus.ACTIVE, owner_user_id=manager.id)
+    team_manage_doc = Document(
+        title="Team Manage", description=None, status=DocumentStatus.ACTIVE, owner_user_id=admin.id
+    )
+    owned_doc = Document(
+        title="Owned By Manager", description=None, status=DocumentStatus.ACTIVE, owner_user_id=manager.id
+    )
     db_session.add_all([team_view_doc, team_manage_doc, owned_doc])
     db_session.flush()
 
     db_session.add_all(
         [
-            DocumentACL(document_id=team_view_doc.id, principal_type=PrincipalType.TEAM, team_name="platform", can_view=True, can_manage=False),
-            DocumentACL(document_id=team_manage_doc.id, principal_type=PrincipalType.TEAM, team_name="platform", can_view=True, can_manage=True),
+            DocumentACL(
+                document_id=team_view_doc.id,
+                principal_type=PrincipalType.TEAM,
+                team_name="platform",
+                can_view=True,
+                can_manage=False,
+            ),
+            DocumentACL(
+                document_id=team_manage_doc.id,
+                principal_type=PrincipalType.TEAM,
+                team_name="platform",
+                can_view=True,
+                can_manage=True,
+            ),
         ]
     )
     db_session.commit()
@@ -51,8 +66,12 @@ def test_permission_filter_builder_respects_manage_scope(db_session: Session) ->
     manager.role = manager_role
 
     builder = PermissionFilterBuilder()
-    visible_ids = set(db_session.scalars(builder.build_accessible_document_ids_query(manager, require_manage=False)).all())
-    manageable_ids = set(db_session.scalars(builder.build_accessible_document_ids_query(manager, require_manage=True)).all())
+    visible_ids = set(
+        db_session.scalars(builder.build_accessible_document_ids_query(db_session, manager, require_manage=False)).all()
+    )
+    manageable_ids = set(
+        db_session.scalars(builder.build_accessible_document_ids_query(db_session, manager, require_manage=True)).all()
+    )
 
     assert visible_ids == {team_view_doc.id, team_manage_doc.id, owned_doc.id}
     assert manageable_ids == {team_manage_doc.id, owned_doc.id}

@@ -89,7 +89,8 @@ class DocumentACLCreate(BaseModel):
     principal_type: PrincipalType
     user_id: UUID | None = None
     role_name: RoleName | None = None
-    team_name: str | None = None
+    team_name: str | None = None  # deprecated fallback
+    department_id: UUID | None = None
     can_view: bool = True
     can_manage: bool = False
 
@@ -99,10 +100,17 @@ class DocumentACLCreate(BaseModel):
             raise ValueError("user_id is required when principal_type is user")
         if self.principal_type == PrincipalType.ROLE and self.role_name is None:
             raise ValueError("role_name is required when principal_type is role")
-        if self.principal_type == PrincipalType.TEAM and not self.team_name:
-            raise ValueError("team_name is required when principal_type is team")
-        if self.principal_type == PrincipalType.PUBLIC and any([self.user_id, self.role_name, self.team_name]):
-            raise ValueError("public ACL cannot target a user, role or team")
+        if self.principal_type == PrincipalType.TEAM:
+            if not self.department_id and not self.team_name:
+                raise ValueError("department_id or team_name is required when principal_type is team")
+            if self.department_id and self.team_name:
+                raise ValueError("department_id and team_name cannot be used together")
+        if self.principal_type == PrincipalType.PUBLIC and any(
+            [self.user_id, self.role_name, self.team_name, self.department_id]
+        ):
+            raise ValueError("public ACL cannot target a user, role, team or department")
+        if self.principal_type in {PrincipalType.USER, PrincipalType.ROLE} and (self.department_id or self.team_name):
+            raise ValueError("user or role ACL should not have department_id or team_name")
         return self
 
 
@@ -115,6 +123,7 @@ class DocumentACLRead(ORMModel):
     role_id: UUID | None = None
     role_name: RoleName | None = None
     team_name: str | None = None
+    department_id: UUID | None = None
     can_view: bool
     can_manage: bool
     created_at: datetime
