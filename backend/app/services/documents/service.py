@@ -60,10 +60,13 @@ class DocumentService:
 
     def list_acl_entries(self, actor: User, document_id: UUID) -> list[DocumentACLRead]:
         document = self._get_manageable_document(actor, document_id)
+        deleted_count = self.document_repository.delete_no_permission_acl_entries(document.id)
+        if deleted_count:
+            self.session.commit()
         acl_entries = self.document_repository.get_acl_entries(document.id)
         return [self._serialize_acl_entry(entry) for entry in acl_entries]
 
-    def upsert_acl_entry(self, actor: User, document_id: UUID, payload: DocumentACLCreate) -> DocumentACLRead:
+    def upsert_acl_entry(self, actor: User, document_id: UUID, payload: DocumentACLCreate) -> DocumentACLRead | None:
         document = self._get_manageable_document(actor, document_id)
 
         resolved_user = None
@@ -95,6 +98,12 @@ class DocumentService:
             team_name=resolved_team_name,
             department_id=resolved_department_id,
         )
+        if not payload.can_view and not payload.can_manage:
+            if existing is not None:
+                self.document_repository.delete_acl_entry(existing)
+                self.session.commit()
+            return None
+
         if existing is None:
             existing = DocumentACL(
                 document_id=document.id,
@@ -120,6 +129,14 @@ class DocumentService:
         if hydrated is None:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to load ACL entry.")
         return self._serialize_acl_entry(hydrated)
+
+    def delete_acl_entry(self, actor: User, document_id: UUID, acl_entry_id: UUID) -> None:
+        document = self._get_manageable_document(actor, document_id)
+        acl_entry = self.document_repository.get_acl_entry_by_id(acl_entry_id)
+        if acl_entry is None or acl_entry.document_id != document.id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ACL entry not found.")
+        self.document_repository.delete_acl_entry(acl_entry)
+        self.session.commit()
 
     def _get_manageable_document(self, actor: User, document_id: UUID) -> Document:
         visibility_query = self.permission_builder.build_accessible_document_ids_query(

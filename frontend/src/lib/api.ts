@@ -69,7 +69,9 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   }
 
   const contentType = response.headers.get("content-type") ?? "";
-  const payload = contentType.includes("application/json") ? await response.json() : await response.text();
+  const responseText = response.status === 204 ? "" : await response.text();
+  const payload =
+    responseText && contentType.includes("application/json") ? JSON.parse(responseText) : responseText;
 
   if (!response.ok) {
     const detail =
@@ -148,10 +150,16 @@ export const api = {
       user_id?: string;
     },
   ) {
-    return request<DocumentACLRead>(`/api/v1/documents/${documentId}/acl`, {
+    return request<DocumentACLRead | null>(`/api/v1/documents/${documentId}/acl`, {
       method: "POST",
       token,
       body: payload,
+    });
+  },
+  deleteDocumentAcl(token: string, documentId: string, aclEntryId: string) {
+    return request<void>(`/api/v1/documents/${documentId}/acl/${aclEntryId}`, {
+      method: "DELETE",
+      token,
     });
   },
   listDepartments(token: string) {

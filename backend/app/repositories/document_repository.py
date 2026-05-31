@@ -113,6 +113,20 @@ class DocumentRepository:
         )
         return list(self.session.scalars(statement).all())
 
+    def delete_no_permission_acl_entries(self, document_id: UUID) -> int:
+        entries = list(
+            self.session.scalars(
+                select(DocumentACL).where(
+                    DocumentACL.document_id == document_id,
+                    DocumentACL.can_view.is_(False),
+                    DocumentACL.can_manage.is_(False),
+                )
+            ).all()
+        )
+        for entry in entries:
+            self.session.delete(entry)
+        return len(entries)
+
     def get_acl_entry_by_id(self, acl_entry_id: UUID) -> DocumentACL | None:
         statement = (
             select(DocumentACL)
@@ -145,6 +159,9 @@ class DocumentRepository:
     def add_acl_entry(self, acl_entry: DocumentACL) -> DocumentACL:
         self.session.add(acl_entry)
         return acl_entry
+
+    def delete_acl_entry(self, acl_entry: DocumentACL) -> None:
+        self.session.delete(acl_entry)
 
     def set_current_version(self, document: Document, version_id: UUID) -> None:
         document.current_version_id = version_id

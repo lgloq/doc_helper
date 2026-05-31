@@ -15,8 +15,9 @@ const navItems = [
 export function AppShell() {
   const { user, logout } = useAppContext();
   const isAdmin = user?.role?.name === "admin";
+  const departmentLabel = user?.department?.path ?? (isAdmin ? "管理员免分配" : "未设置");
 
-  const visibleNavItems = isAdmin ? [...navItems, { to: "/users", label: "用户管理" }] : navItems;
+  const visibleNavItems = isAdmin ? [...navItems, { to: "/users", label: "用户与部门管理" }] : navItems;
 
   return (
     <div className="app-shell">
@@ -44,7 +45,7 @@ export function AppShell() {
             <div>
               <strong>{user?.full_name ?? "未知用户"}</strong>
               <p>{user?.email}</p>
-              <p className="muted">部门：{user?.department?.path ?? "未设置"}</p>
+              <p className="muted">部门：{departmentLabel}</p>
             </div>
             <StatusBadge tone={isAdmin ? "warning" : "neutral"}>
               {formatRoleName(user?.role?.name, "访客")}
@@ -61,6 +62,5 @@ export function AppShell() {
     </div>
   );
 }
-
 
 

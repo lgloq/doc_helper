@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 
 import { ErrorNotice } from "../components/ErrorNotice";
 import { PageHeader } from "../components/PageHeader";
+import { SelectField } from "../components/SelectField";
 import { StatusBadge } from "../components/StatusBadge";
 import { useAppContext } from "../context/AppContext";
 import { api } from "../lib/api";
@@ -226,33 +227,33 @@ export function VersionsPage() {
         <div className="page-grid version-selector-grid">
           <label>
             <span>文档</span>
-            <select value={documentId} onChange={(event) => setDocumentId(event.target.value)}>
-              {documents.map((document) => (
-                <option key={document.id} value={document.id}>
-                  {document.title}
-                </option>
-              ))}
-            </select>
+            <SelectField
+              options={documents.map((document) => ({ value: document.id, label: document.title }))}
+              value={documentId}
+              onChange={setDocumentId}
+            />
           </label>
           <label>
             <span>起始版本</span>
-            <select value={fromVersionId} onChange={(event) => setFromVersionId(event.target.value)}>
-              {versions.map((version) => (
-                <option key={version.id} value={version.id}>
-                  v{version.version_number} · {formatIngestStatus(version.ingest_status)}
-                </option>
-              ))}
-            </select>
+            <SelectField
+              options={versions.map((version) => ({
+                value: version.id,
+                label: `v${version.version_number} · ${formatIngestStatus(version.ingest_status)}`,
+              }))}
+              value={fromVersionId}
+              onChange={setFromVersionId}
+            />
           </label>
           <label>
             <span>目标版本</span>
-            <select value={toVersionId} onChange={(event) => setToVersionId(event.target.value)}>
-              {versions.map((version) => (
-                <option key={version.id} value={version.id}>
-                  v{version.version_number} · {formatIngestStatus(version.ingest_status)}
-                </option>
-              ))}
-            </select>
+            <SelectField
+              options={versions.map((version) => ({
+                value: version.id,
+                label: `v${version.version_number} · ${formatIngestStatus(version.ingest_status)}`,
+              }))}
+              value={toVersionId}
+              onChange={setToVersionId}
+            />
           </label>
         </div>
         <div className="inline-actions">

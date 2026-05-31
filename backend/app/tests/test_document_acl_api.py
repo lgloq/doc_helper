@@ -126,3 +126,125 @@ def test_acl_endpoints_require_manage_access_and_allow_assignment(client: TestCl
     )
     assert viewer_document_response.status_code == 200
     assert viewer_document_response.json()["title"] == "Restricted Policy"
+
+
+def test_acl_delete_endpoint_removes_assignment(client: TestClient, db_session: Session) -> None:
+    viewer_role = Role(name=RoleName.VIEWER, description="Viewer")
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add_all([viewer_role, admin_role])
+    db_session.flush()
+
+    viewer = _create_user(db_session, viewer_role, "viewer@example.com", "sales", "viewer-pass")
+    admin = _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+    document = Document(title="Restricted Policy", description=None, status=DocumentStatus.ACTIVE, owner_user_id=admin.id)
+    db_session.add(document)
+    db_session.flush()
+    acl_entry = DocumentACL(
+        document_id=document.id,
+        principal_type=PrincipalType.USER,
+        user_id=viewer.id,
+        can_view=True,
+        can_manage=False,
+    )
+    db_session.add(acl_entry)
+    db_session.commit()
+
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    delete_response = client.delete(
+        f"/api/v1/documents/{document.id}/acl/{acl_entry.id}",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+
+    assert delete_response.status_code == 204
+    acl_list_response = client.get(
+        f"/api/v1/documents/{document.id}/acl",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert acl_list_response.status_code == 200
+    assert acl_list_response.json() == []
+
+
+def test_acl_upsert_with_no_permissions_removes_existing_entry(client: TestClient, db_session: Session) -> None:
+    viewer_role = Role(name=RoleName.VIEWER, description="Viewer")
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add_all([viewer_role, admin_role])
+    db_session.flush()
+
+    viewer = _create_user(db_session, viewer_role, "viewer@example.com", "sales", "viewer-pass")
+    admin = _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+    document = Document(title="Restricted Policy", description=None, status=DocumentStatus.ACTIVE, owner_user_id=admin.id)
+    db_session.add(document)
+    db_session.flush()
+    db_session.add(
+        DocumentACL(
+            document_id=document.id,
+            principal_type=PrincipalType.USER,
+            user_id=viewer.id,
+            can_view=True,
+            can_manage=False,
+        )
+    )
+    db_session.commit()
+
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    revoke_response = client.post(
+        f"/api/v1/documents/{document.id}/acl",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={
+            "principal_type": "user",
+            "user_id": str(viewer.id),
+            "can_view": False,
+            "can_manage": False,
+        },
+    )
+
+    assert revoke_response.status_code == 200
+    assert revoke_response.json() is None
+    acl_list_response = client.get(
+        f"/api/v1/documents/{document.id}/acl",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert acl_list_response.status_code == 200
+    assert acl_list_response.json() == []
+
+
+def test_acl_list_cleans_existing_no_permission_entries(client: TestClient, db_session: Session) -> None:
+    viewer_role = Role(name=RoleName.VIEWER, description="Viewer")
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add_all([viewer_role, admin_role])
+    db_session.flush()
+
+    viewer = _create_user(db_session, viewer_role, "viewer@example.com", "sales", "viewer-pass")
+    admin = _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+    document = Document(title="Restricted Policy", description=None, status=DocumentStatus.ACTIVE, owner_user_id=admin.id)
+    db_session.add(document)
+    db_session.flush()
+    db_session.add_all(
+        [
+            DocumentACL(
+                document_id=document.id,
+                principal_type=PrincipalType.USER,
+                user_id=viewer.id,
+                can_view=False,
+                can_manage=False,
+            ),
+            DocumentACL(
+                document_id=document.id,
+                principal_type=PrincipalType.PUBLIC,
+                can_view=True,
+                can_manage=False,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    acl_list_response = client.get(
+        f"/api/v1/documents/{document.id}/acl",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+
+    assert acl_list_response.status_code == 200
+    data = acl_list_response.json()
+    assert len(data) == 1
+    assert data[0]["principal_type"] == "public"

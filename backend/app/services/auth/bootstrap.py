@@ -100,6 +100,10 @@ def _ensure_roles(session) -> dict[RoleName, Role]:
 
 
 def _ensure_departments(session) -> dict[str, Department]:
+    existing_departments = list(session.scalars(select(Department)).all())
+    if existing_departments:
+        return {department.path: department for department in existing_departments}
+
     departments: dict[str, Department] = {}
     stable_codes = {code for code in session.scalars(select(Department.stable_code)).all() if code}
     for path, parent_path, name in _DEPARTMENT_TREE:
@@ -171,12 +175,6 @@ def _ensure_users(session, roles: dict[RoleName, Role], departments: dict[str, D
         existing = session.scalar(select(User).where(User.email == item["email"]))
         dept = departments.get(item["department_path"]) if item.get("department_path") else None
         if existing is not None:
-            desired_role_id = roles[item["role_name"]].id
-            existing.full_name = item["full_name"]
-            existing.team_name = item["team_name"]
-            existing.department_id = dept.id if dept else None
-            existing.is_active = True
-            existing.role_id = desired_role_id
             continue
         session.add(
             User(

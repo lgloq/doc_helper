@@ -403,6 +403,68 @@ class TestDepartmentCRUD:
         assert gc_data["org_code"].startswith(data["org_code"])
         assert gc_data["org_code_path"] == f"{data['org_code_path']}/{gc_data['org_code']}"
 
+    def test_move_non_leaf_department_moves_whole_subtree(self, client: TestClient, db_session: Session) -> None:
+        """移动非叶子部门时应移动整棵子树，不应产生重复部门。"""
+        admin_role = Role(name=RoleName.ADMIN, description="Admin")
+        db_session.add(admin_role)
+        db_session.flush()
+        _create_user(db_session, admin_role, "admin@example.com", "admin-pass")
+        db_session.commit()
+
+        token = _login(client, "admin@example.com", "admin-pass")
+
+        root_resp = client.post(
+            "/api/v1/departments",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"name": "root"},
+        )
+        root_id = root_resp.json()["id"]
+        target_resp = client.post(
+            "/api/v1/departments",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"name": "target"},
+        )
+        target_id = target_resp.json()["id"]
+        parent_resp = client.post(
+            "/api/v1/departments",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"name": "parent", "parent_id": root_id},
+        )
+        parent_id = parent_resp.json()["id"]
+        first_child_resp = client.post(
+            "/api/v1/departments",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"name": "first", "parent_id": parent_id},
+        )
+        second_child_resp = client.post(
+            "/api/v1/departments",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"name": "second", "parent_id": parent_id},
+        )
+        first_child_id = first_child_resp.json()["id"]
+        second_child_id = second_child_resp.json()["id"]
+
+        before_list = client.get("/api/v1/departments", headers={"Authorization": f"Bearer {token}"})
+        before_count = len(before_list.json())
+        update_resp = client.put(
+            f"/api/v1/departments/{parent_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"parent_id": target_id},
+        )
+
+        assert update_resp.status_code == 200
+        after_list = client.get("/api/v1/departments", headers={"Authorization": f"Bearer {token}"})
+        departments = after_list.json()
+        assert len(departments) == before_count
+        parent_data = next(item for item in departments if item["id"] == parent_id)
+        first_child_data = next(item for item in departments if item["id"] == first_child_id)
+        second_child_data = next(item for item in departments if item["id"] == second_child_id)
+        assert parent_data["path"] == "/target/parent"
+        assert first_child_data["parent_id"] == parent_id
+        assert first_child_data["path"] == "/target/parent/first"
+        assert second_child_data["parent_id"] == parent_id
+        assert second_child_data["path"] == "/target/parent/second"
+
 
 def test_acl_invalid_department_returns_404(client: TestClient, db_session: Session) -> None:
     """ACL 写入时无效 department_id 应返回 404。"""

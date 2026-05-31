@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 
 import type { DepartmentRead } from "../types/api";
 
@@ -11,11 +11,15 @@ interface DepartmentTreeSelectProps {
   departments: DepartmentRead[];
   selectedId: string | null;
   onSelect: (id: string | null) => void;
+  enableDragMove?: boolean;
+  onMove?: (departmentId: string, parentId: string | null) => void;
   emptyLabel?: string;
   emptyDescription?: string;
   className?: string;
   showToolbar?: boolean;
 }
+
+const ROOT_DROP_TARGET = "__root__";
 
 function buildTree(departments: DepartmentRead[]): DepartmentNode[] {
   const map = new Map<string, DepartmentNode>();
@@ -88,20 +92,44 @@ function DepartmentTreeNode({
   onToggle,
   selectedId,
   onSelect,
+  enableDragMove,
+  draggingId,
+  dropTargetId,
+  canDropOn,
+  onDragStart,
+  onDragOverTarget,
+  onDropTarget,
+  onDragEnd,
 }: {
   node: DepartmentNode;
   expanded: Set<string>;
   onToggle: (id: string) => void;
   selectedId: string | null;
   onSelect: (id: string) => void;
+  enableDragMove: boolean;
+  draggingId: string | null;
+  dropTargetId: string | null;
+  canDropOn: (departmentId: string, parentId: string | null) => boolean;
+  onDragStart: (event: DragEvent<HTMLButtonElement>, departmentId: string) => void;
+  onDragOverTarget: (event: DragEvent<HTMLElement>, parentId: string | null) => void;
+  onDropTarget: (event: DragEvent<HTMLElement>, parentId: string | null) => void;
+  onDragEnd: () => void;
 }) {
   const hasChildren = node.children.length > 0;
   const isExpanded = expanded.has(node.department.id);
   const isSelected = selectedId === node.department.id;
+  const isDraggingSource = draggingId === node.department.id;
+  const isDropTarget = dropTargetId === node.department.id;
+  const isDropDisabled =
+    enableDragMove && draggingId !== null && draggingId !== node.department.id && !canDropOn(draggingId, node.department.id);
 
   return (
     <div className="dept-tree-branch">
-      <div className={`dept-tree-node ${isSelected ? "is-selected" : ""}`}>
+      <div
+        className={`dept-tree-node ${isSelected ? "is-selected" : ""} ${isDraggingSource ? "is-dragging-source" : ""} ${
+          isDropTarget ? "is-drop-target" : ""
+        } ${isDropDisabled ? "is-drop-disabled" : ""}`.trim()}
+      >
         {hasChildren ? (
           <button
             aria-label={isExpanded ? "收起" : "展开"}
@@ -114,7 +142,16 @@ function DepartmentTreeNode({
         ) : (
           <span className="dept-tree-spacer" />
         )}
-        <button className="dept-tree-label" onClick={() => onSelect(node.department.id)} type="button">
+        <button
+          className="dept-tree-label"
+          draggable={enableDragMove}
+          onClick={() => onSelect(node.department.id)}
+          onDragEnd={onDragEnd}
+          onDragOver={(event) => onDragOverTarget(event, node.department.id)}
+          onDragStart={(event) => onDragStart(event, node.department.id)}
+          onDrop={(event) => onDropTarget(event, node.department.id)}
+          type="button"
+        >
           <span className="dept-tree-title">
             <span className="dept-tree-name">{node.department.name}</span>
             <span className="dept-code-badge">{node.department.org_code}</span>
@@ -132,6 +169,14 @@ function DepartmentTreeNode({
               onToggle={onToggle}
               selectedId={selectedId}
               onSelect={onSelect}
+              enableDragMove={enableDragMove}
+              draggingId={draggingId}
+              dropTargetId={dropTargetId}
+              canDropOn={canDropOn}
+              onDragStart={onDragStart}
+              onDragOverTarget={onDragOverTarget}
+              onDropTarget={onDropTarget}
+              onDragEnd={onDragEnd}
             />
           ))}
         </div>
@@ -144,6 +189,8 @@ export function DepartmentTreeSelect({
   departments,
   selectedId,
   onSelect,
+  enableDragMove = false,
+  onMove,
   emptyLabel = "未设置部门",
   emptyDescription = "清空该用户的部门归属",
   className,
@@ -151,6 +198,9 @@ export function DepartmentTreeSelect({
 }: DepartmentTreeSelectProps) {
   const roots = useMemo(() => buildTree(departments), [departments]);
   const [query, setQuery] = useState("");
+  const treeRef = useRef<HTMLDivElement | null>(null);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const filteredRoots = useMemo(() => filterTree(roots, query), [query, roots]);
   const allBranchIds = useMemo(() => collectBranchIds(roots), [roots]);
   const visibleBranchIds = useMemo(() => collectBranchIds(filteredRoots), [filteredRoots]);
@@ -190,6 +240,17 @@ export function DepartmentTreeSelect({
     });
   }, [query, roots, selectedAncestorIds, visibleBranchIds]);
 
+  useEffect(() => {
+    if (!selectedId) {
+      return;
+    }
+    const nextFrame = window.requestAnimationFrame(() => {
+      const selectedNode = treeRef.current?.querySelector(".dept-tree-node.is-selected");
+      selectedNode?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    });
+    return () => window.cancelAnimationFrame(nextFrame);
+  }, [selectedId]);
+
   const toggle = useCallback((id: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -202,12 +263,79 @@ export function DepartmentTreeSelect({
     });
   }, []);
 
+  const canDropOn = useCallback(
+    (departmentId: string, parentId: string | null) => {
+      const source = departmentById.get(departmentId);
+      if (!source) {
+        return false;
+      }
+      if (source.parent_id === parentId) {
+        return false;
+      }
+      if (parentId === null) {
+        return true;
+      }
+      const targetParent = departmentById.get(parentId);
+      if (!targetParent) {
+        return false;
+      }
+      return targetParent.id !== source.id && !targetParent.id_path.startsWith(`${source.id_path}/`);
+    },
+    [departmentById],
+  );
+
+  const clearDragState = useCallback(() => {
+    setDraggingId(null);
+    setDropTargetId(null);
+  }, []);
+
+  const handleDragStart = useCallback(
+    (event: DragEvent<HTMLButtonElement>, departmentId: string) => {
+      if (!enableDragMove) {
+        return;
+      }
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", departmentId);
+      setDraggingId(departmentId);
+    },
+    [enableDragMove],
+  );
+
+  const handleDragOverTarget = useCallback(
+    (event: DragEvent<HTMLElement>, parentId: string | null) => {
+      const sourceId = draggingId ?? event.dataTransfer.getData("text/plain");
+      if (!enableDragMove || !sourceId || !canDropOn(sourceId, parentId)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = "move";
+      setDropTargetId(parentId ?? ROOT_DROP_TARGET);
+    },
+    [canDropOn, draggingId, enableDragMove],
+  );
+
+  const handleDropTarget = useCallback(
+    (event: DragEvent<HTMLElement>, parentId: string | null) => {
+      const sourceId = draggingId ?? event.dataTransfer.getData("text/plain");
+      if (!enableDragMove || !sourceId || !canDropOn(sourceId, parentId)) {
+        clearDragState();
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      clearDragState();
+      onMove?.(sourceId, parentId);
+    },
+    [canDropOn, clearDragState, draggingId, enableDragMove, onMove],
+  );
+
   if (roots.length === 0) {
     return <div className="empty-state">暂无部门数据</div>;
   }
 
   return (
-    <div className={`dept-tree ${className ?? ""}`}>
+    <div className={`dept-tree ${enableDragMove ? "is-drag-enabled" : ""} ${className ?? ""}`.trim()} ref={treeRef}>
       {showToolbar ? (
         <div className="dept-tree-toolbar">
           <input
@@ -226,6 +354,16 @@ export function DepartmentTreeSelect({
           </div>
         </div>
       ) : null}
+      {enableDragMove ? (
+        <div
+          className={`dept-tree-root-drop ${dropTargetId === ROOT_DROP_TARGET ? "is-drop-target" : ""}`}
+          onDragOver={(event) => handleDragOverTarget(event, null)}
+          onDrop={(event) => handleDropTarget(event, null)}
+        >
+          <span>一级部门</span>
+          <small>拖到这里移动到顶层</small>
+        </div>
+      ) : null}
       <button className={`dept-tree-clear ${selectedId === null ? "is-selected" : ""}`} onClick={() => onSelect(null)} type="button">
         <span>{emptyLabel}</span>
         <small>{emptyDescription}</small>
@@ -239,6 +377,14 @@ export function DepartmentTreeSelect({
           onToggle={toggle}
           selectedId={selectedId}
           onSelect={onSelect}
+          enableDragMove={enableDragMove}
+          draggingId={draggingId}
+          dropTargetId={dropTargetId}
+          canDropOn={canDropOn}
+          onDragStart={handleDragStart}
+          onDragOverTarget={handleDragOverTarget}
+          onDropTarget={handleDropTarget}
+          onDragEnd={clearDragState}
         />
       ))}
     </div>

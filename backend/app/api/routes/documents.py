@@ -166,15 +166,26 @@ def list_document_chunks(
     return service.list_chunks(current_user, document_id, version_id)
 
 
-@router.post("/{document_id}/acl", response_model=DocumentACLRead)
+@router.post("/{document_id}/acl", response_model=DocumentACLRead | None)
 def upsert_document_acl(
     document_id: UUID,
     payload: DocumentACLCreate,
     current_user: User = Depends(require_admin),
     session: Session = Depends(get_db_session),
-) -> DocumentACLRead:
+) -> DocumentACLRead | None:
     service = DocumentService(session)
     return service.upsert_acl_entry(current_user, document_id, payload)
+
+
+@router.delete("/{document_id}/acl/{acl_entry_id}", status_code=204)
+def delete_document_acl(
+    document_id: UUID,
+    acl_entry_id: UUID,
+    current_user: User = Depends(require_admin),
+    session: Session = Depends(get_db_session),
+) -> None:
+    service = DocumentService(session)
+    service.delete_acl_entry(current_user, document_id, acl_entry_id)
 
 
 @router.get("/{document_id}/acl", response_model=list[DocumentACLRead])

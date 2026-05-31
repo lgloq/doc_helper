@@ -4,6 +4,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { DepartmentTreeSelect } from "../components/DepartmentTreeSelect";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { PageHeader } from "../components/PageHeader";
+import { SelectField } from "../components/SelectField";
 import { StatusBadge } from "../components/StatusBadge";
 import { useAppContext } from "../context/AppContext";
 import {
@@ -19,6 +20,7 @@ import { canManageDocumentLibrary } from "../lib/permissions";
 import type {
   ChunkRead,
   DepartmentRead,
+  DocumentStatus,
   DocumentACLRead,
   DocumentRead,
   DocumentVersionRead,
@@ -45,6 +47,25 @@ const defaultAclForm: AclFormState = {
   can_manage: false,
 };
 
+const DOCUMENT_STATUS_OPTIONS: Array<{ value: DocumentStatus; label: string }> = [
+  { value: "draft", label: "草稿" },
+  { value: "active", label: "启用中" },
+  { value: "archived", label: "已归档" },
+];
+
+const PRINCIPAL_TYPE_OPTIONS: Array<{ value: PrincipalType; label: string }> = [
+  { value: "public", label: "公开" },
+  { value: "team", label: "部门" },
+  { value: "role", label: "角色" },
+  { value: "user", label: "指定用户" },
+];
+
+const ROLE_OPTIONS: Array<{ value: RoleName; label: string }> = [
+  { value: "viewer", label: "普通员工" },
+  { value: "manager", label: "组长" },
+  { value: "admin", label: "管理员" },
+];
+
 export function DocumentsPage() {
   const { token, user } = useAppContext();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -63,9 +84,12 @@ export function DocumentsPage() {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [versionUploading, setVersionUploading] = useState(false);
+  const [deletingAclEntryId, setDeletingAclEntryId] = useState<string | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<DocumentStatus>("active");
   const [aclForm, setAclForm] = useState<AclFormState>(defaultAclForm);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [latestIngestion, setLatestIngestion] = useState<IngestionResultRead | null>(null);
+  const aclEditorRef = useRef<HTMLFormElement | null>(null);
   const canManageLibrary = canManageDocumentLibrary(user);
   const showPermissionsPanel = canManageLibrary;
   const selectedAclDepartment = aclForm.department_id
@@ -268,6 +292,85 @@ export function DocumentsPage() {
     setSelectedVersionId(versionId);
     updateDocumentLocation(selectedDocument.id, versionId, null);
   }
+
+  function findMatchingAclEntry(form: AclFormState): DocumentACLRead | undefined {
+    return aclEntries.find((entry) => {
+      if (entry.principal_type !== form.principal_type) {
+        return false;
+      }
+      if (form.principal_type === "public") {
+        return true;
+      }
+      if (form.principal_type === "team") {
+        return Boolean(form.department_id && entry.department_id === form.department_id);
+      }
+      if (form.principal_type === "role") {
+        return entry.role_name === form.role_name;
+      }
+      if (form.principal_type === "user") {
+        return Boolean(form.user_id && entry.user_id === form.user_id);
+      }
+      return false;
+    });
+  }
+
+  function createAclFormFromEntry(entry: DocumentACLRead): AclFormState {
+    return {
+      principal_type: entry.principal_type,
+      department_id: entry.department_id ?? "",
+      role_name: entry.role_name ?? "viewer",
+      user_id: entry.user_id ?? "",
+      can_view: entry.can_view,
+      can_manage: entry.can_manage,
+    };
+  }
+
+  function selectAclEntryForEditing(entry: DocumentACLRead) {
+    setAclForm(createAclFormFromEntry(entry));
+    setActionMessage(null);
+    window.requestAnimationFrame(() => {
+      aclEditorRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+    });
+  }
+
+  function updateAclForm(next: AclFormState) {
+    const matchingEntry = findMatchingAclEntry(next);
+    setAclForm(
+      matchingEntry
+        ? {
+            ...next,
+            can_view: matchingEntry.can_view,
+            can_manage: matchingEntry.can_manage,
+          }
+        : next,
+    );
+  }
+
+  async function handleAclDelete(entry: DocumentACLRead) {
+    if (!token || !selectedDocument) {
+      return;
+    }
+    const confirmed = window.confirm("确定撤销这条文档权限吗？");
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingAclEntryId(entry.id);
+    setActionMessage(null);
+    try {
+      await api.deleteDocumentAcl(token, selectedDocument.id, entry.id);
+      await refreshSelectedDocument(selectedDocument.id);
+      if (findMatchingAclEntry(aclForm)?.id === entry.id) {
+        setAclForm(defaultAclForm);
+      }
+      setActionMessage("文档权限已撤销。");
+    } catch (nextError) {
+      setActionMessage(nextError instanceof Error ? nextError.message : "撤销权限失败。");
+    } finally {
+      setDeletingAclEntryId(null);
+    }
+  }
+
   async function handleUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!token) {
@@ -289,7 +392,7 @@ export function DocumentsPage() {
         file,
         title: String(form.get("title") || "").trim() || undefined,
         description: String(form.get("description") || "").trim() || undefined,
-        status: String(form.get("status") || "active"),
+        status: uploadStatus,
       });
       const ingestion = await api.ingestDocument(token, response.document.id, response.version.id);
       setLatestIngestion(ingestion);
@@ -299,6 +402,7 @@ export function DocumentsPage() {
       updateDocumentLocation(response.document.id, response.version.id, null);
       await refreshSelectedDocument(response.document.id, response.version.id);
       formElement.reset();
+      setUploadStatus("active");
       setActionMessage(`已完成上传并入库：${response.document.title}`);
     } catch (nextError) {
       setUploadError(nextError instanceof Error ? nextError.message : "上传失败，请稍后重试。");
@@ -344,17 +448,23 @@ export function DocumentsPage() {
     }
 
     try {
-      await api.upsertDocumentAcl(token, selectedDocument.id, {
-        principal_type: aclForm.principal_type,
-        can_view: aclForm.can_view,
-        can_manage: aclForm.can_manage,
-        department_id: aclForm.principal_type === "team" && aclForm.department_id ? aclForm.department_id : undefined,
-        role_name: aclForm.principal_type === "role" ? aclForm.role_name : undefined,
-        user_id: aclForm.principal_type === "user" && aclForm.user_id ? aclForm.user_id : undefined,
-      });
+      const shouldRevokeAcl = !aclForm.can_view && !aclForm.can_manage;
+      const matchingAclEntry = shouldRevokeAcl ? findMatchingAclEntry(aclForm) : undefined;
+      if (matchingAclEntry) {
+        await api.deleteDocumentAcl(token, selectedDocument.id, matchingAclEntry.id);
+      } else {
+        await api.upsertDocumentAcl(token, selectedDocument.id, {
+          principal_type: aclForm.principal_type,
+          can_view: aclForm.can_view,
+          can_manage: aclForm.can_manage,
+          department_id: aclForm.principal_type === "team" && aclForm.department_id ? aclForm.department_id : undefined,
+          role_name: aclForm.principal_type === "role" ? aclForm.role_name : undefined,
+          user_id: aclForm.principal_type === "user" && aclForm.user_id ? aclForm.user_id : undefined,
+        });
+      }
       setAclForm(defaultAclForm);
       await refreshSelectedDocument(selectedDocument.id);
-      setActionMessage("文档访问控制已更新。");
+      setActionMessage(shouldRevokeAcl ? "文档权限已撤销。" : "文档访问控制已更新。");
     } catch (nextError) {
       setActionMessage(nextError instanceof Error ? nextError.message : "更新权限失败。");
     }
@@ -422,11 +532,7 @@ export function DocumentsPage() {
                 </label>
                 <label>
                   <span>状态</span>
-                  <select name="status" defaultValue="active">
-                    <option value="draft">草稿</option>
-                    <option value="active">启用中</option>
-                    <option value="archived">已归档</option>
-                  </select>
+                  <SelectField options={DOCUMENT_STATUS_OPTIONS} value={uploadStatus} onChange={setUploadStatus} />
                 </label>
                 <label>
                   <span>文件</span>
@@ -616,21 +722,38 @@ export function DocumentsPage() {
                 <div className="stack dense-stack">
                   {aclEntries.length ? (
                     aclEntries.map((entry) => (
-                      <div className="list-card" key={entry.id}>
-                        <div className="list-card-topline">
-                          <strong>{formatPrincipalType(entry.principal_type)}</strong>
-                          <span>
-                            {entry.user_email
-                              ?? (entry.role_name
-                                ? formatRoleName(entry.role_name)
-                                : entry.department_id
-                                  ? (departments.find((d) => d.id === entry.department_id)?.path ?? entry.team_name ?? "部门")
-                                  : entry.team_name ?? "全部用户")}
+                      <div
+                        className={`list-card acl-entry-card ${findMatchingAclEntry(aclForm)?.id === entry.id ? "is-selected" : ""}`}
+                        key={entry.id}
+                      >
+                        <button className="acl-entry-pick" onClick={() => selectAclEntryForEditing(entry)} type="button">
+                          <span className="acl-entry-header">
+                            <strong>{formatPrincipalType(entry.principal_type)}</strong>
+                            <span>
+                              {entry.user_email
+                                ?? (entry.role_name
+                                  ? formatRoleName(entry.role_name)
+                                  : entry.department_id
+                                    ? (departments.find((d) => d.id === entry.department_id)?.path ?? entry.team_name ?? "部门")
+                                    : entry.team_name ?? "全部用户")}
+                            </span>
                           </span>
+                        </button>
+                        <div className="acl-entry-footer">
+                          <span className="acl-entry-permissions">
+                            可查看：{formatBooleanFlag(entry.can_view)} · 可管理：{formatBooleanFlag(entry.can_manage)}
+                          </span>
+                          {selectedDocument.current_user_can_manage ? (
+                            <button
+                              className="secondary-button danger-button compact-button"
+                              disabled={deletingAclEntryId === entry.id}
+                              onClick={() => handleAclDelete(entry)}
+                              type="button"
+                            >
+                              {deletingAclEntryId === entry.id ? "撤销中..." : "撤销"}
+                            </button>
+                          ) : null}
                         </div>
-                        <p>
-                          可查看：{formatBooleanFlag(entry.can_view)} · 可管理：{formatBooleanFlag(entry.can_manage)}
-                        </p>
                       </div>
                     ))
                   ) : (
@@ -639,20 +762,19 @@ export function DocumentsPage() {
                 </div>
 
                 {selectedDocument.current_user_can_manage ? (
-                  <form className="stack" onSubmit={handleAclSubmit}>
+                  <form className="stack" onSubmit={handleAclSubmit} ref={aclEditorRef}>
                     <label>
                       <span>授权主体</span>
-                      <select
+                      <SelectField
+                        options={PRINCIPAL_TYPE_OPTIONS}
                         value={aclForm.principal_type}
-                        onChange={(event) =>
-                          setAclForm((current) => ({ ...current, principal_type: event.target.value as PrincipalType }))
+                        onChange={(value) =>
+                          updateAclForm({
+                            ...aclForm,
+                            principal_type: value,
+                          })
                         }
-                      >
-                        <option value="public">公开</option>
-                        <option value="team">部门</option>
-                        <option value="role">角色</option>
-                        <option value="user">指定用户</option>
-                      </select>
+                      />
                     </label>
                     {aclForm.principal_type === "team" ? (
                       <div className="acl-department-field">
@@ -666,23 +788,18 @@ export function DocumentsPage() {
                           emptyDescription="保存前需要选择一个部门"
                           emptyLabel="请选择部门"
                           selectedId={aclForm.department_id || null}
-                          onSelect={(id) => setAclForm((current) => ({ ...current, department_id: id ?? "" }))}
+                          onSelect={(id) => updateAclForm({ ...aclForm, department_id: id ?? "" })}
                         />
                       </div>
                     ) : null}
                     {aclForm.principal_type === "role" ? (
                       <label>
                         <span>角色</span>
-                        <select
+                        <SelectField
+                          options={ROLE_OPTIONS}
                           value={aclForm.role_name}
-                          onChange={(event) =>
-                            setAclForm((current) => ({ ...current, role_name: event.target.value as RoleName }))
-                          }
-                        >
-                          <option value="viewer">普通员工</option>
-                          <option value="manager">组长</option>
-                          <option value="admin">管理员</option>
-                        </select>
+                          onChange={(value) => updateAclForm({ ...aclForm, role_name: value })}
+                        />
                       </label>
                     ) : null}
                     {aclForm.principal_type === "user" ? (
@@ -691,7 +808,7 @@ export function DocumentsPage() {
                         <input
                           placeholder="粘贴用户 UUID"
                           value={aclForm.user_id}
-                          onChange={(event) => setAclForm((current) => ({ ...current, user_id: event.target.value }))}
+                          onChange={(event) => updateAclForm({ ...aclForm, user_id: event.target.value })}
                         />
                       </label>
                     ) : null}

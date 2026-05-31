@@ -4,16 +4,12 @@ import { useNavigate } from "react-router-dom";
 import { DepartmentTreeSelect } from "../components/DepartmentTreeSelect";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { PageHeader } from "../components/PageHeader";
+import { SelectField } from "../components/SelectField";
 import { StatusBadge } from "../components/StatusBadge";
 import { useAppContext } from "../context/AppContext";
 import { api } from "../lib/api";
 import { formatRoleName } from "../lib/display";
 import type { DepartmentRead, RoleName, UserRead } from "../types/api";
-
-interface AssignmentEditingState {
-  userId: string;
-  departmentId: string | null;
-}
 
 interface UserDraft {
   email: string;
@@ -24,15 +20,41 @@ interface UserDraft {
   is_active: boolean;
 }
 
-type UsersPageTab = "manage" | "assign" | "departments";
+interface OverviewDepartmentNode {
+  department: DepartmentRead;
+  children: OverviewDepartmentNode[];
+}
+
+interface DepartmentOverviewStats {
+  directUsers: UserRead[];
+  subtreeUsers: UserRead[];
+  activeCount: number;
+  inactiveCount: number;
+  roleCounts: Record<RoleName, number>;
+}
+
+type UsersPageTab = "manage" | "overview" | "departments";
 type DepartmentFormMode = "detail" | "create";
 type UserFormMode = "create" | "edit";
 type UserStatusFilter = "all" | "active" | "inactive";
+
+const UNASSIGNED_SELECTION = "__unassigned__";
 
 const ROLE_OPTIONS: Array<{ value: RoleName; label: string }> = [
   { value: "viewer", label: "普通员工" },
   { value: "manager", label: "组长" },
   { value: "admin", label: "管理员" },
+];
+
+const USER_STATUS_FILTER_OPTIONS: Array<{ value: UserStatusFilter; label: string }> = [
+  { value: "all", label: "全部状态" },
+  { value: "active", label: "启用" },
+  { value: "inactive", label: "停用" },
+];
+
+const USER_ACTIVE_OPTIONS: Array<{ value: "active" | "inactive"; label: string }> = [
+  { value: "active", label: "启用" },
+  { value: "inactive", label: "停用" },
 ];
 
 function createEmptyUserDraft(): UserDraft {
@@ -57,14 +79,188 @@ function createUserDraftFromUser(user: UserRead): UserDraft {
   };
 }
 
+function buildOverviewTree(departments: DepartmentRead[]): OverviewDepartmentNode[] {
+  const map = new Map<string, OverviewDepartmentNode>();
+  for (const department of departments) {
+    map.set(department.id, { department, children: [] });
+  }
+
+  const roots: OverviewDepartmentNode[] = [];
+  for (const node of map.values()) {
+    if (node.department.parent_id && map.has(node.department.parent_id)) {
+      map.get(node.department.parent_id)!.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  }
+
+  const sortNodes = (nodes: OverviewDepartmentNode[]) => {
+    nodes.sort((a, b) => a.department.name.localeCompare(b.department.name, "zh-CN"));
+    for (const node of nodes) {
+      sortNodes(node.children);
+    }
+  };
+  sortNodes(roots);
+  return roots;
+}
+
+function collectBranchIds(nodes: OverviewDepartmentNode[]): string[] {
+  const ids: string[] = [];
+  for (const node of nodes) {
+    if (node.children.length > 0) {
+      ids.push(node.department.id, ...collectBranchIds(node.children));
+    }
+  }
+  return ids;
+}
+
+function filterOverviewTree(
+  nodes: OverviewDepartmentNode[],
+  query: string,
+  statsByDepartment: Map<string, DepartmentOverviewStats>,
+): OverviewDepartmentNode[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) {
+    return nodes;
+  }
+
+  return nodes.flatMap((node) => {
+    const stats = statsByDepartment.get(node.department.id);
+    const selfMatches =
+      node.department.name.toLowerCase().includes(normalizedQuery) ||
+      node.department.path.toLowerCase().includes(normalizedQuery) ||
+      node.department.org_code.toLowerCase().includes(normalizedQuery) ||
+      node.department.org_code_path.toLowerCase().includes(normalizedQuery) ||
+      stats?.directUsers.some(
+        (item) =>
+          item.full_name.toLowerCase().includes(normalizedQuery) ||
+          item.email.toLowerCase().includes(normalizedQuery),
+      );
+    const filteredChildren = filterOverviewTree(node.children, query, statsByDepartment);
+    if (!selfMatches && filteredChildren.length === 0) {
+      return [];
+    }
+    return [{ department: node.department, children: selfMatches ? node.children : filteredChildren }];
+  });
+}
+
+function isUserInDepartmentSubtree(user: UserRead, department: DepartmentRead): boolean {
+  const userDepartmentPath = user.department?.id_path;
+  return Boolean(
+    user.department_id === department.id ||
+      userDepartmentPath === department.id_path ||
+      userDepartmentPath?.startsWith(`${department.id_path}/`),
+  );
+}
+
+function createRoleCounts(users: UserRead[]): Record<RoleName, number> {
+  return ROLE_OPTIONS.reduce(
+    (acc, option) => {
+      acc[option.value] = users.filter((item) => item.role?.name === option.value).length;
+      return acc;
+    },
+    { viewer: 0, manager: 0, admin: 0 } as Record<RoleName, number>,
+  );
+}
+
+function isDepartmentOptionalUser(user: UserRead): boolean {
+  return user.role?.name === "admin";
+}
+
+function getUserDepartmentLabel(user: UserRead): string {
+  if (user.department) {
+    return user.department.path;
+  }
+  return isDepartmentOptionalUser(user) ? "管理员免分配" : "未设置";
+}
+
+function OrgOverviewNode({
+  node,
+  expanded,
+  selectedId,
+  statsByDepartment,
+  onSelect,
+  onToggle,
+}: {
+  node: OverviewDepartmentNode;
+  expanded: Set<string>;
+  selectedId: string | null;
+  statsByDepartment: Map<string, DepartmentOverviewStats>;
+  onSelect: (id: string) => void;
+  onToggle: (id: string) => void;
+}) {
+  const hasChildren = node.children.length > 0;
+  const isExpanded = expanded.has(node.department.id);
+  const isSelected = selectedId === node.department.id;
+  const stats = statsByDepartment.get(node.department.id);
+  const directCount = stats?.directUsers.length ?? 0;
+  const subtreeCount = stats?.subtreeUsers.length ?? 0;
+  const nonZeroRoles = ROLE_OPTIONS.filter((option) => (stats?.roleCounts[option.value] ?? 0) > 0);
+
+  return (
+    <div className="org-tree-branch">
+      <div className={`org-tree-node ${isSelected ? "is-selected" : ""}`}>
+        {hasChildren ? (
+          <button
+            aria-label={isExpanded ? "收起部门" : "展开部门"}
+            className="org-tree-toggle"
+            onClick={() => onToggle(node.department.id)}
+            type="button"
+          >
+            {isExpanded ? "▾" : "▸"}
+          </button>
+        ) : (
+          <span className="org-tree-spacer" />
+        )}
+        <button className="org-tree-card" onClick={() => onSelect(node.department.id)} type="button">
+          <span className="org-tree-mainline">
+            <span className="org-tree-name">{node.department.name}</span>
+            <span className="dept-code-badge">{node.department.org_code}</span>
+          </span>
+          <span className="org-tree-path">{node.department.path}</span>
+          <span className="org-tree-counts">
+            <span>直属 {directCount}</span>
+            <span>总计 {subtreeCount}</span>
+            <span>子部门 {node.children.length}</span>
+          </span>
+          <span className="org-role-chips">
+            {nonZeroRoles.length > 0 ? (
+              nonZeroRoles.map((option) => (
+                <span key={option.value}>
+                  {option.label} {stats?.roleCounts[option.value] ?? 0}
+                </span>
+              ))
+            ) : (
+              <span>暂无成员</span>
+            )}
+          </span>
+        </button>
+      </div>
+      {hasChildren && isExpanded ? (
+        <div className="org-tree-children">
+          {node.children.map((child) => (
+            <OrgOverviewNode
+              key={child.department.id}
+              node={child}
+              expanded={expanded}
+              selectedId={selectedId}
+              statsByDepartment={statsByDepartment}
+              onSelect={onSelect}
+              onToggle={onToggle}
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function UsersPage() {
   const { token, user, refreshMe } = useAppContext();
   const navigate = useNavigate();
 
   const [users, setUsers] = useState<UserRead[]>([]);
   const [departments, setDepartments] = useState<DepartmentRead[]>([]);
-  const [assignmentEditing, setAssignmentEditing] = useState<AssignmentEditingState | null>(null);
-  const [saving, setSaving] = useState(false);
   const [departmentSaving, setDepartmentSaving] = useState(false);
   const [userSaving, setUserSaving] = useState(false);
   const [userDeleting, setUserDeleting] = useState(false);
@@ -76,6 +272,9 @@ export function UsersPage() {
   const [managedUserId, setManagedUserId] = useState<string | null>(null);
   const [userFormMode, setUserFormMode] = useState<UserFormMode>("create");
   const [userDraft, setUserDraft] = useState<UserDraft>(() => createEmptyUserDraft());
+  const [overviewSelectedId, setOverviewSelectedId] = useState<string | null>(UNASSIGNED_SELECTION);
+  const [overviewQuery, setOverviewQuery] = useState("");
+  const [overviewExpanded, setOverviewExpanded] = useState<Set<string>>(new Set());
   const [selectedManageDepartmentId, setSelectedManageDepartmentId] = useState<string | null>(null);
   const [departmentFormMode, setDepartmentFormMode] = useState<DepartmentFormMode>("detail");
   const [departmentNameDraft, setDepartmentNameDraft] = useState("");
@@ -83,36 +282,69 @@ export function UsersPage() {
   const [showCreateParentSelector, setShowCreateParentSelector] = useState(false);
 
   const isAdmin = user?.role?.name === "admin";
-  const selectedAssignmentUser = useMemo(
-    () => (assignmentEditing ? users.find((item) => item.id === assignmentEditing.userId) ?? null : null),
-    [assignmentEditing, users],
+  const activeUserCount = useMemo(() => users.filter((item) => item.is_active).length, [users]);
+  const inactiveUserCount = users.length - activeUserCount;
+  const unassignedRequiredUsers = useMemo(
+    () => users.filter((item) => !item.department_id && !isDepartmentOptionalUser(item)),
+    [users],
   );
-  const selectedAssignmentDepartment = useMemo(
-    () =>
-      assignmentEditing?.departmentId
-        ? departments.find((item) => item.id === assignmentEditing.departmentId) ?? null
-        : null,
-    [departments, assignmentEditing],
+  const departmentOptionalUsers = useMemo(
+    () => users.filter((item) => !item.department_id && isDepartmentOptionalUser(item)),
+    [users],
   );
-  const hasDepartmentChange = assignmentEditing
-    ? assignmentEditing.departmentId !== (selectedAssignmentUser?.department_id ?? null)
-    : false;
-  const assignableUsers = useMemo(() => users.filter((item) => item.is_active), [users]);
-  const filteredManagedUsers = useMemo(() => {
-    const query = userSearch.trim().toLowerCase();
-    return users.filter((item) => {
-      const matchesQuery =
-        !query ||
-        item.email.toLowerCase().includes(query) ||
-        item.full_name.toLowerCase().includes(query) ||
-        (item.department?.path ?? "").toLowerCase().includes(query);
-      const matchesStatus =
-        userStatusFilter === "all" ||
-        (userStatusFilter === "active" && item.is_active) ||
-        (userStatusFilter === "inactive" && !item.is_active);
-      return matchesQuery && matchesStatus;
-    });
-  }, [userSearch, userStatusFilter, users]);
+  const departmentById = useMemo(() => {
+    const map = new Map<string, DepartmentRead>();
+    for (const department of departments) {
+      map.set(department.id, department);
+    }
+    return map;
+  }, [departments]);
+  const overviewTree = useMemo(() => buildOverviewTree(departments), [departments]);
+  const statsByDepartment = useMemo(() => {
+    const map = new Map<string, DepartmentOverviewStats>();
+    for (const department of departments) {
+      const directUsers = users.filter((item) => item.department_id === department.id);
+      const subtreeUsers = users.filter((item) => isUserInDepartmentSubtree(item, department));
+      map.set(department.id, {
+        directUsers,
+        subtreeUsers,
+        activeCount: subtreeUsers.filter((item) => item.is_active).length,
+        inactiveCount: subtreeUsers.filter((item) => !item.is_active).length,
+        roleCounts: createRoleCounts(subtreeUsers),
+      });
+    }
+    return map;
+  }, [departments, users]);
+  const filteredOverviewTree = useMemo(
+    () => filterOverviewTree(overviewTree, overviewQuery, statsByDepartment),
+    [overviewQuery, overviewTree, statsByDepartment],
+  );
+  const allOverviewBranchIds = useMemo(() => collectBranchIds(overviewTree), [overviewTree]);
+  const visibleOverviewBranchIds = useMemo(() => collectBranchIds(filteredOverviewTree), [filteredOverviewTree]);
+  const overviewSelectedAncestorIds = useMemo(() => {
+    const ids = new Set<string>();
+    let cursor =
+      overviewSelectedId && overviewSelectedId !== UNASSIGNED_SELECTION
+        ? departmentById.get(overviewSelectedId)
+        : null;
+    while (cursor?.parent_id) {
+      ids.add(cursor.parent_id);
+      cursor = departmentById.get(cursor.parent_id);
+    }
+    return ids;
+  }, [departmentById, overviewSelectedId]);
+  const emptyDepartmentCount = useMemo(
+    () => departments.filter((department) => (statsByDepartment.get(department.id)?.subtreeUsers.length ?? 0) === 0).length,
+    [departments, statsByDepartment],
+  );
+  const largestDepartment = useMemo(() => {
+    return departments.reduce<DepartmentRead | null>((largest, department) => {
+      if (!largest) return department;
+      const currentCount = statsByDepartment.get(department.id)?.subtreeUsers.length ?? 0;
+      const largestCount = statsByDepartment.get(largest.id)?.subtreeUsers.length ?? 0;
+      return currentCount > largestCount ? department : largest;
+    }, null);
+  }, [departments, statsByDepartment]);
   const selectedManagedUser = useMemo(
     () => (managedUserId ? users.find((item) => item.id === managedUserId) ?? null : null),
     [managedUserId, users],
@@ -122,6 +354,20 @@ export function UsersPage() {
     [departments, userDraft.department_id],
   );
   const isManagingCurrentUser = selectedManagedUser?.id === user?.id;
+  const selectedOverviewDepartment =
+    overviewSelectedId && overviewSelectedId !== UNASSIGNED_SELECTION ? departmentById.get(overviewSelectedId) ?? null : null;
+  const selectedOverviewStats = selectedOverviewDepartment
+    ? statsByDepartment.get(selectedOverviewDepartment.id) ?? null
+    : null;
+  const overviewDetailUsers =
+    overviewSelectedId === UNASSIGNED_SELECTION ? unassignedRequiredUsers : selectedOverviewStats?.directUsers ?? [];
+  const overviewDistributionUsers =
+    overviewSelectedId === UNASSIGNED_SELECTION ? unassignedRequiredUsers : selectedOverviewStats?.subtreeUsers ?? users;
+  const overviewRoleCounts = useMemo(() => createRoleCounts(overviewDistributionUsers), [overviewDistributionUsers]);
+  const overviewMaxRoleCount = Math.max(1, ...ROLE_OPTIONS.map((option) => overviewRoleCounts[option.value]));
+  const selectedOverviewChildren = selectedOverviewDepartment
+    ? departments.filter((department) => department.parent_id === selectedOverviewDepartment.id)
+    : [];
   const selectedManageDepartment = useMemo(
     () =>
       selectedManageDepartmentId
@@ -153,12 +399,51 @@ export function UsersPage() {
         !department.id_path.startsWith(`${selectedManageDepartment.id_path}/`),
     );
   }, [departments, selectedManageDepartment]);
+  const filteredManagedUsers = useMemo(() => {
+    const query = userSearch.trim().toLowerCase();
+    return users.filter((item) => {
+      const matchesQuery =
+        !query ||
+        item.email.toLowerCase().includes(query) ||
+        item.full_name.toLowerCase().includes(query) ||
+        (item.department?.path ?? "").toLowerCase().includes(query);
+      const matchesStatus =
+        userStatusFilter === "all" ||
+        (userStatusFilter === "active" && item.is_active) ||
+        (userStatusFilter === "inactive" && !item.is_active);
+      return matchesQuery && matchesStatus;
+    });
+  }, [userSearch, userStatusFilter, users]);
 
   useEffect(() => {
     if (!isAdmin) {
       navigate("/documents", { replace: true });
     }
   }, [isAdmin, navigate]);
+
+  useEffect(() => {
+    setOverviewExpanded((current) => {
+      const next = new Set(current);
+      for (const root of overviewTree) {
+        next.add(root.department.id);
+      }
+      for (const id of overviewSelectedAncestorIds) {
+        next.add(id);
+      }
+      if (overviewQuery.trim()) {
+        for (const id of visibleOverviewBranchIds) {
+          next.add(id);
+        }
+      }
+      return next;
+    });
+  }, [overviewQuery, overviewSelectedAncestorIds, overviewTree, visibleOverviewBranchIds]);
+
+  useEffect(() => {
+    if (overviewSelectedId === UNASSIGNED_SELECTION) return;
+    if (overviewSelectedId && departmentById.has(overviewSelectedId)) return;
+    setOverviewSelectedId(unassignedRequiredUsers.length > 0 ? UNASSIGNED_SELECTION : departments[0]?.id ?? null);
+  }, [departmentById, departments, overviewSelectedId, unassignedRequiredUsers.length]);
 
   const loadData = useCallback(async () => {
     if (!token) return null;
@@ -199,12 +484,6 @@ export function UsersPage() {
     setManagedUserId(targetUser.id);
     setUserDraft(createUserDraftFromUser(targetUser));
     setActiveTab("manage");
-    clearFeedback();
-  };
-
-  const startAssignmentEditing = (targetUser: UserRead) => {
-    setAssignmentEditing({ userId: targetUser.id, departmentId: targetUser.department_id });
-    setActiveTab("assign");
     clearFeedback();
   };
 
@@ -288,48 +567,39 @@ export function UsersPage() {
     }
   };
 
-  const handleUserDeactivate = async (targetUser: UserRead | null = selectedManagedUser) => {
+  const handleUserActiveToggle = async (targetUser: UserRead | null = selectedManagedUser) => {
     if (!token || !targetUser) return;
-    if (targetUser.id === user?.id) {
+    if (targetUser.is_active && targetUser.id === user?.id) {
       setError("不能停用当前登录用户");
       return;
     }
-    const confirmed = window.confirm(`确定停用用户「${targetUser.full_name}」吗？停用后该用户不能再登录。`);
+    const confirmed = window.confirm(
+      targetUser.is_active
+        ? `确定停用用户「${targetUser.full_name}」吗？停用后该用户不能再登录。`
+        : `确定启用用户「${targetUser.full_name}」吗？启用后该用户可以重新登录。`,
+    );
     if (!confirmed) return;
 
     setUserDeleting(true);
     clearFeedback();
     try {
-      await api.deleteUser(token, targetUser.id);
-      const loaded = await loadData();
-      const deactivated = loaded?.usersData.find((item) => item.id === targetUser.id);
-      if (deactivated) {
-        setUserFormMode("edit");
-        setManagedUserId(deactivated.id);
-        setUserDraft(createUserDraftFromUser(deactivated));
+      if (targetUser.is_active) {
+        await api.deleteUser(token, targetUser.id);
+      } else {
+        await api.updateUser(token, targetUser.id, { is_active: true });
       }
-      setStatusMessage("用户已停用。");
+      const loaded = await loadData();
+      const updated = loaded?.usersData.find((item) => item.id === targetUser.id);
+      if (updated) {
+        setUserFormMode("edit");
+        setManagedUserId(updated.id);
+        setUserDraft(createUserDraftFromUser(updated));
+      }
+      setStatusMessage(targetUser.is_active ? "用户已停用。" : "用户已启用。");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "用户停用失败");
+      setError(err instanceof Error ? err.message : "用户状态更新失败");
     } finally {
       setUserDeleting(false);
-    }
-  };
-
-  const handleAssignmentSave = async () => {
-    if (!token || !assignmentEditing) return;
-    setSaving(true);
-    clearFeedback();
-    try {
-      await api.updateUserDepartment(token, assignmentEditing.userId, assignmentEditing.departmentId);
-      setAssignmentEditing(null);
-      await loadData();
-      await refreshMe();
-      setStatusMessage("部门已更新。");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "保存失败");
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -366,6 +636,29 @@ export function UsersPage() {
       await refreshMe();
     } catch (err) {
       setError(err instanceof Error ? err.message : "部门保存失败");
+    } finally {
+      setDepartmentSaving(false);
+    }
+  };
+
+  const handleDepartmentMove = async (departmentId: string, parentId: string | null) => {
+    if (!token) return;
+    const department = departments.find((item) => item.id === departmentId);
+    if (!department || department.parent_id === parentId) return;
+
+    setDepartmentSaving(true);
+    clearFeedback();
+    try {
+      const updated = await api.updateDepartment(token, departmentId, { parent_id: parentId });
+      await loadData();
+      setSelectedManageDepartmentId(updated.id);
+      setDepartmentFormMode("detail");
+      setDepartmentNameDraft(updated.name);
+      setDepartmentParentDraft(updated.parent_id);
+      setStatusMessage(`部门已移动到 ${updated.parent_id ? updated.path : "顶层"}。`);
+      await refreshMe();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "部门移动失败");
     } finally {
       setDepartmentSaving(false);
     }
@@ -412,11 +705,11 @@ export function UsersPage() {
           用户管理
         </button>
         <button
-          className={`segmented-button ${activeTab === "assign" ? "is-active" : ""}`}
-          onClick={() => setActiveTab("assign")}
+          className={`segmented-button ${activeTab === "overview" ? "is-active" : ""}`}
+          onClick={() => setActiveTab("overview")}
           type="button"
         >
-          用户分配
+          组织概览
         </button>
         <button
           className={`segmented-button ${activeTab === "departments" ? "is-active" : ""}`}
@@ -435,7 +728,9 @@ export function UsersPage() {
                 <h3>用户列表</h3>
                 <p>查询用户，编辑账号、角色、部门和启停状态。</p>
               </div>
-              <StatusBadge tone="info">{filteredManagedUsers.length} / {users.length} 位</StatusBadge>
+              <StatusBadge tone="info">
+                {filteredManagedUsers.length} / {users.length} 位
+              </StatusBadge>
             </div>
 
             <div className="users-toolbar">
@@ -445,15 +740,12 @@ export function UsersPage() {
                 placeholder="搜索姓名、邮箱或部门路径"
                 value={userSearch}
               />
-              <select
+              <SelectField
                 aria-label="用户状态筛选"
-                onChange={(event) => setUserStatusFilter(event.target.value as UserStatusFilter)}
+                options={USER_STATUS_FILTER_OPTIONS}
+                onChange={setUserStatusFilter}
                 value={userStatusFilter}
-              >
-                <option value="all">全部状态</option>
-                <option value="active">启用</option>
-                <option value="inactive">停用</option>
-              </select>
+              />
               <button className="primary-button" onClick={startCreateUser} type="button">
                 新增用户
               </button>
@@ -476,37 +768,33 @@ export function UsersPage() {
                       <div className="users-card-name">
                         <strong>{item.full_name}</strong>
                         {isCurrentUser ? <StatusBadge tone="info">当前用户</StatusBadge> : null}
-                        {!item.is_active ? <StatusBadge tone="danger">已停用</StatusBadge> : null}
+                        <StatusBadge tone={item.is_active ? "success" : "danger"}>
+                          {item.is_active ? "启用" : "停用"}
+                        </StatusBadge>
                       </div>
                       <p className="muted">{item.email}</p>
-                      <div className="user-card-meta">
-                        <span>
-                          <span className="muted">角色</span>
-                          <strong>{formatRoleName(item.role?.name)}</strong>
-                        </span>
+                      <div className="user-card-meta user-management-meta">
                         <span>
                           <span className="muted">部门</span>
-                          <strong>{item.department?.path ?? "未设置"}</strong>
+                          <strong>{getUserDepartmentLabel(item)}</strong>
                         </span>
                       </div>
                     </div>
                     <div className="users-card-side user-management-card-actions">
-                      <StatusBadge tone={item.is_active ? "success" : "neutral"}>
-                        {item.is_active ? "启用" : "停用"}
+                      <StatusBadge tone={item.role?.name === "admin" ? "warning" : "neutral"}>
+                        {formatRoleName(item.role?.name)}
                       </StatusBadge>
-                      <button className="secondary-button compact-button" onClick={() => startManageUser(item)} type="button">
-                        编辑
-                      </button>
-                      {item.is_active ? (
+                      {isSelected ? (
+                        <StatusBadge tone="info">编辑中</StatusBadge>
+                      ) : (
                         <button
-                          className="secondary-button danger-button compact-button"
-                          disabled={isCurrentUser || userDeleting}
-                          onClick={() => handleUserDeactivate(item)}
+                          className="secondary-button users-card-edit-button user-management-edit-button"
+                          onClick={() => startManageUser(item)}
                           type="button"
                         >
-                          停用
+                          编辑用户
                         </button>
-                      ) : null}
+                      )}
                     </div>
                   </div>
                 );
@@ -545,28 +833,21 @@ export function UsersPage() {
               </label>
               <label>
                 <span>角色</span>
-                <select
+                <SelectField
                   disabled={userFormMode === "edit" && isManagingCurrentUser}
-                  onChange={(event) => updateUserDraft("role_name", event.target.value as RoleName)}
+                  options={ROLE_OPTIONS}
+                  onChange={(value) => updateUserDraft("role_name", value)}
                   value={userDraft.role_name}
-                >
-                  {ROLE_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
+                />
               </label>
               <label>
                 <span>状态</span>
-                <select
+                <SelectField
                   disabled={userFormMode === "edit" && isManagingCurrentUser}
-                  onChange={(event) => updateUserDraft("is_active", event.target.value === "active")}
+                  options={USER_ACTIVE_OPTIONS}
+                  onChange={(value) => updateUserDraft("is_active", value === "active")}
                   value={userDraft.is_active ? "active" : "inactive"}
-                >
-                  <option value="active">启用</option>
-                  <option value="inactive">停用</option>
-                </select>
+                />
               </label>
               <label className="user-form-full">
                 <span>{userFormMode === "create" ? "初始密码" : "重置密码"}</span>
@@ -583,7 +864,7 @@ export function UsersPage() {
             <div className="users-selected-summary">
               <div>
                 <span>当前选择部门</span>
-                <strong>{selectedUserFormDepartment?.path ?? "未设置"}</strong>
+                <strong>{selectedUserFormDepartment?.path ?? (userDraft.role_name === "admin" ? "管理员免分配" : "未设置")}</strong>
               </div>
               <div>
                 <span>角色权限</span>
@@ -594,8 +875,10 @@ export function UsersPage() {
             <DepartmentTreeSelect
               className="user-form-department-tree"
               departments={departments}
-              emptyDescription="该用户不继承部门 ACL"
-              emptyLabel="未设置部门"
+              emptyDescription={
+                userDraft.role_name === "admin" ? "管理员可不加入部门，仍保留全局管理权限" : "该用户不继承部门 ACL"
+              }
+              emptyLabel={userDraft.role_name === "admin" ? "管理员免分配" : "未设置部门"}
               selectedId={userDraft.department_id}
               onSelect={(id) => updateUserDraft("department_id", id)}
             />
@@ -604,14 +887,14 @@ export function UsersPage() {
               <button className="primary-button" disabled={userSaving} onClick={handleUserSubmit} type="button">
                 {userSaving ? "保存中..." : userFormMode === "create" ? "创建用户" : "保存修改"}
               </button>
-              {userFormMode === "edit" && selectedManagedUser?.is_active ? (
+              {userFormMode === "edit" && selectedManagedUser ? (
                 <button
-                  className="secondary-button danger-button"
-                  disabled={userDeleting || isManagingCurrentUser}
-                  onClick={() => handleUserDeactivate()}
+                  className={`secondary-button ${selectedManagedUser.is_active ? "danger-button" : ""}`}
+                  disabled={userDeleting || (selectedManagedUser.is_active && isManagingCurrentUser)}
+                  onClick={() => handleUserActiveToggle()}
                   type="button"
                 >
-                  {userDeleting ? "停用中..." : "停用用户"}
+                  {userDeleting ? "更新中..." : selectedManagedUser.is_active ? "停用用户" : "启用用户"}
                 </button>
               ) : null}
               <button className="secondary-button" disabled={userSaving || userDeleting} onClick={startCreateUser} type="button">
@@ -622,112 +905,223 @@ export function UsersPage() {
         </div>
       ) : null}
 
-      {activeTab === "assign" ? (
-        <div className="page-grid users-layout">
-          <section className="panel stack users-list-panel">
-            <div className="panel-header">
-              <div className="panel-heading">
-                <h3>用户部门分配</h3>
-                <p>点击「设置部门」进入快速分配模式。</p>
+      {activeTab === "overview" ? (
+        <div className="org-overview-page">
+          <div className="org-overview-stats">
+            <div className="org-stat-card">
+              <span>总用户</span>
+              <strong>{users.length}</strong>
+              <small>覆盖全部账号</small>
+            </div>
+            <div className="org-stat-card">
+              <span>启用用户</span>
+              <strong>{activeUserCount}</strong>
+              <small>{inactiveUserCount} 位停用</small>
+            </div>
+            <div className="org-stat-card org-stat-warning">
+              <span>未设置部门</span>
+              <strong>{unassignedRequiredUsers.length}</strong>
+              <small>
+                {departmentOptionalUsers.length > 0
+                  ? `管理员免分配 ${departmentOptionalUsers.length} 位`
+                  : "普通/组长需补齐"}
+              </small>
+            </div>
+            <div className="org-stat-card">
+              <span>部门数量</span>
+              <strong>{departments.length}</strong>
+              <small>{emptyDepartmentCount} 个空部门</small>
+            </div>
+          </div>
+
+          <div className="page-grid org-overview-layout">
+            <section className="panel stack org-tree-panel">
+              <div className="panel-header">
+                <div className="panel-heading">
+                  <h3>组织树</h3>
+                  <p>
+                    最大部门：{largestDepartment?.path ?? "暂无"}，
+                    {largestDepartment ? statsByDepartment.get(largestDepartment.id)?.subtreeUsers.length ?? 0 : 0} 位用户
+                  </p>
+                </div>
+                <StatusBadge tone="info">{departments.length} 个部门</StatusBadge>
               </div>
-              <StatusBadge tone="info">{assignableUsers.length} 位启用用户</StatusBadge>
-            </div>
-            <div className="users-list-scroll">
-              {assignableUsers.map((item) => {
-                const isCurrentUser = item.id === user?.id;
-                const isEditing = assignmentEditing?.userId === item.id;
-
-                return (
-                  <div key={item.id} className={`list-card users-list-card ${isEditing ? "is-selected" : ""}`}>
-                    <div className="users-card-main">
-                      <div className="users-card-name">
-                        <strong>{item.full_name}</strong>
-                        {isCurrentUser ? <StatusBadge tone="info">当前用户</StatusBadge> : null}
-                      </div>
-                      <p className="muted">{item.email}</p>
-                      <div className="metadata-subline">
-                        <span className="muted">部门</span>
-                        <span className="users-dept-path">{item.department?.path ?? "未设置"}</span>
-                      </div>
-                    </div>
-                    <div className="users-card-side">
-                      <StatusBadge tone={item.role?.name === "admin" ? "warning" : "neutral"}>
-                        {formatRoleName(item.role?.name)}
-                      </StatusBadge>
-                      {!isEditing ? (
-                        <button
-                          className="secondary-button users-card-edit-button"
-                          onClick={() => startAssignmentEditing(item)}
-                          type="button"
-                        >
-                          设置部门
-                        </button>
-                      ) : (
-                        <StatusBadge tone="info">编辑中</StatusBadge>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-
-          <section className="panel stack users-dept-panel">
-            {assignmentEditing && selectedAssignmentUser ? (
-              <>
-                <div className="panel-header">
-                  <div className="panel-heading">
-                    <h3>编辑部门 - {selectedAssignmentUser.full_name}</h3>
-                    <p>选择目标部门后保存，部门权限会按层级继承。</p>
-                  </div>
-                  <StatusBadge tone={assignmentEditing.departmentId ? "success" : "warning"}>
-                    {assignmentEditing.departmentId ? "已选择" : "未设置"}
-                  </StatusBadge>
-                </div>
-
-                <div className="users-selected-summary">
-                  <div>
-                    <span>当前部门</span>
-                    <strong>{selectedAssignmentUser.department?.path ?? "未设置"}</strong>
-                  </div>
-                  <div>
-                    <span>目标部门</span>
-                    <strong>{selectedAssignmentDepartment?.path ?? "未设置"}</strong>
-                  </div>
-                </div>
-
-                <DepartmentTreeSelect
-                  departments={departments}
-                  selectedId={assignmentEditing.departmentId}
-                  onSelect={(id) => setAssignmentEditing({ ...assignmentEditing, departmentId: id })}
+              <div className="org-overview-toolbar">
+                <input
+                  aria-label="搜索组织"
+                  onChange={(event) => setOverviewQuery(event.target.value)}
+                  placeholder="搜索部门、编号、路径或用户"
+                  value={overviewQuery}
                 />
-
-                <div className="inline-actions users-edit-actions">
+                <div className="dept-tree-toolbar-actions">
                   <button
-                    className="primary-button"
-                    onClick={handleAssignmentSave}
-                    disabled={saving || !hasDepartmentChange}
+                    className="secondary-button compact-button"
+                    onClick={() => setOverviewExpanded(new Set(allOverviewBranchIds))}
                     type="button"
                   >
-                    {saving ? "保存中..." : "保存"}
+                    展开全部
                   </button>
                   <button
-                    className="secondary-button"
-                    onClick={() => setAssignmentEditing(null)}
-                    disabled={saving}
+                    className="secondary-button compact-button"
+                    onClick={() => setOverviewExpanded(new Set())}
                     type="button"
                   >
-                    取消
+                    收起全部
                   </button>
                 </div>
-              </>
-            ) : (
-              <div className="users-assignment-empty">
-                <strong>选择一个用户</strong>
-                <p className="muted">点击左侧用户卡片里的「设置部门」，然后在这里选择目标部门。</p>
               </div>
-            )}
-          </section>
+              <div className="org-tree-scroll">
+                <button
+                  className={`org-unassigned-card ${overviewSelectedId === UNASSIGNED_SELECTION ? "is-selected" : ""}`}
+                  onClick={() => setOverviewSelectedId(UNASSIGNED_SELECTION)}
+                  type="button"
+                >
+                  <span>
+                    <strong>未设置部门</strong>
+                    <small>普通/组长用户需设置部门，管理员可免分配</small>
+                  </span>
+                  <StatusBadge tone={unassignedRequiredUsers.length > 0 ? "warning" : "success"}>
+                    {unassignedRequiredUsers.length} 人
+                  </StatusBadge>
+                </button>
+                {filteredOverviewTree.length === 0 ? (
+                  <div className="empty-state compact-empty-state">没有匹配的部门</div>
+                ) : null}
+                {filteredOverviewTree.map((node) => (
+                  <OrgOverviewNode
+                    key={node.department.id}
+                    node={node}
+                    expanded={overviewExpanded}
+                    selectedId={overviewSelectedId}
+                    statsByDepartment={statsByDepartment}
+                    onSelect={setOverviewSelectedId}
+                    onToggle={(id) =>
+                      setOverviewExpanded((current) => {
+                        const next = new Set(current);
+                        if (next.has(id)) {
+                          next.delete(id);
+                        } else {
+                          next.add(id);
+                        }
+                        return next;
+                      })
+                    }
+                  />
+                ))}
+              </div>
+            </section>
+
+            <section className="panel stack org-detail-panel">
+              <div className="panel-header">
+                <div className="panel-heading">
+                  <h3 className="department-title-with-code">
+                    <span>{selectedOverviewDepartment?.name ?? "未设置部门"}</span>
+                    {selectedOverviewDepartment ? (
+                      <span className="dept-code-badge">{selectedOverviewDepartment.org_code}</span>
+                    ) : null}
+                  </h3>
+                  <p>{selectedOverviewDepartment?.path ?? "普通/组长用户需要部门归属；管理员可以不设置部门。"}</p>
+                </div>
+                <StatusBadge tone={overviewSelectedId === UNASSIGNED_SELECTION ? "warning" : "success"}>
+                  {overviewDistributionUsers.length} 人
+                </StatusBadge>
+              </div>
+
+              <div className="org-detail-grid">
+                <div>
+                  <span>{overviewSelectedId === UNASSIGNED_SELECTION ? "需分配用户" : "直属用户"}</span>
+                  <strong>{overviewDetailUsers.length}</strong>
+                </div>
+                <div>
+                  <span>{overviewSelectedId === UNASSIGNED_SELECTION ? "待处理" : "子树用户"}</span>
+                  <strong>{overviewDistributionUsers.length}</strong>
+                </div>
+                <div>
+                  <span>启用</span>
+                  <strong>{overviewDistributionUsers.filter((item) => item.is_active).length}</strong>
+                </div>
+                <div>
+                  <span>停用</span>
+                  <strong>{overviewDistributionUsers.filter((item) => !item.is_active).length}</strong>
+                </div>
+              </div>
+
+              <div className="org-role-distribution">
+                <div className="subsection-header">
+                  <div className="panel-heading">
+                    <h4>角色分布</h4>
+                    <p>按当前节点子树统计。</p>
+                  </div>
+                </div>
+                {ROLE_OPTIONS.map((option) => (
+                  <div key={option.value} className="org-role-row">
+                    <span>{option.label}</span>
+                    <div className="org-role-track">
+                      <span style={{ width: `${(overviewRoleCounts[option.value] / overviewMaxRoleCount) * 100}%` }} />
+                    </div>
+                    <strong>{overviewRoleCounts[option.value]}</strong>
+                  </div>
+                ))}
+              </div>
+
+              {selectedOverviewDepartment ? (
+                <div className="org-child-summary">
+                  <div className="subsection-header">
+                    <div className="panel-heading">
+                      <h4>直属子部门</h4>
+                      <p>{selectedOverviewChildren.length} 个下级部门。</p>
+                    </div>
+                  </div>
+                  <div className="org-child-list">
+                    {selectedOverviewChildren.length === 0 ? <span className="muted">暂无直属子部门</span> : null}
+                    {selectedOverviewChildren.map((department) => (
+                      <button key={department.id} onClick={() => setOverviewSelectedId(department.id)} type="button">
+                        <span>
+                          <strong>{department.name}</strong>
+                          <small>{department.path}</small>
+                        </span>
+                        <StatusBadge tone="neutral">
+                          {statsByDepartment.get(department.id)?.subtreeUsers.length ?? 0} 人
+                        </StatusBadge>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="org-user-list-section">
+                <div className="subsection-header">
+                  <div className="panel-heading">
+                    <h4>{overviewSelectedId === UNASSIGNED_SELECTION ? "未分配用户" : "直属用户"}</h4>
+                    <p>点击用户可进入编辑。</p>
+                  </div>
+                </div>
+                <div className="org-user-list">
+                  {overviewDetailUsers.length === 0 ? (
+                    <div className="empty-state compact-empty-state">
+                      {overviewSelectedId === UNASSIGNED_SELECTION ? "所有需分配用户都已设置部门" : "该部门暂无直属用户"}
+                    </div>
+                  ) : null}
+                  {overviewDetailUsers.map((item) => (
+                    <button key={item.id} onClick={() => startManageUser(item)} type="button">
+                      <span>
+                        <strong>{item.full_name}</strong>
+                        <small>{item.email}</small>
+                      </span>
+                      <span className="org-user-badges">
+                        <StatusBadge tone={item.role?.name === "admin" ? "warning" : "neutral"}>
+                          {formatRoleName(item.role?.name)}
+                        </StatusBadge>
+                        <StatusBadge tone={item.is_active ? "success" : "danger"}>
+                          {item.is_active ? "启用" : "停用"}
+                        </StatusBadge>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </section>
+          </div>
         </div>
       ) : null}
 
@@ -746,9 +1140,11 @@ export function UsersPage() {
             <DepartmentTreeSelect
               className="department-management-tree"
               departments={departments}
+              enableDragMove
               emptyDescription="选择部门后查看详情"
               emptyLabel="未选择部门"
               selectedId={selectedManageDepartmentId}
+              onMove={handleDepartmentMove}
               onSelect={selectManageDepartment}
             />
           </section>
