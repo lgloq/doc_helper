@@ -4,8 +4,10 @@
 
 ## 界面预览
 <p align="center">
-  <img src="docs/assets/chat_citation.png" alt="引用问答与证据溯源" width="48%" />
-  <img src="docs/assets/department_user.png" alt="部门与用户管理" width="48%" />
+  <img src="docs/assets/chat_citation.png" alt="引用问答与证据溯源" width="82%" />
+</p>
+<p align="center">
+  <img src="docs/assets/department_user.png" alt="部门与用户管理" width="82%" />
 </p>
 <p align="center">
   <sub>引用问答与证据溯源 / 多级部门与用户管理</sub>
