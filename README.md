@@ -1,6 +1,6 @@
 # 权限感知的 RAG 企业文档知识助手
 
-面向企业知识库的权限感知 RAG 应用，支持多角色访问控制、引用溯源、版本对比、多步骤处理与结构化结果生成。
+面向企业知识库的权限感知 RAG 应用，支持多角色与多级部门访问控制、引用溯源、版本对比、多步骤处理与结构化结果生成。
 
 ## 界面预览
 <p align="center">
@@ -24,7 +24,7 @@
 ## 能力范围
 当前版本包括以下能力：
 - 权限感知检索：无权限文档不会进入候选集
-- 候选重排：混合召回后的安全候选会进入轻量 rerank 阶段，再选出最终 `top_k`
+- 候选重排：混合召回后的安全候选会进入 rerank 阶段，默认使用本地 heuristic，也可配置 LLM 或 Qwen rerank provider
 - 引用式问答：回答与引用来源分开返回
 - 多步骤处理与轨迹回看：前端可展开查看每一步处理过程和最终结果
 - 轻量上下文复用：保留最近多轮消息，并复用上一轮目标文档、工具、结果类型与 observation 摘要
@@ -33,13 +33,13 @@
 - 评测与链路追踪：支持效果验证与 trace 记录
 
 ## 主要功能
-- 提供 `viewer / manager / admin` 三类演示账号，并额外保留 `viewer2@local.test` 用于团队 ACL 演示
+- 提供 `viewer / manager / admin` 三类演示账号，并额外保留 `viewer2@local.test` 用于部门权限演示
 - 当前已接入 `TXT / Markdown / HTML / PDF / DOCX / CSV / PNG / JPG / JPEG` 的上传与解析链路
 - 当前对 Markdown、HTML、DOCX、CSV 和文本型 PDF 提供基础表格提取，表格行会转成可检索文本
 - 当前可选图片 OCR 入库；扫描版 PDF 仅在页级文本不足时走 OCR fallback，规整图片表格只做 best-effort 提取
 - 保留文档版本和基础历史记录
-- 文档级 ACL 当前覆盖 `public / user / role / team`
-- 基于 PostgreSQL FTS + pgvector 的权限感知混合检索，外加轻量候选重排
+- 文档级 ACL 当前覆盖 `public / user / role / department`，并兼容旧版 `team_name` 数据
+- 基于 PostgreSQL FTS + pgvector 的权限感知混合检索，外加可配置候选重排
 - 引用式问答返回 answer / citation / confidence，并在证据不足时显式兜底
 - 基于上下文的多步骤处理目前只在已注册工具集合内做有限步决策
 - 当前派生工作流包括：
@@ -57,7 +57,7 @@
 
 ## 设计重点
 - 权限过滤在检索阶段生效，候选集、citation 和 prompt 都只基于可访问文档
-- 检索链路采用 `ACL -> hybrid retrieval -> heuristic rerank -> grounded answer`
+- 检索链路采用 `ACL -> hybrid retrieval -> rerank provider -> grounded answer`
 - 回答与 citation 分开返回，前端可以单独展示来源片段和定位信息
 - 系统会先判断问题类型，再结合当前上下文和已有结果决定下一步处理
 - 多步骤处理按 `observe -> decide -> act` 方式执行，最多执行 3 步，未知工具不会被执行
@@ -81,7 +81,7 @@ flowchart LR
     EXEC --> REG["Tool Registry"]
     EXEC --> SEARCH["权限感知检索"]
     SEARCH --> HYBRID["FTS + pgvector 混合召回"]
-    HYBRID --> RERANK["Heuristic Rerank"]
+    HYBRID --> RERANK["Rerank Provider"]
     EXEC --> DIFF["版本对比服务"]
     EXEC --> TASKS["待办 / 周报 / FAQ 服务"]
     RERANK --> ANSWER["问答 / 结果生成"]
@@ -131,10 +131,10 @@ docker-compose.yml
 - 本地运行与集成：Docker Compose
 
 ## 已实现模块
-- 认证与 mock 用户初始化
-- 角色、文档 ACL、权限判断
+- 认证、mock 用户初始化与用户管理
+- 角色、多级部门、文档 ACL、权限判断与访问诊断
 - 文档上传、解析、切块、向量化、索引
-- 权限感知混合检索与候选重排
+- 权限感知混合检索与可配置候选重排
 - citation grounding 问答与会话历史
 - 基于上下文的多步骤处理、处理轨迹与轻量上下文复用
 - 待办提取 / 周报草稿 / FAQ 草稿
@@ -145,20 +145,20 @@ docker-compose.yml
 
 ## 当前未实现
 - 企业级 SSO / LDAP / OAuth 接入
-- 多租户与复杂组织架构
-- 生产级异步任务队列
+- 多租户隔离与跨组织策略管理
+- 异步任务的生产级监控、重试策略和运维治理
 - DOCX / HTML / Markdown 内嵌图片 OCR 暂未完整支持
 - 低清扫描、旋转拍照、复杂合并单元格、复杂跨页表格和图片型复杂版面的稳定结构化
 - 复杂 Excel、多 sheet XLSX 和合并单元格表格解析
 - Slack / 飞书 / 邮件等外部协作集成
-- 更大规模的 rerank / judge benchmark 与自动化报告沉淀
+- 更大规模的 rerank / judge benchmark、自动化报告和标注闭环
 - 完整的生产部署与安全加固
 
 ## 运行与验证
 - 支持通过 `docker compose up --build` 拉起 PostgreSQL、Redis、FastAPI 和 React 本地环境
 - 提供 `seed_demo_data.py` 用于初始化演示知识库、版本和权限数据
 - 仓库包含 chat、search、ACL、version、结构化结果、eval、observability 等后端测试用例
-- 已覆盖 `admin / manager / viewer` 三类角色的演示与回归验证，并补充 `viewer2` 作为团队权限演示账号
+- 已覆盖 `admin / manager / viewer` 三类角色的演示与回归验证，并补充 `viewer2` 作为部门权限演示账号
 - 当前后端测试已覆盖多工具串联、版本对比后停止、未知工具拒绝、`max_steps` 生效、无权限追问拒答与证据不足阻断结构化生成等场景
 - 检索结果 debug 现已记录 `pre_rerank_count / post_rerank_count / rerank_strategy`，便于回看召回后重排阶段
 
@@ -263,12 +263,12 @@ backend/data/eval_outputs/
 | answer_faithfulness_avg | 0.60 | 0.933 |
 | permission_isolation_pass_rate | 0.667 | 1.0 |
 
-在 `demo_permission_eval` 中，`viewer` 账号的 `team_name` 与评测用例预期不一致，导致权限隔离用例失败。修正默认用户同步逻辑并补充回归测试后，这组 3 条用例已恢复通过。
+在 `demo_permission_eval` 中，演示用户的部门归属与评测用例预期不一致，曾导致权限隔离用例失败。修正默认用户同步逻辑并补充回归测试后，这组 3 条用例已恢复通过。
 
 ### 扩展权限矩阵集（`demo_access_matrix_eval`，20 cases）
 
 这组扩展评测目前包含 20 条演示样例，其中：
-- 11 条 `answer_expected`：检查公开文档、团队 ACL 文档、角色 ACL 文档和管理员专属文档的回答质量与证据支撑
+- 11 条 `answer_expected`：检查公开文档、部门 ACL 文档、角色 ACL 文档和管理员专属文档的回答质量与证据支撑
 - 9 条 `refusal_expected`：检查越权检索、越权引用和越权回答是否被正确拒绝
 
 当前演示基线已经在一轮完整运行中达到 `20 / 20`：
@@ -345,7 +345,9 @@ npm run dev
 - `manager@local.test / manager123`
 - `admin@local.test / admin123`
 
-其中 `viewer2@local.test` 为手动演示账号，角色仍为 `viewer`，但所属团队为 `platform`，可用于单独演示 team ACL 文档访问场景。
+其中 `viewer2@local.test` 为手动演示账号，角色仍为 `viewer`，可用于单独演示部门 ACL 文档访问场景。
+
+这些账号仅用于本地演示和回归验证；公开或生产部署时应关闭 `SEED_MOCK_DATA`，并替换 `JWT_SECRET_KEY` 等默认开发配置。
 
 ## 演示流程
 1. 执行 `docker compose up --build`
@@ -357,7 +359,7 @@ npm run dev
 7. 从当前 session 生成待办、周报草稿和 FAQ 草稿
 8. 在 `Versions` 页面查看文档 diff 和摘要
 9. 在 `Insights` 页面运行 demo eval 并查看 trace
-10. 如需演示团队权限，可手动输入 `viewer2@local.test / viewer123` 并验证团队文档访问效果
+10. 如需演示部门权限，可手动输入 `viewer2@local.test / viewer123` 并验证部门文档访问效果
 
 ## 关键接口
 ### 认证
@@ -373,8 +375,19 @@ npm run dev
 - `GET /api/v1/documents/{id}/versions/{version_id}`
 - `POST /api/v1/documents/{id}/acl`
 - `GET /api/v1/documents/{id}/acl`
+- `GET /api/v1/documents/{id}/access-debug`
 - `POST /api/v1/documents/{id}/ingest`
 - `GET /api/v1/documents/{id}/chunks`
+
+### 用户与部门
+- `GET /api/v1/users`
+- `POST /api/v1/users`
+- `PATCH /api/v1/users/{id}`
+- `DELETE /api/v1/users/{id}`
+- `GET /api/v1/departments`
+- `POST /api/v1/departments`
+- `PATCH /api/v1/departments/{id}`
+- `DELETE /api/v1/departments/{id}`
 
 ### 检索与问答
 - `POST /api/v1/search`

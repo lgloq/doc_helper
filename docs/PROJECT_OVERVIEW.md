@@ -19,26 +19,26 @@
 - 支持 Markdown、HTML、DOCX、CSV 和文本型 PDF 表格提取
 - 支持图片文件 OCR 入库、扫描版 PDF 页级 OCR fallback，以及规整图片表格的 best-effort 提取
 - 本地文件存储与文档版本保留
-- 文档级 ACL：支持 `public / user / role / team`
-- 基于 PostgreSQL FTS + pgvector 的权限感知混合检索与候选重排
+- 文档级 ACL：支持 `public / user / role / department`，并兼容旧版 `team_name` 数据
+- 基于 PostgreSQL FTS + pgvector 的权限感知混合检索与可配置候选重排
 - 带 citation、confidence 和拒答策略的 grounded chat
 - 会话与消息历史持久化
 - 多步骤处理与轻量上下文复用
 - 结构化结果：待办提取、周报草稿、FAQ 草稿
 - 文档版本 diff：原始 diff、摘要、影响提示
 - Eval 服务与权限隔离测试
-- Trace 存储与简单 observability API
+- Trace 存储、简单 observability API 和基础 Langfuse 接入
 - 用于展示完整流程的 React 前端演示页面
 
 ### 暂未实现
 - 企业级 SSO / LDAP / OAuth
-- 多租户组织树与复杂权限继承
-- 生产级异步任务队列与 worker 编排
+- 多租户隔离与跨组织策略管理
+- 异步任务的生产级监控、重试策略和运维治理
 - DOCX / HTML / Markdown 内嵌图片 OCR 暂未完整支持
 - 低清扫描、旋转拍照、复杂合并单元格、复杂跨页表格和图片型复杂版面的稳定结构化
 - 复杂 Excel、多 sheet XLSX 和合并单元格表格解析
 - Slack / 飞书等外部协作集成
-- cross-encoder rerank 与更高级 faithfulness judge
+- 更大规模的 rerank / judge benchmark 与自动化报告沉淀
 
 ## 主要解决的问题
 - 用户只能检索和引用自己有权限访问的文档
@@ -49,7 +49,7 @@
 
 ## 实现重点
 - 权限过滤发生在检索阶段，候选集、citation 和 prompt 都只来自可访问文档
-- 混合召回后的安全候选会进入轻量 rerank，再选出最终进入回答阶段的 chunk
+- 混合召回后的安全候选会进入 rerank provider，再选出最终进入回答阶段的 chunk
 - citation 作为结构化字段返回，前端可以单独展示来源片段和定位信息
 - 问答作为入口，会话结果还可继续生成待办、周报草稿和 FAQ 草稿
 - 当前版本既支持当前文档问答，也支持版本 diff 与变更摘要
@@ -62,7 +62,7 @@
 
 ## 核心设计
 ### 权限感知检索
-- 用户登录后先解析角色、team 和 ACL
+- 用户登录后先解析角色、部门层级和 ACL
 - 后端先计算当前用户的可访问文档集合
 - lexical retrieval 和 vector retrieval 只在这个集合内运行
 - 无权限 chunk 不会进入候选集、citation 和 prompt
@@ -101,8 +101,8 @@
 - 需要查看文档版本变更和差异摘要的日常维护场景
 
 ## 后续可扩展方向
-- 将当前轻量 rerank 升级为 cross-encoder 或模型重排序
-- 接入 Langfuse / OpenTelemetry 做更完整的观测
-- 将本地文件存储替换为 S3 / MinIO
-- 增加 FAQ 审核流和结果回写
-- 增加更完整的离线评测数据集和标注工具
+- 扩大 rerank / judge benchmark 覆盖面，形成稳定的自动化报告和标注闭环
+- 完善 Langfuse 埋点覆盖、错误归因和 OpenTelemetry 导出
+- 将本地文件存储替换为 S3 / MinIO，并补齐对象生命周期和访问审计
+- 增加 FAQ 审核流、发布状态和结果回写
+- 增强异步摄取任务的重试、失败恢复、队列监控和运维告警

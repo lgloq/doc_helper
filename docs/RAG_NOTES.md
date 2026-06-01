@@ -32,9 +32,9 @@
    - 问题类型只做粗分类，后续是继续检索、版本对比还是生成结构化结果，会结合上下文继续决定
 
 5. 权限感知检索
-   - 先根据当前用户的 `user / role / team / ACL` 算出可访问文档集合
+   - 先根据当前用户的 `user / role / department / ACL` 算出可访问文档集合；旧版 `team_name` 仅作为兼容字段参与回退判断
    - lexical retrieval 和 vector retrieval 都只在可访问范围内执行
-   - 两路结果先做 score fusion，再进入轻量 rerank，得到最终候选 chunk
+   - 两路结果先做 score fusion，再进入可配置 rerank provider，得到最终候选 chunk
 
 6. 引用式问答 / 结构化结果生成
    - 回答基于检索结果生成
@@ -89,11 +89,13 @@
 ## 为什么召回后还要 rerank
 混合召回解决的是“把相关 chunk 先找出来”，但不一定能保证最终排序最适合回答问题。
 
-当前版本会在可访问候选集上增加一层轻量 rerank，主要考虑：
+当前版本会在可访问候选集上增加一层 rerank provider。默认 heuristic 模式主要考虑：
 - query 和 chunk 的 token overlap
 - 标题和 section 的命中情况
 - lexical 支撑是否存在
 - 指定文档场景下的目标文档加分
+
+如果配置外部能力，也可以切换到 LLM JSON rerank 或 Qwen rerank provider；外部 provider 失败时会回退到本地 heuristic，避免检索链路整体不可用。
 
 这样做的目标不是替代 hybrid retrieval，而是减少“召回到了但排序不够准”的情况。
 
@@ -185,7 +187,7 @@ citation 会记录：
 1. 结构感知的文档解析与切块，不直接做简单固定长度截断。
 2. 每个 chunk 都带定位元数据，方便 citation 和回溯。
 3. PostgreSQL FTS + pgvector 的 hybrid retrieval，不依赖单一路径检索。
-4. 在安全候选集上增加轻量 rerank，提升最终进入回答阶段的排序稳定性。
+4. 在安全候选集上增加可配置 rerank provider，提升最终进入回答阶段的排序稳定性。
 5. 权限过滤前置到检索链路中，避免无权限内容进入候选集和 prompt。
 6. 增加多步骤处理与轻量上下文复用，便于前端展示、链路追踪和回归验证。
 7. 回答结果带 citation，并配套 eval 和 trace，方便分析链路质量。
