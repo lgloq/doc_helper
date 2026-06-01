@@ -120,6 +120,7 @@ class DocumentACLRead(ORMModel):
     principal_type: PrincipalType
     user_id: UUID | None = None
     user_email: str | None = None
+    user_full_name: str | None = None
     role_id: UUID | None = None
     role_name: RoleName | None = None
     team_name: str | None = None
@@ -160,6 +161,58 @@ class AsyncIngestResponse(BaseModel):
     job_id: str
     ingest_status: IngestStatus
     message: str
+
+
+class DocumentAccessCheckRead(BaseModel):
+    source: str
+    matched: bool
+    message: str
+
+
+class DocumentAccessMatchedRuleRead(BaseModel):
+    source: str
+    acl_id: UUID | None = None
+    principal_type: PrincipalType | None = None
+    department_id: UUID | None = None
+    department_path: str | None = None
+    match_type: str | None = None
+    can_view: bool = False
+    can_manage: bool = False
+
+
+class DocumentAccessDebugUserRead(BaseModel):
+    id: UUID
+    email: str
+    full_name: str
+    role_name: str | None = None
+    department_id: UUID | None = None
+    department_path: str | None = None
+
+
+class DocumentAccessDebugDocumentRead(BaseModel):
+    id: UUID
+    title: str
+    owner_user_id: UUID
+
+
+class DocumentAccessDepartmentContextRead(BaseModel):
+    user_department_id: UUID | None = None
+    user_department_path: str | None = None
+    ancestor_department_ids: list[UUID] = Field(default_factory=list)
+    ancestor_department_paths: list[str] = Field(default_factory=list)
+
+
+class DocumentAccessDebugRead(BaseModel):
+    document_id: UUID
+    user_id: UUID
+    can_view: bool
+    can_manage: bool
+    reason: str
+    matched_rule: DocumentAccessMatchedRuleRead | None = None
+    evaluated_user: DocumentAccessDebugUserRead
+    evaluated_document: DocumentAccessDebugDocumentRead
+    department_context: DocumentAccessDepartmentContextRead
+    checks: list[DocumentAccessCheckRead] = Field(default_factory=list)
 
 
 class ChunkRead(ORMModel):

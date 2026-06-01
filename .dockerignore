@@ -1,0 +1,42 @@
+# Git and local metadata
+.git/
+.gitignore
+.github/
+.claude/
+.codegraph/
+.mcp.json
+
+# Python caches and virtual environments
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+.npm-cache/
+
+# Runtime data, local backups, and private notes
+backend/data/
+backups/
+private/
+*.log
+
+# Local environment files
+.env
+backend/.env
+backend/.env.*
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.vs/
+.idea/
+.tmp-chrome-profile/
+.tmp-edge-profile/

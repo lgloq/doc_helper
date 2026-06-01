@@ -487,6 +487,15 @@ export function UsersPage() {
     clearFeedback();
   };
 
+  const copyUserId = async (targetUser: UserRead) => {
+    try {
+      await navigator.clipboard.writeText(targetUser.id);
+      setStatusMessage("用户 ID 已复制。");
+    } catch {
+      setError("复制用户 ID 失败，请手动复制。");
+    }
+  };
+
   const selectManageDepartment = (departmentId: string | null) => {
     setSelectedManageDepartmentId(departmentId);
     setDepartmentFormMode("detail");
@@ -772,7 +781,12 @@ export function UsersPage() {
                           {item.is_active ? "启用" : "停用"}
                         </StatusBadge>
                       </div>
-                      <p className="muted">{item.email}</p>
+                      <div className="users-card-email-row">
+                        <p className="muted">{item.email}</p>
+                        <button className="user-id-copy-button" onClick={() => copyUserId(item)} type="button">
+                          复制ID
+                        </button>
+                      </div>
                       <div className="user-card-meta user-management-meta">
                         <span>
                           <span className="muted">部门</span>
@@ -808,9 +822,21 @@ export function UsersPage() {
                 <h3>{userFormMode === "create" ? "新增用户" : `编辑用户 - ${selectedManagedUser?.full_name ?? ""}`}</h3>
                 <p>{userFormMode === "create" ? "创建后即可登录系统。" : "密码留空时不会修改原密码。"}</p>
               </div>
-              <StatusBadge tone={userFormMode === "create" ? "info" : userDraft.is_active ? "success" : "warning"}>
-                {userFormMode === "create" ? "创建" : userDraft.is_active ? "启用" : "停用"}
-              </StatusBadge>
+              <div className="user-form-header-actions">
+                {userFormMode === "edit" && selectedManagedUser ? (
+                  <button
+                    className="user-id-chip"
+                    onClick={() => copyUserId(selectedManagedUser)}
+                    title={selectedManagedUser.id}
+                    type="button"
+                  >
+                    复制ID
+                  </button>
+                ) : null}
+                <StatusBadge tone={userFormMode === "create" ? "info" : userDraft.is_active ? "success" : "warning"}>
+                  {userFormMode === "create" ? "创建" : userDraft.is_active ? "启用" : "停用"}
+                </StatusBadge>
+              </div>
             </div>
 
             <div className="user-form-grid">

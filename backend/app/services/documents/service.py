@@ -167,6 +167,7 @@ class DocumentService:
     def _serialize_acl_entry(entry: DocumentACL) -> DocumentACLRead:
         role_name = entry.role.name if entry.role else None
         user_email = entry.user.email if entry.user else None
+        user_full_name = entry.user.full_name if entry.user else None
         return DocumentACLRead.model_validate(
             {
                 "id": entry.id,
@@ -174,6 +175,7 @@ class DocumentService:
                 "principal_type": entry.principal_type,
                 "user_id": entry.user_id,
                 "user_email": user_email,
+                "user_full_name": user_full_name,
                 "role_id": entry.role_id,
                 "role_name": role_name,
                 "team_name": entry.team_name,

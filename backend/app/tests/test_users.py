@@ -432,6 +432,10 @@ class TestUsersAPI:
         assert inactive_resp.status_code == 200
         assert {user["email"] for user in inactive_resp.json()} == {"beta@test.com"}
 
+        limited_resp = client.get("/api/v1/users?limit=2", headers={"Authorization": f"Bearer {token}"})
+        assert limited_resp.status_code == 200
+        assert len(limited_resp.json()) == 2
+
     def test_admin_delete_user_deactivates(self, client: TestClient, db_session: Session) -> None:
         admin_role = Role(name=RoleName.ADMIN, description="Admin")
         viewer_role = Role(name=RoleName.VIEWER, description="Viewer")

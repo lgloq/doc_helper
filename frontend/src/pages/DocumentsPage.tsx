@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
+import { AccessDebugPanel } from "../components/AccessDebugPanel";
 import { DepartmentTreeSelect } from "../components/DepartmentTreeSelect";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { PageHeader } from "../components/PageHeader";
@@ -27,6 +28,7 @@ import type {
   IngestionResultRead,
   PrincipalType,
   RoleName,
+  UserRead,
 } from "../types/api";
 
 interface AclFormState {
@@ -66,6 +68,16 @@ const ROLE_OPTIONS: Array<{ value: RoleName; label: string }> = [
   { value: "admin", label: "管理员" },
 ];
 
+const ACL_USER_RESULT_LIMIT = 40;
+const ACL_USER_SEARCH_DEBOUNCE_MS = 220;
+const ACL_GROUP_ORDER: PrincipalType[] = ["team", "user", "role", "public"];
+const ACL_GROUP_LABELS: Record<PrincipalType, string> = {
+  team: "部门",
+  user: "指定用户",
+  role: "角色",
+  public: "公开",
+};
+
 export function DocumentsPage() {
   const { token, user } = useAppContext();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -89,13 +101,22 @@ export function DocumentsPage() {
   const [aclForm, setAclForm] = useState<AclFormState>(defaultAclForm);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [latestIngestion, setLatestIngestion] = useState<IngestionResultRead | null>(null);
+  const [showDebugPanel, setShowDebugPanel] = useState(false);
+  const [aclUsers, setAclUsers] = useState<UserRead[]>([]);
+  const [aclUsersLoading, setAclUsersLoading] = useState(false);
+  const [aclUserSearch, setAclUserSearch] = useState("");
+  const [collapsedAclGroups, setCollapsedAclGroups] = useState<Set<PrincipalType>>(new Set());
   const aclEditorRef = useRef<HTMLFormElement | null>(null);
   const canManageLibrary = canManageDocumentLibrary(user);
   const showPermissionsPanel = canManageLibrary;
   const selectedAclDepartment = aclForm.department_id
     ? departments.find((department) => department.id === aclForm.department_id) ?? null
     : null;
-  const canSubmitAcl = aclForm.principal_type !== "team" || Boolean(aclForm.department_id);
+  const selectedAclUser = aclForm.user_id ? aclUsers.find((item) => item.id === aclForm.user_id) ?? null : null;
+  const matchingAclEntryId = findMatchingAclEntry(aclForm)?.id;
+  const canSubmitAcl =
+    (aclForm.principal_type !== "team" || Boolean(aclForm.department_id)) &&
+    (aclForm.principal_type !== "user" || Boolean(aclForm.user_id.trim()));
   const chunkRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const requestedDocumentId = searchParams.get("documentId");
   const requestedVersionId = searchParams.get("versionId");
@@ -127,6 +148,51 @@ export function DocumentsPage() {
       .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "加载文档列表失败。"))
       .finally(() => setLoading(false));
   }, [requestedDocumentId, token]);
+
+  useEffect(() => {
+    setCollapsedAclGroups(new Set());
+    setAclUserSearch("");
+  }, [selectedDocumentId]);
+
+  useEffect(() => {
+    if (!token || !canManageLibrary) {
+      setAclUsers([]);
+      return;
+    }
+
+    let isMounted = true;
+    const timer = window.setTimeout(() => {
+      setAclUsersLoading(true);
+      api
+        .listUsers(token, { q: aclUserSearch, limit: ACL_USER_RESULT_LIMIT })
+        .then((items) => {
+          if (isMounted) {
+            setAclUsers((current) => {
+              const selectedUser = aclForm.user_id ? current.find((item) => item.id === aclForm.user_id) : undefined;
+              if (!selectedUser || items.some((item) => item.id === selectedUser.id)) {
+                return items;
+              }
+              return [selectedUser, ...items].slice(0, ACL_USER_RESULT_LIMIT);
+            });
+          }
+        })
+        .catch((nextError) => {
+          if (isMounted) {
+            setActionMessage(nextError instanceof Error ? nextError.message : "加载用户列表失败。");
+          }
+        })
+        .finally(() => {
+          if (isMounted) {
+            setAclUsersLoading(false);
+          }
+        });
+    }, ACL_USER_SEARCH_DEBOUNCE_MS);
+
+    return () => {
+      isMounted = false;
+      window.clearTimeout(timer);
+    };
+  }, [aclForm.user_id, aclUserSearch, canManageLibrary, token]);
 
   useEffect(() => {
     if (!token || !selectedDocumentId) {
@@ -314,6 +380,34 @@ export function DocumentsPage() {
     });
   }
 
+  function getAclEntrySubjectLabel(entry: DocumentACLRead): string {
+    if (entry.user_full_name) {
+      return `${entry.user_full_name} (${entry.user_email ?? "邮箱未知"})`;
+    }
+    if (entry.user_email) {
+      return entry.user_email;
+    }
+    if (entry.role_name) {
+      return formatRoleName(entry.role_name);
+    }
+    if (entry.department_id) {
+      return departments.find((department) => department.id === entry.department_id)?.path ?? entry.team_name ?? "部门";
+    }
+    return entry.team_name ?? "全部用户";
+  }
+
+  function toggleAclGroup(group: PrincipalType) {
+    setCollapsedAclGroups((current) => {
+      const next = new Set(current);
+      if (next.has(group)) {
+        next.delete(group);
+      } else {
+        next.add(group);
+      }
+      return next;
+    });
+  }
+
   function createAclFormFromEntry(entry: DocumentACLRead): AclFormState {
     return {
       principal_type: entry.principal_type,
@@ -362,6 +456,7 @@ export function DocumentsPage() {
       await refreshSelectedDocument(selectedDocument.id);
       if (findMatchingAclEntry(aclForm)?.id === entry.id) {
         setAclForm(defaultAclForm);
+        setAclUserSearch("");
       }
       setActionMessage("文档权限已撤销。");
     } catch (nextError) {
@@ -463,6 +558,7 @@ export function DocumentsPage() {
         });
       }
       setAclForm(defaultAclForm);
+      setAclUserSearch("");
       await refreshSelectedDocument(selectedDocument.id);
       setActionMessage(shouldRevokeAcl ? "文档权限已撤销。" : "文档访问控制已更新。");
     } catch (nextError) {
@@ -717,47 +813,73 @@ export function DocumentsPage() {
                   <p>展示当前文档的访问控制配置，管理员可在这里补充或调整 ACL。</p>
                 </div>
                 <StatusBadge tone="info">文档访问控制</StatusBadge>
+                <button
+                  className="secondary-button compact-button"
+                  onClick={() => setShowDebugPanel(true)}
+                  type="button"
+                >
+                  诊断访问
+                </button>
               </div>
               <>
-                <div className="stack dense-stack">
+                <div className="acl-group-list">
                   {aclEntries.length ? (
-                    aclEntries.map((entry) => (
-                      <div
-                        className={`list-card acl-entry-card ${findMatchingAclEntry(aclForm)?.id === entry.id ? "is-selected" : ""}`}
-                        key={entry.id}
-                      >
-                        <button className="acl-entry-pick" onClick={() => selectAclEntryForEditing(entry)} type="button">
-                          <span className="acl-entry-header">
-                            <strong>{formatPrincipalType(entry.principal_type)}</strong>
+                    ACL_GROUP_ORDER.map((group) => {
+                      const groupEntries = aclEntries.filter((entry) => entry.principal_type === group);
+                      if (!groupEntries.length) {
+                        return null;
+                      }
+                      const isCollapsed = collapsedAclGroups.has(group);
+                      return (
+                        <section className="acl-group" key={group}>
+                          <button className="acl-group-header" onClick={() => toggleAclGroup(group)} type="button">
                             <span>
-                              {entry.user_email
-                                ?? (entry.role_name
-                                  ? formatRoleName(entry.role_name)
-                                  : entry.department_id
-                                    ? (departments.find((d) => d.id === entry.department_id)?.path ?? entry.team_name ?? "部门")
-                                    : entry.team_name ?? "全部用户")}
+                              <strong>{ACL_GROUP_LABELS[group]}</strong>
+                              <small>{groupEntries.length} 条</small>
                             </span>
-                          </span>
-                        </button>
-                        <div className="acl-entry-footer">
-                          <span className="acl-entry-permissions">
-                            可查看：{formatBooleanFlag(entry.can_view)} · 可管理：{formatBooleanFlag(entry.can_manage)}
-                          </span>
-                          {selectedDocument.current_user_can_manage ? (
-                            <button
-                              className="secondary-button danger-button compact-button"
-                              disabled={deletingAclEntryId === entry.id}
-                              onClick={() => handleAclDelete(entry)}
-                              type="button"
-                            >
-                              {deletingAclEntryId === entry.id ? "撤销中..." : "撤销"}
-                            </button>
+                            <span aria-hidden="true" className={`acl-group-chevron ${isCollapsed ? "is-collapsed" : ""}`} />
+                          </button>
+                          {!isCollapsed ? (
+                            <div className="acl-entry-list">
+                              {groupEntries.map((entry) => (
+                                <div
+                                  className={`acl-entry-row ${matchingAclEntryId === entry.id ? "is-selected" : ""}`}
+                                  key={entry.id}
+                                >
+                                  <button
+                                    className="acl-entry-pick"
+                                    onClick={() => selectAclEntryForEditing(entry)}
+                                    type="button"
+                                  >
+                                    <span className="acl-entry-subject" title={getAclEntrySubjectLabel(entry)}>
+                                      {getAclEntrySubjectLabel(entry)}
+                                    </span>
+                                    <span
+                                      className="acl-entry-permissions"
+                                      title={`可查看：${formatBooleanFlag(entry.can_view)}；可管理：${formatBooleanFlag(entry.can_manage)}`}
+                                    >
+                                      查看 {formatBooleanFlag(entry.can_view)} · 管理 {formatBooleanFlag(entry.can_manage)}
+                                    </span>
+                                  </button>
+                                  {selectedDocument.current_user_can_manage ? (
+                                    <button
+                                      className="secondary-button danger-button acl-entry-revoke-button"
+                                      disabled={deletingAclEntryId === entry.id}
+                                      onClick={() => handleAclDelete(entry)}
+                                      type="button"
+                                    >
+                                      {deletingAclEntryId === entry.id ? "撤销中..." : "撤销"}
+                                    </button>
+                                  ) : null}
+                                </div>
+                              ))}
+                            </div>
                           ) : null}
-                        </div>
-                      </div>
-                    ))
+                        </section>
+                      );
+                    })
                   ) : (
-                    <p className="muted">暂未配置显式 ACL。文档所有者和管理员仍然保留访问权限。</p>
+                    <p className="muted">暂无显式 ACL。</p>
                   )}
                 </div>
 
@@ -803,14 +925,63 @@ export function DocumentsPage() {
                       </label>
                     ) : null}
                     {aclForm.principal_type === "user" ? (
-                      <label>
-                        <span>用户 ID</span>
-                        <input
-                          placeholder="粘贴用户 UUID"
-                          value={aclForm.user_id}
-                          onChange={(event) => updateAclForm({ ...aclForm, user_id: event.target.value })}
-                        />
-                      </label>
+                      <div className="acl-user-field">
+                        <div className="acl-user-summary">
+                          <span>指定用户</span>
+                          <strong>
+                            {selectedAclUser
+                              ? `${selectedAclUser.full_name} (${selectedAclUser.email})`
+                              : aclForm.user_id
+                                ? "已填写用户 ID"
+                                : "请选择用户"}
+                          </strong>
+                        </div>
+
+                        <label>
+                          <span>搜索用户</span>
+                          <input
+                            placeholder="搜索姓名、邮箱或部门路径"
+                            value={aclUserSearch}
+                            onChange={(event) => setAclUserSearch(event.target.value)}
+                          />
+                        </label>
+
+                        <div className="acl-user-picker" role="listbox" aria-label="用户授权选择">
+                          {aclUsersLoading ? <div className="empty-state compact-empty-state">搜索中...</div> : null}
+                          {!aclUsersLoading && aclUsers.map((item) => {
+                            const isSelected = item.id === aclForm.user_id;
+                            return (
+                              <button
+                                aria-selected={isSelected}
+                                className={`acl-user-option ${isSelected ? "is-selected" : ""}`}
+                                key={item.id}
+                                onClick={() => updateAclForm({ ...aclForm, user_id: item.id })}
+                                role="option"
+                                type="button"
+                              >
+                                <span className="acl-user-option-main">
+                                  <strong>{item.full_name}</strong>
+                                  <span>{item.role?.name ? formatRoleName(item.role.name) : "未分配角色"}</span>
+                                </span>
+                                <span className="acl-user-option-email">{item.email}</span>
+                                <span className="acl-user-option-path">{item.department?.path ?? "未设置部门"}</span>
+                              </button>
+                            );
+                          })}
+                          {!aclUsersLoading && aclUsers.length === 0 ? (
+                            <div className="empty-state compact-empty-state">没有匹配的用户</div>
+                          ) : null}
+                        </div>
+
+                        <label>
+                          <span>用户 ID</span>
+                          <input
+                            placeholder="粘贴用户 UUID"
+                            value={aclForm.user_id}
+                            onChange={(event) => updateAclForm({ ...aclForm, user_id: event.target.value.trim() })}
+                          />
+                        </label>
+                      </div>
                     ) : null}
                     <label className="inline-checkbox">
                       <input
@@ -876,11 +1047,16 @@ export function DocumentsPage() {
           </section>
         </div>
       ) : null}
+
+      {showDebugPanel && selectedDocument && token && (
+        <AccessDebugPanel
+          token={token}
+          documentId={selectedDocument.id}
+          documentTitle={selectedDocument.title}
+          initialUsers={aclUsers}
+          onClose={() => setShowDebugPanel(false)}
+        />
+      )}
     </div>
   );
 }
-
-
-
-
-

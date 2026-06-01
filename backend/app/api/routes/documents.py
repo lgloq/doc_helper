@@ -12,6 +12,7 @@ from app.models.user import User
 from app.schemas.document import (
     AsyncIngestResponse,
     ChunkRead,
+    DocumentAccessDebugRead,
     DocumentACLCreate,
     DocumentACLRead,
     DocumentCreate,
@@ -29,6 +30,7 @@ from app.services.diff.service import DocumentDiffService
 from app.services.documents.service import DocumentService
 from app.services.ingestion.async_service import AsyncIngestionService
 from app.services.ingestion.service import DocumentIngestionService
+from app.services.permissions.service import PermissionFilterBuilder
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -196,3 +198,14 @@ def list_document_acls(
 ) -> list[DocumentACLRead]:
     service = DocumentService(session)
     return service.list_acl_entries(current_user, document_id)
+
+
+@router.get("/{document_id}/access-debug", response_model=DocumentAccessDebugRead)
+def debug_document_access(
+    document_id: UUID,
+    user_id: UUID = Query(...),
+    _admin: User = Depends(require_admin),
+    session: Session = Depends(get_db_session),
+) -> DocumentAccessDebugRead:
+    builder = PermissionFilterBuilder()
+    return builder.get_document_access_debug(session, user_id, document_id)

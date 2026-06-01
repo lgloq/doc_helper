@@ -21,8 +21,10 @@ class UserService:
         self.session = session
         self.user_repository = UserRepository(session)
 
-    def list_users(self, query: str | None = None, is_active: bool | None = None) -> list[UserRead]:
-        users = self.user_repository.list_all(query=query, is_active=is_active)
+    def list_users(
+        self, query: str | None = None, is_active: bool | None = None, limit: int | None = None
+    ) -> list[UserRead]:
+        users = self.user_repository.list_all(query=query, is_active=is_active, limit=limit)
         return [UserRead.model_validate(u) for u in users]
 
     def create_user(self, data: UserCreate) -> UserRead:

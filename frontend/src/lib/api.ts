@@ -5,6 +5,7 @@ import type {
   ChunkRead,
   DepartmentRead,
   DocumentACLRead,
+  DocumentAccessDebugRead,
   DocumentDiffRead,
   DocumentDiffSummaryRead,
   DocumentRead,
@@ -162,6 +163,12 @@ export const api = {
       token,
     });
   },
+  debugDocumentAccess(token: string, documentId: string, userId: string) {
+    return request<DocumentAccessDebugRead>(
+      `/api/v1/documents/${documentId}/access-debug?user_id=${encodeURIComponent(userId)}`,
+      { token },
+    );
+  },
   listDepartments(token: string) {
     return request<DepartmentRead[]>("/api/v1/departments", { token });
   },
@@ -185,13 +192,16 @@ export const api = {
       token,
     });
   },
-  listUsers(token: string, filters?: { q?: string; is_active?: boolean | null }) {
+  listUsers(token: string, filters?: { q?: string; is_active?: boolean | null; limit?: number | null }) {
     const params = new URLSearchParams();
     if (filters?.q?.trim()) {
       params.set("q", filters.q.trim());
     }
     if (filters?.is_active !== undefined && filters.is_active !== null) {
       params.set("is_active", String(filters.is_active));
+    }
+    if (filters?.limit !== undefined && filters.limit !== null) {
+      params.set("limit", String(filters.limit));
     }
     const query = params.toString();
     return request<UserRead[]>(`/api/v1/users${query ? `?${query}` : ""}`, { token });

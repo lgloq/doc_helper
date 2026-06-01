@@ -20,9 +20,10 @@ def list_users(
     session: Session = Depends(get_db_session),
     q: str | None = Query(default=None),
     is_active: bool | None = Query(default=None),
+    limit: int | None = Query(default=None, ge=1, le=100),
 ) -> list[UserRead]:
     service = UserService(session)
-    return service.list_users(query=q, is_active=is_active)
+    return service.list_users(query=q, is_active=is_active, limit=limit)
 
 
 @router.post("", response_model=UserRead)

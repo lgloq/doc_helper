@@ -28,8 +28,6 @@ class Settings(BaseSettings):
         default_factory=lambda: [
             "http://localhost:18073",
             "http://127.0.0.1:18073",
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
         ]
     )
     jwt_secret_key: str = "dev-enterprise-knowledge-assistant-secret-key-2026"

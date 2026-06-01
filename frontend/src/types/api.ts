@@ -97,6 +97,7 @@ export interface DocumentACLRead {
   principal_type: PrincipalType;
   user_id: string | null;
   user_email: string | null;
+  user_full_name: string | null;
   role_id: string | null;
   role_name: RoleName | null;
   team_name: string | null;
@@ -408,6 +409,58 @@ export interface EvalResultRowRead {
 
 export interface EvalRunDetailRead extends EvalRunRead {
   results: EvalResultRowRead[];
+}
+
+export interface DocumentAccessCheckRead {
+  source: string;
+  matched: boolean;
+  message: string;
+}
+
+export interface DocumentAccessMatchedRuleRead {
+  source: string;
+  acl_id: string | null;
+  principal_type: PrincipalType | null;
+  department_id: string | null;
+  department_path: string | null;
+  match_type: string | null;
+  can_view: boolean;
+  can_manage: boolean;
+}
+
+export interface DocumentAccessDebugUserRead {
+  id: string;
+  email: string;
+  full_name: string;
+  role_name: string | null;
+  department_id: string | null;
+  department_path: string | null;
+}
+
+export interface DocumentAccessDebugDocumentRead {
+  id: string;
+  title: string;
+  owner_user_id: string;
+}
+
+export interface DocumentAccessDepartmentContextRead {
+  user_department_id: string | null;
+  user_department_path: string | null;
+  ancestor_department_ids: string[];
+  ancestor_department_paths: string[];
+}
+
+export interface DocumentAccessDebugRead {
+  document_id: string;
+  user_id: string;
+  can_view: boolean;
+  can_manage: boolean;
+  reason: string;
+  matched_rule: DocumentAccessMatchedRuleRead | null;
+  evaluated_user: DocumentAccessDebugUserRead;
+  evaluated_document: DocumentAccessDebugDocumentRead;
+  department_context: DocumentAccessDepartmentContextRead;
+  checks: DocumentAccessCheckRead[];
 }
 
 export interface TraceLogRead {
