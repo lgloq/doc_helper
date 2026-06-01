@@ -4,10 +4,11 @@
 
 ## 界面预览
 <p align="center">
-  <img src="docs/assets/chat_citation.png" alt="引用问答预览" width="82%" />
+  <img src="docs/assets/chat_citation.png" alt="引用问答与证据溯源" width="48%" />
+  <img src="docs/assets/department_user.png" alt="部门与用户管理" width="48%" />
 </p>
 <p align="center">
-  <sub>主流程示意：权限感知检索、引用问答与会话沉淀</sub>
+  <sub>引用问答与证据溯源 / 多级部门与用户管理</sub>
 </p>
 
 ## 项目概述
@@ -31,14 +32,17 @@
 - 版本对比：支持原始 diff、差异摘要和影响提示
 - 结构化结果生成：支持待办、周报草稿、FAQ 草稿生成
 - 评测与链路追踪：支持效果验证与 trace 记录
+- 用户与部门管理：支持管理员维护用户、分配角色、调整启停状态，并通过树状视图管理多级部门
 
 ## 主要功能
 - 提供 `viewer / manager / admin` 三类演示账号，并额外保留 `viewer2@local.test` 用于部门权限演示
+- 支持管理员在前端维护用户信息、角色、启停状态和所属部门
 - 当前已接入 `TXT / Markdown / HTML / PDF / DOCX / CSV / PNG / JPG / JPEG` 的上传与解析链路
 - 当前对 Markdown、HTML、DOCX、CSV 和文本型 PDF 提供基础表格提取，表格行会转成可检索文本
 - 当前可选图片 OCR 入库；扫描版 PDF 仅在页级文本不足时走 OCR fallback，规整图片表格只做 best-effort 提取
 - 保留文档版本和基础历史记录
-- 文档级 ACL 当前覆盖 `public / user / role / department`，并兼容旧版 `team_name` 数据
+- 文档级 ACL 当前覆盖 `public / user / role / department`，部门 ACL 支持父子部门继承，并兼容旧版 `team_name` 数据
+- 部门管理支持树状展示、新建、改名、移动、删除保护和稳定组织编号
 - 基于 PostgreSQL FTS + pgvector 的权限感知混合检索，外加可配置候选重排
 - 引用式问答返回 answer / citation / confidence，并在证据不足时显式兜底
 - 基于上下文的多步骤处理目前只在已注册工具集合内做有限步决策
@@ -355,11 +359,13 @@ npm run dev
 3. 打开 `http://localhost:18073`
 4. 使用 `admin@local.test` 登录
 5. 在 `Documents` 页面查看文档、版本、ACL 和 chunk
-6. 在 `Chat` 页面提问并查看 citation
-7. 从当前 session 生成待办、周报草稿和 FAQ 草稿
-8. 在 `Versions` 页面查看文档 diff 和摘要
-9. 在 `Insights` 页面运行 demo eval 并查看 trace
-10. 如需演示部门权限，可手动输入 `viewer2@local.test / viewer123` 并验证部门文档访问效果
+6. 在 `Users` 页面查看用户、维护角色与启停状态，并通过部门树调整用户归属
+7. 在 `Documents` 页面给文档配置部门 ACL，验证父部门授权对子部门用户生效
+8. 在 `Chat` 页面提问并查看 citation
+9. 从当前 session 生成待办、周报草稿和 FAQ 草稿
+10. 在 `Versions` 页面查看文档 diff 和摘要
+11. 在 `Insights` 页面运行 demo eval 并查看 trace
+12. 如需演示部门权限，可手动输入 `viewer2@local.test / viewer123` 并验证部门文档访问效果
 
 ## 关键接口
 ### 认证
