@@ -14,19 +14,19 @@
 
 ## 当前完成度
 ### 已实现
-- mock 登录与三类角色：`viewer / manager / admin`
+- 登录、管理员用户维护与角色管理
 - 支持 `TXT / Markdown / HTML / PDF / DOCX / CSV / PNG / JPG / JPEG` 文档上传与摄取
 - 支持 Markdown、HTML、DOCX、CSV 和文本型 PDF 表格提取
 - 支持图片文件 OCR 入库、扫描版 PDF 页级 OCR fallback，以及规整图片表格的 best-effort 提取
 - 本地文件存储与文档版本保留
 - 文档级 ACL：支持 `public / user / role / department`，并兼容旧版 `team_name` 数据
 - 基于 PostgreSQL FTS + pgvector 的权限感知混合检索与可配置候选重排
-- 带 citation、confidence 和拒答策略的 grounded chat
+- 带 citation、confidence 和拒答策略的引用式问答
 - 会话与消息历史持久化
 - 多步骤处理与轻量上下文复用
 - 结构化结果：待办提取、周报草稿、FAQ 草稿
-- 文档版本 diff：原始 diff、摘要、影响提示
-- Eval 服务与权限隔离测试
+- 文档版本 diff：原始 diff、摘要和影响提示
+- Eval 服务、固定评测报告与权限隔离测试
 - Trace 存储、简单 observability API 和基础 Langfuse 接入
 - 用于展示完整流程的 React 前端演示页面
 
@@ -34,18 +34,17 @@
 - 企业级 SSO / LDAP / OAuth
 - 多租户隔离与跨组织策略管理
 - 异步任务的生产级监控、重试策略和运维治理
-- DOCX / HTML / Markdown 内嵌图片 OCR 暂未完整支持
 - 低清扫描、旋转拍照、复杂合并单元格、复杂跨页表格和图片型复杂版面的稳定结构化
 - 复杂 Excel、多 sheet XLSX 和合并单元格表格解析
 - Slack / 飞书等外部协作集成
-- 更大规模的 rerank / judge benchmark 与自动化报告沉淀
+- 外部裁判模型评测、人工标注闭环和自动化报告看板
 
 ## 主要解决的问题
 - 用户只能检索和引用自己有权限访问的文档
 - 回答不只给文本，还要尽量给出 citation
 - 会话可以继续沉淀为待办、周报草稿和 FAQ 草稿
 - 文档版本变化可以被对比、总结和解释
-- 整个链路可以被评测和追踪，不只停留在手工演示
+- 整个链路可以被评测和追踪，支持回归验证
 
 ## 实现重点
 - 权限过滤发生在检索阶段，候选集、citation 和 prompt 都只来自可访问文档
@@ -55,10 +54,10 @@
 - 当前版本既支持当前文档问答，也支持版本 diff 与变更摘要
 - Eval 和 trace 会保留链路结果，便于排查问题和做回归验证
 - 前端可直接展开查看处理轨迹，确认当前请求的工具选择与执行结果
-- OCR 能力保持在 parser 层：图片和扫描页 OCR 结果仍进入 `ParsedSegment -> chunk -> embedding -> FTS / pgvector -> citation`，不新增数据库表，也不改变权限判断。
+- OCR 能力保持在 parser 层：图片和扫描页 OCR 结果复用 `ParsedSegment -> chunk -> embedding -> FTS / pgvector -> citation` 链路和现有权限判断。
 - 图片 OCR 会先做轻量降噪：低信息量标签、页码、图号之类的短文本会尽量被过滤，避免污染检索。
 - 图片表格只覆盖规整表格的 best-effort 提取，并增加列对齐校验，尽量避免把图例、流程节点或散点标签误判成表格。
-- 图表、流程图、组织图和示意图当前只提取可见文字，不提供图像语义理解；低清、旋转、复杂合并单元格和跨页图片表格不保证稳定恢复。
+- 图表、流程图、组织图和示意图当前提取可见文字；低清、旋转、复杂合并单元格和跨页图片表格属于能力边界。
 
 ## 核心设计
 ### 权限感知检索
@@ -74,7 +73,7 @@
 
 ### 版本对比
 - 支持两个版本之间的 raw diff
-- 支持差异摘要与 impact hints
+- 支持差异摘要与影响提示
 - 检索默认只查当前版本，避免历史版本污染问答
 
 ### 结构化结果生成
@@ -94,14 +93,14 @@
 - Trace 记录 query、retrieved chunks、selected citations、token、latency、error
 
 ## 适用场景
-- 面向制度、流程、运维手册等企业内部文档的问答和检索
+- 面向制度、内控、财务披露和表格类企业文档的问答和检索
 - 需要控制不同角色可见范围的知识库场景
 - 需要保留引用来源、方便追溯回答依据的场景
 - 需要把问答结果继续沉淀成待办、周报或 FAQ 的团队协作场景
 - 需要查看文档版本变更和差异摘要的日常维护场景
 
 ## 后续可扩展方向
-- 扩大 rerank / judge benchmark 覆盖面，形成稳定的自动化报告和标注闭环
+- 扩大 rerank 与裁判模型评测覆盖面，形成稳定的自动化报告和标注闭环
 - 完善 Langfuse 埋点覆盖、错误归因和 OpenTelemetry 导出
 - 将本地文件存储替换为 S3 / MinIO，并补齐对象生命周期和访问审计
 - 增加 FAQ 审核流、发布状态和结果回写

@@ -6,6 +6,8 @@ from dataclasses import dataclass, replace
 
 from app.core.config import get_settings
 from app.services.ingestion.parsers import ParsedDocument, ParsedSegment
+from app.services.ingestion.search_index import build_lexical_search_text
+from app.services.ingestion.structure import extract_chunk_structure
 
 
 @dataclass
@@ -20,6 +22,12 @@ class ChunkPayload:
     paragraph_end: int | None
     char_start: int | None
     char_end: int | None
+    clause_full_name: str | None
+    article_number: str | None
+    chunk_type: str | None
+    heading_path: str | None
+    structural_search_text: str | None
+    lexical_search_text: str | None
     citation_metadata: dict
 
 
@@ -51,6 +59,10 @@ class SemanticChunker:
         for segment in prepared_segments:
             segment_length = len(segment.text)
             if buffer and _is_table_row_segment(segment) and not all(_is_table_row_segment(item) for item in buffer):
+                flush_buffer(preserve_overlap=False)
+            if buffer and _starts_new_section(buffer, segment):
+                flush_buffer(preserve_overlap=False)
+            if buffer and _starts_strong_structural_block(segment) and not _continues_article_heading(buffer, segment):
                 flush_buffer(preserve_overlap=False)
             if buffer and buffer_chars + segment_length > self.target_chars:
                 flush_buffer()
@@ -113,18 +125,23 @@ class SemanticChunker:
 
     def _build_chunk_payload(self, chunk_index: int, segments: list[ParsedSegment]) -> ChunkPayload:
         content = "\n\n".join(segment.text for segment in segments)
-        section_title = next((segment.section_title for segment in reversed(segments) if segment.section_title), None)
+        section_title = _dominant_section_title(segments)
         page_numbers = [segment.page_number for segment in segments if segment.page_number is not None]
         paragraph_numbers = [segment.paragraph_index for segment in segments if segment.paragraph_index is not None]
         char_starts = [segment.char_start for segment in segments if segment.char_start is not None]
         char_ends = [segment.char_end for segment in segments if segment.char_end is not None]
 
+        structure = extract_chunk_structure(content, section_title)
         citation_metadata = {
             "page_number_start": min(page_numbers) if page_numbers else None,
             "page_number_end": max(page_numbers) if page_numbers else None,
             "paragraph_start": min(paragraph_numbers) if paragraph_numbers else None,
             "paragraph_end": max(paragraph_numbers) if paragraph_numbers else None,
             "section_title": section_title,
+            "clause_full_name": structure["clause_full_name"],
+            "article_number": structure["article_number"],
+            "chunk_type": structure["chunk_type"],
+            "heading_path": structure["heading_path"],
         }
 
         return ChunkPayload(
@@ -138,9 +155,69 @@ class SemanticChunker:
             paragraph_end=max(paragraph_numbers) if paragraph_numbers else None,
             char_start=min(char_starts) if char_starts else None,
             char_end=max(char_ends) if char_ends else None,
+            clause_full_name=structure["clause_full_name"],
+            article_number=structure["article_number"],
+            chunk_type=structure["chunk_type"],
+            heading_path=structure["heading_path"],
+            structural_search_text=structure["structural_search_text"],
+            lexical_search_text=build_lexical_search_text(
+                section_title=section_title,
+                clause_full_name=structure["clause_full_name"],
+                article_number=structure["article_number"],
+                heading_path=structure["heading_path"],
+                structural_search_text=structure["structural_search_text"],
+                content=content,
+            ),
             citation_metadata=citation_metadata,
         )
 
 
 def _is_table_row_segment(segment: ParsedSegment) -> bool:
     return segment.text.startswith("Table row:")
+
+
+def _starts_strong_structural_block(segment: ParsedSegment) -> bool:
+    text = segment.text.strip()
+    if not text:
+        return False
+    if text.startswith("Table row:"):
+        return False
+    if re.fullmatch(r"(?:#{1,6}\s*)?第[一二三四五六七八九十百千万零〇\d]+条", text):
+        return True
+    if text.startswith("条款全称："):
+        return True
+    if re.match(r"^#{1,6}\s+\S", text):
+        return True
+    if re.match(r"^(?:[一二三四五六七八九十]+、|\d+[\.、])\S{2,40}$", text):
+        return True
+    return False
+
+
+def _continues_article_heading(buffer: list[ParsedSegment], segment: ParsedSegment) -> bool:
+    text = segment.text.strip()
+    if not text.startswith("条款全称：") or not buffer:
+        return False
+    previous = buffer[-1].text.strip()
+    return bool(re.fullmatch(r"(?:#{1,6}\s*)?第[一二三四五六七八九十百千万零〇\d]+条", previous))
+
+
+def _starts_new_section(buffer: list[ParsedSegment], segment: ParsedSegment) -> bool:
+    if not segment.section_title:
+        return False
+    previous_section = next((item.section_title for item in reversed(buffer) if item.section_title), None)
+    if not previous_section or previous_section == segment.section_title:
+        return False
+    segment_text = re.sub(r"^#{1,6}\s*", "", segment.text.strip())
+    return segment_text == segment.section_title.strip()
+
+
+def _dominant_section_title(segments: list[ParsedSegment]) -> str | None:
+    section_weights: dict[str, tuple[int, int]] = {}
+    for index, segment in enumerate(segments):
+        if not segment.section_title:
+            continue
+        current_chars, _ = section_weights.get(segment.section_title, (0, -1))
+        section_weights[segment.section_title] = (current_chars + len(segment.text), index)
+    if not section_weights:
+        return None
+    return max(section_weights.items(), key=lambda item: (item[1][0], item[1][1]))[0]

@@ -622,11 +622,16 @@ def _extract_version_ref(question: str, *, prefer: str) -> str | None:
 
 def _looks_like_version_compare_request(question: str) -> bool:
     lowered = question.strip().casefold()
-    if any(pattern in lowered for pattern in VERSION_COMPARE_PATTERNS):
-        return True
     has_version_ref = bool(re.search(r"v\s*\d+|上一版|前一版|previous|prior|latest|newest|current|最新|最新版", lowered))
     has_compare_verb = bool(re.search(r"比较|对比|差异|改了什么|compare|diff|changed", lowered))
-    return has_version_ref and has_compare_verb
+    if has_version_ref and has_compare_verb:
+        return True
+    has_version_noun = bool(re.search(r"版本|version", lowered))
+    has_version_compare_phrase = bool(
+        re.search(r"(版本|version).{0,16}(比较|对比|差异|改了什么|compare|diff|changed)", lowered)
+        or re.search(r"(比较|对比|差异|改了什么|compare|diff|changed).{0,16}(版本|version)", lowered)
+    )
+    return has_version_noun and has_version_compare_phrase
 
 
 

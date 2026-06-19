@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 import time
 import unicodedata
 from datetime import UTC, datetime, timedelta
+from difflib import SequenceMatcher
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -313,6 +315,7 @@ class EvalService:
         retrieval_hit_rate = retrieval_breakdown["score"]
         citation_accuracy = citation_breakdown["score"]
         answer_faithfulness = faithfulness_breakdown["score"]
+        unsupported_claims = list(faithfulness_breakdown.get("unsupported_claims", []))
         overall_pass = self._compute_overall_pass(
             refusal_expected=refusal_expected,
             retrieval_hit_rate=retrieval_hit_rate,
@@ -337,6 +340,7 @@ class EvalService:
             not overall_pass
             or bool(forbidden_key_fact_hits)
             or bool(supported_fact_breakdown["unsupported_answer_labels"])
+            or bool(unsupported_claims)
             or prepared.answer_result.evidence_conflict
             or (
                 not refusal_expected
@@ -347,6 +351,8 @@ class EvalService:
             human_review_reason = "forbidden documents or protected facts appeared in retrieval, citations, or answer text"
         elif forbidden_key_fact_hits:
             human_review_reason = "forbidden key facts appeared in answer text"
+        elif unsupported_claims:
+            human_review_reason = "answer contained claims that were not supported by selected evidence"
         elif supported_fact_breakdown["unsupported_answer_labels"]:
             human_review_reason = "answer mentioned expected facts that were not found in selected evidence"
         elif prepared.answer_result.evidence_conflict:
@@ -382,6 +388,7 @@ class EvalService:
             "supported_answer_facts": supported_fact_breakdown["supported_labels"],
             "unsupported_answer_facts": supported_fact_breakdown["unsupported_answer_labels"],
             "evidence_only_facts": supported_fact_breakdown["evidence_only_labels"],
+            "unsupported_answer_claims": unsupported_claims,
             "forbidden_key_fact_hits": forbidden_key_fact_hits,
             "permission_checks": {
                 "forbidden_in_retrieval": forbidden_in_retrieval,
@@ -543,13 +550,23 @@ class EvalService:
             }
 
         support_f1 = EvalService._f1_score(support_precision, supported_fact_recall)
+        claim_support = EvalService._compute_claim_support_metrics(
+            answer_text=getattr(prepared.answer_result, "answer", "") or "",
+            selected_chunks=getattr(prepared, "selected_chunks", []) or [],
+        )
+        claim_support_score = claim_support["score"]
         score = EvalService._clamp_score(
-            max(0.0, support_f1 - forbidden_fact_penalty)
+            max(0.0, claim_support_score - forbidden_fact_penalty)
         )
         return {
             "score": score,
             "mode": "answer_expected",
-            "formula": "support_f1(supported_fact_precision, supported_fact_recall) - forbidden_fact_leak_rate",
+            "formula": "mean(max_claim_support_by_selected_evidence) - forbidden_fact_leak_rate",
+            "claim_support_score": EvalService._round_score(claim_support_score),
+            "claim_count": claim_support["claim_count"],
+            "answer_claims": claim_support["claims"],
+            "unsupported_claims": claim_support["unsupported_claims"],
+            "claim_extraction_method": claim_support["extraction_method"],
             "answer_fact_recall": EvalService._round_score(answer_fact_recall),
             "evidence_fact_recall": EvalService._round_score(evidence_fact_recall),
             "matched_expected_facts": matched_fact_labels,
@@ -565,6 +582,450 @@ class EvalService:
             "insufficient_evidence": prepared.answer_result.insufficient_evidence,
             "forbidden_fact_penalty": EvalService._round_score(forbidden_fact_penalty),
         }
+
+    @staticmethod
+    def _compute_claim_support_metrics(answer_text: str, selected_chunks: list) -> dict:
+        claims = EvalService._extract_answer_claims(answer_text)
+        evidence_payloads = EvalService._evidence_payloads(selected_chunks)
+        if not claims:
+            return {
+                "score": 0.0,
+                "claim_count": 0,
+                "claims": [],
+                "unsupported_claims": [],
+                "extraction_method": "deterministic_sentence_clause_split",
+            }
+
+        scored_claims: list[dict] = []
+        for claim in claims:
+            best = {
+                "score": 0.0,
+                "chunk_id": None,
+                "document_title": None,
+                "reasons": ["no selected citation evidence"],
+            }
+            for payload in evidence_payloads:
+                candidate = EvalService._score_claim_against_evidence(claim["text"], payload["text"])
+                if candidate["score"] > best["score"]:
+                    best = {
+                        "score": candidate["score"],
+                        "chunk_id": payload["chunk_id"],
+                        "document_title": payload["document_title"],
+                        "reasons": candidate["reasons"],
+                    }
+            scored_claims.append(
+                {
+                    **claim,
+                    "support_score": EvalService._round_score(best["score"]),
+                    "support_evidence_chunk_id": best["chunk_id"],
+                    "support_document_title": best["document_title"],
+                    "support_reasons": best["reasons"],
+                }
+            )
+
+        score = sum(item["support_score"] for item in scored_claims) / len(scored_claims)
+        return {
+            "score": EvalService._clamp_score(score),
+            "claim_count": len(scored_claims),
+            "claims": scored_claims,
+            "unsupported_claims": [
+                item["text"]
+                for item in scored_claims
+                if item["support_score"] < 0.5
+            ],
+            "extraction_method": "deterministic_sentence_clause_split",
+        }
+
+    @staticmethod
+    def _extract_answer_claims(answer_text: str) -> list[dict]:
+        cleaned = EvalService._strip_citation_markers(answer_text or "")
+        cleaned = re.sub(r"\s+", " ", cleaned.replace("\r", "\n")).strip()
+        if not cleaned:
+            return []
+
+        cleaned = re.sub(
+            r"(?:^|[，,；;。]\s*)(第一|第二|第三|第四|第五|第六|第七|第八|其一|其二|其三|一是|二是|三是)\s*[，,:：]",
+            "；",
+            cleaned,
+        )
+        parts = [
+            part.strip()
+            for part in re.split(r"[。！？!?；;\n]+", cleaned)
+            if part.strip()
+        ]
+
+        claims: list[dict] = []
+        seen: set[str] = set()
+        for raw_part in parts:
+            claim_text = EvalService._clean_claim_candidate(raw_part)
+            if not EvalService._looks_like_factual_claim(claim_text):
+                continue
+            normalized = EvalService._normalize_match_text(claim_text)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            claims.append(
+                {
+                    "text": claim_text,
+                    "normalized": normalized,
+                    "length": len(normalized),
+                }
+            )
+        return claims
+
+    @staticmethod
+    def _strip_citation_markers(text: str) -> str:
+        cleaned = re.sub(r"\[[0-9,\s]+\]", "", text)
+        cleaned = re.sub(r"【[^】]{1,80}】", "", cleaned)
+        cleaned = re.sub(r"\(来源[:：][^)）]{1,120}[)）]", "", cleaned)
+        return cleaned
+
+    @staticmethod
+    def _clean_claim_candidate(text: str) -> str:
+        cleaned = text.strip(" \t\r\n，,。；;：:")
+        cleaned = re.sub(r"^根据当前可访问文档中的证据[，,]?", "", cleaned)
+        cleaned = re.sub(r"^当前可访问文档中的证据[，,]?", "", cleaned)
+        cleaned = re.sub(r"^《[^》]{1,120}》(?:里|中)?", "", cleaned)
+        cleaned = re.sub(r"^[^：:]{0,160}（[^）]{1,120}）提到[:：]", "", cleaned)
+        cleaned = re.sub(r"^[^：:]{0,160}(?:提到|显示|说明|指出)[:：]", "", cleaned)
+        cleaned = re.sub(
+            r"^[^：:]{0,160}(?:主要有[一二三四五六七八九十两0-9]+点|主要说明|直接相关的要求是|要求是|要求为)[:：]",
+            "",
+            cleaned,
+        )
+        cleaned = re.sub(r"^(?:第一|第二|第三|第四|第五|第六|第七|第八|其一|其二|其三|一是|二是|三是)[，,:：]?", "", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ，,。；;：:")
+        return cleaned
+
+    @staticmethod
+    def _looks_like_factual_claim(text: str) -> bool:
+        if not text:
+            return False
+        normalized = EvalService._normalize_match_text(text)
+        if len(normalized) < 6 and not EvalService._extract_numeric_constraints(text):
+            return False
+        low_information_markers = (
+            "未找到足够相关",
+            "证据不足",
+            "暂时无法",
+            "请换个问法",
+            "建议结合引用片段",
+            "建议你继续",
+            "建议你把问题",
+            "我已经检索到",
+            "进一步确认",
+            "当前可访问范围内未找到",
+            "文档可能不存在",
+            "没有访问权限",
+        )
+        if any(marker in text for marker in low_information_markers):
+            return False
+        factual_markers = (
+            "为",
+            "是",
+            "包括",
+            "包含",
+            "需要",
+            "必须",
+            "应",
+            "不得",
+            "禁止",
+            "负责",
+            "审批",
+            "处理",
+            "时限",
+            "要求",
+            "同步",
+            "补齐",
+            "关闭",
+            "回收",
+            "导出",
+            "升级",
+            "建立",
+            "明确",
+            "可以",
+            "先",
+        )
+        return len(normalized) >= 14 or any(marker in text for marker in factual_markers)
+
+    @staticmethod
+    def _evidence_payloads(chunks: list) -> list[dict]:
+        payloads: list[dict] = []
+        for chunk in chunks:
+            parts: list[str] = []
+            for key in (
+                "document_title",
+                "section_title",
+                "heading_path",
+                "clause_full_name",
+                "article_number",
+                "preview",
+                "content",
+            ):
+                value = chunk.get(key) if isinstance(chunk, dict) else getattr(chunk, key, None)
+                if isinstance(value, str) and value.strip():
+                    parts.append(value)
+            chunk_id = chunk.get("chunk_id") if isinstance(chunk, dict) else getattr(chunk, "chunk_id", None)
+            document_title = chunk.get("document_title") if isinstance(chunk, dict) else getattr(chunk, "document_title", None)
+            payloads.append(
+                {
+                    "chunk_id": str(chunk_id) if chunk_id is not None else None,
+                    "document_title": document_title,
+                    "text": " ".join(parts),
+                }
+            )
+        return payloads
+
+    @staticmethod
+    def _score_claim_against_evidence(claim_text: str, evidence_text: str) -> dict:
+        claim_norm = EvalService._normalize_match_text(claim_text)
+        evidence_norm = EvalService._normalize_match_text(evidence_text)
+        if not claim_norm or not evidence_norm:
+            return {"score": 0.0, "reasons": ["empty claim or evidence"]}
+        if claim_norm in evidence_norm:
+            return {"score": 1.0, "reasons": ["normalized claim is contained in citation evidence"]}
+
+        structured_score, structured_reasons = EvalService._score_structured_claim_support(claim_text, evidence_text)
+        claim_constraints = EvalService._extract_numeric_constraints(claim_text)
+        missing_constraints = [
+            item
+            for item in claim_constraints
+            if EvalService._normalize_match_text(item) not in evidence_norm
+        ]
+
+        token_recall = EvalService._token_recall(
+            EvalService._extract_support_tokens(claim_text),
+            EvalService._extract_support_tokens(evidence_text),
+        )
+        ordered_ratio = EvalService._ordered_part_support_ratio(claim_text, evidence_norm)
+        longest_ratio = EvalService._longest_common_match_ratio(claim_norm, evidence_norm)
+        score = max(
+            structured_score,
+            (0.55 * token_recall) + (0.25 * ordered_ratio) + (0.20 * longest_ratio),
+        )
+
+        reasons = [
+            f"token_recall={EvalService._round_score(token_recall)}",
+            f"ordered_part_ratio={EvalService._round_score(ordered_ratio)}",
+            f"longest_common_ratio={EvalService._round_score(longest_ratio)}",
+        ]
+        if structured_reasons:
+            reasons.extend(structured_reasons)
+        if missing_constraints:
+            cap = 0.35 if len(missing_constraints) == len(claim_constraints) else 0.65
+            score = min(score, cap)
+            reasons.append(f"missing_numeric_or_date_constraints={missing_constraints}")
+
+        relation_tokens = EvalService._extract_relation_tokens(claim_text)
+        if relation_tokens:
+            evidence_relation_tokens = EvalService._extract_relation_tokens(evidence_text)
+            if not set(relation_tokens).intersection(evidence_relation_tokens):
+                score = min(score, 0.65)
+                reasons.append("claim relation/action tokens not found in evidence")
+
+        if structured_score <= 0 and token_recall < 0.28 and ordered_ratio < 0.34:
+            score = min(score, 0.35)
+            reasons.append("only weak topical overlap")
+
+        return {
+            "score": EvalService._clamp_score(score),
+            "reasons": reasons,
+        }
+
+    @staticmethod
+    def _score_structured_claim_support(claim_text: str, evidence_text: str) -> tuple[float, list[str]]:
+        claim_pairs = EvalService._extract_key_value_pairs(claim_text)
+        if not claim_pairs:
+            return 0.0, []
+
+        evidence_pairs = EvalService._extract_key_value_pairs(evidence_text)
+        if not evidence_pairs:
+            return 0.0, ["structured_claim_without_key_value_evidence"]
+
+        pair_scores: list[float] = []
+        for claim_key, claim_value in claim_pairs:
+            best_pair_score = 0.0
+            claim_key_tokens = EvalService._extract_support_tokens(claim_key)
+            claim_value_tokens = EvalService._extract_support_tokens(claim_value)
+            for evidence_key, evidence_value in evidence_pairs:
+                key_score = EvalService._token_recall(claim_key_tokens, EvalService._extract_support_tokens(evidence_key))
+                value_norm = EvalService._normalize_match_text(claim_value)
+                evidence_value_norm = EvalService._normalize_match_text(evidence_value)
+                if value_norm and value_norm in evidence_value_norm:
+                    value_score = 1.0
+                else:
+                    value_score = EvalService._token_recall(
+                        claim_value_tokens,
+                        EvalService._extract_support_tokens(evidence_value),
+                    )
+                best_pair_score = max(best_pair_score, (0.35 * key_score) + (0.65 * value_score))
+            pair_scores.append(best_pair_score)
+
+        score = sum(pair_scores) / len(pair_scores)
+        return EvalService._clamp_score(score), [f"structured_pair_support={EvalService._round_score(score)}"]
+
+    @staticmethod
+    def _extract_key_value_pairs(text: str) -> list[tuple[str, str]]:
+        pairs: list[tuple[str, str]] = []
+        normalized = text.replace("：", "=").replace(":", "=")
+        matches = list(re.finditer(r"(?P<key>[^=;；。,\n]{2,32}?)=", normalized))
+        for index, match in enumerate(matches):
+            key = match.group("key").strip(" ，,；;。")
+            value_start = match.end()
+            value_end = matches[index + 1].start() if index + 1 < len(matches) else len(normalized)
+            value = normalized[value_start:value_end].strip(" ，,；;。")
+            if key and value and len(EvalService._normalize_match_text(value)) >= 2:
+                pairs.append((key, value))
+
+        natural_patterns = (
+            r"(?P<key>[\u4e00-\u9fffA-Za-z0-9]{2,18}?)(?:为|是|包括|包含)(?P<value>[^；;。,.，]{2,60})",
+            r"(?P<key>账号)(?:应在|需要在)(?P<value>[^；;。,.，]{2,60})",
+            r"(?P<key>导出文件|文件)(?:禁止通过|不得通过)(?P<value>[^；;。,.，]{2,60})",
+            r"(?P<key>紧急场景|临时场景)(?:下)?可以先(?P<value>[^；;。,.，]{2,60})",
+            r"(?P<key>先同步|同步)(?P<value>[^；;。,.，]{2,60})",
+        )
+        for pattern in natural_patterns:
+            for match in re.finditer(pattern, text):
+                key = match.group("key").strip()
+                value = match.group("value").strip(" ，,；;。")
+                if key and value:
+                    pairs.append((key, value))
+
+        unique: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for key, value in pairs:
+            identity = (EvalService._normalize_match_text(key), EvalService._normalize_match_text(value))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            unique.append((key, value))
+        return unique
+
+    @staticmethod
+    def _extract_numeric_constraints(text: str) -> list[str]:
+        patterns = (
+            r"\d{4}[-/年]\d{1,2}(?:[-/月]\d{1,2}日?)?",
+            r"\d+(?:\.\d+)?\s*(?:%|％|个工作日|工作日|分钟内|小时内|日内|天内|分钟|小时|个月|月|天|日|年|万元|亿元|元|人|次|条|份|级|类)",
+            r"[一二两三四五六七八九十百千]+(?:个)?(?:工作日|分钟内|小时内|日内|天内|分钟|小时|个月|月|天|日|年)",
+        )
+        found: list[str] = []
+        for pattern in patterns:
+            found.extend(match.group(0).strip() for match in re.finditer(pattern, text))
+        return list(dict.fromkeys(item for item in found if item))
+
+    @staticmethod
+    def _extract_support_tokens(text: str) -> list[str]:
+        normalized = text.casefold()
+        tokens: list[str] = []
+        tokens.extend(EvalService._normalize_match_text(item) for item in EvalService._extract_numeric_constraints(text))
+        tokens.extend(re.findall(r"[a-z0-9]{2,}", normalized))
+        stop_terms = {
+            "根据",
+            "当前",
+            "可访问",
+            "文档",
+            "证据",
+            "主要",
+            "这个",
+            "场景",
+            "相关",
+            "要求",
+            "说明",
+            "包括",
+            "包含",
+            "以及",
+            "同时",
+            "其中",
+            "应当",
+            "需要",
+            "必须",
+            "可以",
+            "进行",
+            "通过",
+            "如果",
+            "对于",
+            "里面",
+            "条款",
+        }
+        for segment in re.findall(r"[\u4e00-\u9fff]{2,}", normalized):
+            parts = [
+                part
+                for part in re.split(r"的|了|在|和|与|及|或|并|对|中|里|为|是|由|将|把|向|于", segment)
+                if len(part) >= 2 and part not in stop_terms
+            ]
+            for part in parts:
+                tokens.append(part)
+                if len(part) > 4:
+                    for size in (2, 3, 4):
+                        tokens.extend(part[index : index + size] for index in range(0, len(part) - size + 1))
+        return [token for token in dict.fromkeys(tokens) if token and token not in stop_terms]
+
+    @staticmethod
+    def _extract_relation_tokens(text: str) -> list[str]:
+        relation_markers = (
+            "需要",
+            "必须",
+            "应",
+            "不得",
+            "禁止",
+            "负责",
+            "审批",
+            "提交",
+            "保留",
+            "关闭",
+            "回收",
+            "升级",
+            "建立",
+            "明确",
+            "同步",
+            "补齐",
+            "脱敏",
+            "导出",
+            "执行",
+            "处理",
+            "验收",
+            "复核",
+            "通知",
+        )
+        return [marker for marker in relation_markers if marker in text]
+
+    @staticmethod
+    def _token_recall(claim_tokens: list[str], evidence_tokens: list[str]) -> float:
+        if not claim_tokens:
+            return 0.0
+        evidence_set = set(evidence_tokens)
+        if not evidence_set:
+            return 0.0
+        matched = sum(1 for token in claim_tokens if token in evidence_set)
+        return matched / len(claim_tokens)
+
+    @staticmethod
+    def _ordered_part_support_ratio(claim_text: str, evidence_norm: str) -> float:
+        parts = EvalService._ordered_alias_parts(claim_text)
+        if not parts:
+            return 0.0
+        matched = 0
+        cursor = 0
+        for part in parts:
+            found_at = evidence_norm.find(part, cursor)
+            if found_at < 0:
+                continue
+            matched += 1
+            cursor = found_at + len(part)
+        return matched / len(parts)
+
+    @staticmethod
+    def _longest_common_match_ratio(claim_norm: str, evidence_norm: str) -> float:
+        if not claim_norm or not evidence_norm:
+            return 0.0
+        evidence_window = evidence_norm[:5000]
+        match = SequenceMatcher(None, claim_norm, evidence_window, autojunk=False).find_longest_match(
+            0,
+            len(claim_norm),
+            0,
+            len(evidence_window),
+        )
+        return match.size / len(claim_norm) if claim_norm else 0.0
 
     @staticmethod
     def _compute_permission_isolation_metrics(
@@ -1009,32 +1470,43 @@ class EvalService:
     @staticmethod
     def _resolve_case_annotations(case) -> dict:
         demo_annotation = resolve_demo_eval_annotation(case.dataset_name, case.case_name) if case.is_demo_case else None
+        external_annotation = EvalService._parse_external_case_annotation(getattr(case, "notes", None))
         expected_document_titles = list(case.expected_document_titles or [])
         expected_answer_keywords = list(case.expected_answer_keywords or [])
 
         expected_outcome = (
             demo_annotation.get("expected_outcome")
             if demo_annotation and demo_annotation.get("expected_outcome")
+            else external_annotation.get("expected_outcome")
+            if external_annotation and external_annotation.get("expected_outcome")
             else "refuse" if not expected_document_titles else "answer"
         )
         expected_retrieval_titles = (
             list(demo_annotation.get("expected_retrieval_titles", []))
             if demo_annotation and demo_annotation.get("expected_retrieval_titles")
+            else list(external_annotation.get("expected_retrieval_titles", []))
+            if external_annotation and external_annotation.get("expected_retrieval_titles")
             else expected_document_titles
         )
         expected_evidence_titles = (
             list(demo_annotation.get("expected_evidence_titles", []))
             if demo_annotation and demo_annotation.get("expected_evidence_titles")
+            else list(external_annotation.get("expected_evidence_titles", []))
+            if external_annotation and external_annotation.get("expected_evidence_titles")
             else expected_document_titles
         )
         raw_expected_key_facts = (
             list(demo_annotation.get("expected_key_facts", []))
             if demo_annotation and demo_annotation.get("expected_key_facts")
+            else list(external_annotation.get("expected_key_facts", []))
+            if external_annotation and external_annotation.get("expected_key_facts")
             else expected_answer_keywords
         )
         raw_forbidden_key_facts = (
             list(demo_annotation.get("forbidden_key_facts", []))
             if demo_annotation and demo_annotation.get("forbidden_key_facts")
+            else list(external_annotation.get("forbidden_key_facts", []))
+            if external_annotation and external_annotation.get("forbidden_key_facts")
             else []
         )
         expected_key_fact_specs = EvalService._normalize_fact_specs(raw_expected_key_facts)
@@ -1042,19 +1514,56 @@ class EvalService:
         scoring_notes = (
             str(demo_annotation.get("scoring_notes"))
             if demo_annotation and demo_annotation.get("scoring_notes")
+            else str(external_annotation.get("scoring_notes"))
+            if external_annotation and external_annotation.get("scoring_notes")
             else None
         )
         return {
-            "source": "demo_annotations" if demo_annotation else "legacy_case_fields",
+            "source": "demo_annotations" if demo_annotation else "external_notes" if external_annotation else "legacy_case_fields",
             "expected_outcome": expected_outcome,
             "expected_retrieval_titles": expected_retrieval_titles,
             "expected_evidence_titles": expected_evidence_titles,
             "expected_key_facts": [item["label"] for item in expected_key_fact_specs],
+            "expected_evidence_markers": (
+                list(demo_annotation.get("expected_evidence_markers", []))
+                if demo_annotation and demo_annotation.get("expected_evidence_markers")
+                else list(external_annotation.get("expected_evidence_markers", []))
+                if external_annotation and external_annotation.get("expected_evidence_markers")
+                else []
+            ),
             "forbidden_key_facts": [item["label"] for item in forbidden_key_fact_specs],
             "expected_key_fact_specs": expected_key_fact_specs,
             "forbidden_key_fact_specs": forbidden_key_fact_specs,
             "scoring_notes": scoring_notes,
         }
+
+    @staticmethod
+    def _parse_external_case_annotation(notes: str | None) -> dict | None:
+        if not notes:
+            return None
+
+        try:
+            payload = json.loads(notes)
+        except (TypeError, ValueError):
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        annotation = payload.get("benchmark_annotation", payload)
+        if not isinstance(annotation, dict):
+            return None
+
+        allowed_keys = {
+            "expected_outcome",
+            "expected_retrieval_titles",
+            "expected_evidence_titles",
+            "expected_key_facts",
+            "expected_evidence_markers",
+            "forbidden_key_facts",
+            "scoring_notes",
+        }
+        return {key: value for key, value in annotation.items() if key in allowed_keys}
 
     @staticmethod
     def _ensure_admin(actor: User) -> None:

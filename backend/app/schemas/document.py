@@ -230,5 +230,9 @@ class ChunkRead(ORMModel):
     paragraph_end: int | None = None
     char_start: int | None = None
     char_end: int | None = None
+    clause_full_name: str | None = None
+    article_number: str | None = None
+    chunk_type: str | None = None
+    heading_path: str | None = None
     citation_metadata: dict | None = None
     created_at: datetime

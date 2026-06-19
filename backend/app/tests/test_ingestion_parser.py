@@ -114,6 +114,62 @@ def test_document_parser_extracts_html_tables(tmp_path: Path) -> None:
     assert "Table row: Retention. Data Type=Audit logs; Retention=180 days." in result.normalized_text
 
 
+def test_document_parser_prefers_main_html_content_and_skips_navigation(tmp_path: Path) -> None:
+    parser = DocumentParser()
+    html_path = tmp_path / "policy.html"
+    html_path.write_text(
+        """
+        <html>
+          <body>
+            <nav><a>首页</a><a>登录</a></nav>
+            <header><p>站点导航</p></header>
+            <main>
+              <h1>数据安全管理办法</h1>
+              <p>重要数据处理活动应当建立风险评估和审批记录。</p>
+            </main>
+            <footer><p>版权所有</p></footer>
+          </body>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+
+    result = parser.parse(html_path)
+
+    assert "数据安全管理办法" in result.normalized_text
+    assert "重要数据处理活动应当建立风险评估和审批记录" in result.normalized_text
+    assert "首页" not in result.normalized_text
+    assert "登录" not in result.normalized_text
+    assert "版权所有" not in result.normalized_text
+
+
+def test_document_parser_skips_policy_metadata_tables(tmp_path: Path) -> None:
+    parser = DocumentParser()
+    html_path = tmp_path / "policy.html"
+    html_path.write_text(
+        """
+        <html><body>
+          <div class="pages_content">
+            <table>
+              <tr><td>标 题：</td><td>生成式人工智能服务管理暂行办法</td></tr>
+              <tr><td>发文机关：</td><td>国家网信办</td></tr>
+              <tr><td>发文字号：</td><td>第15号</td></tr>
+              <tr><td>主题分类：</td><td>科技</td></tr>
+            </table>
+            <p>提供者应当依法承担网络信息内容生产者责任，履行网络信息安全义务。</p>
+          </div>
+        </body></html>
+        """,
+        encoding="utf-8",
+    )
+
+    result = parser.parse(html_path)
+
+    assert "提供者应当依法承担网络信息内容生产者责任" in result.normalized_text
+    assert "Table row" not in result.normalized_text
+    assert "发文字号" not in result.normalized_text
+
+
 def test_document_parser_extracts_docx_tables_in_body_order(tmp_path: Path) -> None:
     parser = DocumentParser()
     docx_path = tmp_path / "runbook.docx"

@@ -21,6 +21,7 @@ from app.services.ingestion.chunking import SemanticChunker
 from app.services.ingestion.embeddings import EmbeddingProviderFactory
 from app.services.ingestion.file_storage import LocalDocumentStorage
 from app.services.ingestion.parsers import DocumentParser
+from app.services.ingestion.search_index import build_lexical_search_text
 from app.workers.settings import get_arq_redis_settings
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,20 @@ async def run_ingest_document(ctx: dict[str, Any], document_id: str, version_id:
                 paragraph_end=chunk_payload.paragraph_end,
                 char_start=chunk_payload.char_start,
                 char_end=chunk_payload.char_end,
+                clause_full_name=chunk_payload.clause_full_name,
+                article_number=chunk_payload.article_number,
+                chunk_type=chunk_payload.chunk_type,
+                heading_path=chunk_payload.heading_path,
+                structural_search_text=chunk_payload.structural_search_text,
+                lexical_search_text=build_lexical_search_text(
+                    document_title=document.title,
+                    section_title=chunk_payload.section_title,
+                    clause_full_name=chunk_payload.clause_full_name,
+                    article_number=chunk_payload.article_number,
+                    heading_path=chunk_payload.heading_path,
+                    structural_search_text=chunk_payload.structural_search_text,
+                    content=chunk_payload.content,
+                ),
                 citation_metadata=chunk_payload.citation_metadata,
                 embedding=embeddings[index] if index < len(embeddings) else None,
             )

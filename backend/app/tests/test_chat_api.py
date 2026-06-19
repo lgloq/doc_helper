@@ -15,7 +15,7 @@ from app.schemas.llm import PlannerDecision, RouterDecision, RouterDecisionResul
 from app.services.chat.memory import build_conversation_memory
 from app.services.llm.agent_runner import AgentRunner
 from app.services.llm.planner import _avoid_redundant_repeated_tool_call
-from app.services.llm.router import _stabilize_router_decision
+from app.services.llm.router import DeterministicRouterProvider, _stabilize_router_decision
 from app.services.llm.tool_registry import DEFAULT_TOOL_REGISTRY
 from app.services.llm.tool_executor import ToolExecutor
 from app.services.llm.tools import CopilotToolService
@@ -605,6 +605,22 @@ def test_router_treats_policy_version_change_as_qa_not_version_compare() -> None
     assert stabilized.from_version_ref is None
     assert stabilized.to_version_ref is None
     assert stabilized.needs_citations is True
+
+
+def test_router_treats_two_document_business_comparison_as_topic_qa() -> None:
+    result = DeterministicRouterProvider().route(
+        question=(
+            "比较山东钢铁集团有限公司和深圳市环境水务集团有限公司两份融资与财务披露材料，"
+            "分别关注战略重组情况和出资人机构披露，各引用一处原文依据。"
+        ),
+        accessible_documents=[],
+        conversation_context=None,
+    )
+
+    assert result.decision.intent == "topic_qa"
+    assert result.decision.needs_citations is True
+    assert result.decision.from_version_ref is None
+    assert result.decision.to_version_ref is None
 
 
 def test_topic_qa_prefers_support_manual_for_first_response_time_question(client: TestClient, db_session: Session) -> None:

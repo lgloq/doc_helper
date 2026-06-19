@@ -32,6 +32,49 @@ except ImportError:  # pragma: no cover - optional until OCR dependencies are in
 
 
 IMAGE_FILE_SUFFIXES = {".png", ".jpg", ".jpeg"}
+HTML_CONTENT_SELECTORS = (
+    ".UCAP-CONTENT",
+    ".pages_content",
+    ".TRS_UEDITOR",
+    ".trs_editor_view",
+    ".BodyLabel",
+    ".main-content",
+    ".policyLibraryOverview_content",
+    ".my_doccontent",
+    ".TRS_Editor",
+    "main",
+    "article",
+    "[role=main]",
+    ".article",
+    ".content",
+    "#content",
+)
+HTML_NOISE_LINE_PATTERNS = (
+    r"^(首页|登录|注册|退出|个人中心|邮箱|无障碍|EN|简|繁|默认|大|超大|关闭|返回|回到顶部)$",
+    r"^(打印|收藏|留言|分享|分享到微信朋友圈|扫一扫|纠错|客户端|微博|微信|二维码|热门检索)[:：]?.*$",
+    r"^当前位置[:：]?.*$",
+    r"^您现在的位置[:：]?.*$",
+    r"^字号[:：]?.*$",
+    r"^【\s*(大|中|小|打印此页|关闭窗口)\s*】$",
+    r"^网站标识码.*$",
+    r"^京ICP备.*$",
+    r"^京公网安备.*$",
+    r"^版权所有.*$",
+)
+HTML_NOISE_TERMS = (
+    "登录",
+    "注册",
+    "热门检索",
+    "分享",
+    "扫一扫",
+    "打印",
+    "首页",
+    "当前位置",
+    "个人中心",
+    "无障碍",
+    "客户端",
+    "网站标识码",
+)
 
 
 @dataclass
@@ -173,11 +216,16 @@ class DocumentParser:
 
     def _parse_html(self, path: Path) -> ParsedDocument:
         soup = BeautifulSoup(path.read_text(encoding="utf-8", errors="ignore"), "html.parser")
+        for element in soup(["script", "style", "noscript", "template", "svg"]):
+            element.decompose()
         segments: list[ParsedSegment] = []
         current_section: str | None = None
         paragraph_index = 0
 
-        for element in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "table", "img"]):
+        content_root = self._select_html_content_root(soup)
+        for element in content_root.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "table", "img"]):
+            if self._is_html_boilerplate_element(element):
+                continue
             if element.name == "img":
                 src = element.get("src")
                 if src:
@@ -191,6 +239,9 @@ class DocumentParser:
                     )
                 continue
             if element.name == "table":
+                table_visible_text = self._normalize_html_text(element.get_text("\n", strip=True))
+                if self._is_html_metadata_table(table_visible_text):
+                    continue
                 table_rows = self._extract_html_table_rows(element)
                 caption = self._normalize_text(element.find("caption").get_text(" ", strip=True)) if element.find("caption") else current_section
                 for text in table_rows_to_text_segments(table_rows, caption=caption):
@@ -203,7 +254,7 @@ class DocumentParser:
                         )
                     )
                 continue
-            text = self._normalize_text(element.get_text(" ", strip=True))
+            text = self._normalize_html_text(element.get_text("\n", strip=True))
             if not text:
                 continue
             if element.name and element.name.startswith("h"):
@@ -222,6 +273,106 @@ class DocumentParser:
             segments = [ParsedSegment(text=fallback_text, paragraph_index=1)] if fallback_text else []
 
         return self._finalize_segments(segments, parser_name="html")
+
+    def _select_html_content_root(self, soup: BeautifulSoup):
+        candidates = []
+        seen_ids: set[int] = set()
+        for selector in HTML_CONTENT_SELECTORS:
+            for root in soup.select(selector):
+                root_id = id(root)
+                if root_id in seen_ids:
+                    continue
+                seen_ids.add(root_id)
+                score = self._score_html_content_root(root)
+                if score > 0:
+                    candidates.append((score, root))
+
+        if candidates:
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            return candidates[0][1]
+        return soup.body or soup
+
+    @classmethod
+    def _score_html_content_root(cls, root) -> float:
+        text = cls._normalize_html_text(root.get_text("\n", strip=True))
+        if not text:
+            return 0.0
+        chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", text))
+        if chinese_chars < 40:
+            return 0.0
+        link_text_chars = sum(len(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]", link.get_text(" ", strip=True))) for link in root.find_all("a"))
+        noise_hits = sum(text.count(term) for term in HTML_NOISE_TERMS)
+        paragraph_like_lines = sum(1 for line in text.split("\n") if len(cls._normalize_text(line)) >= 20)
+        return chinese_chars + paragraph_like_lines * 40 - link_text_chars * 2.0 - noise_hits * 120.0
+
+    @staticmethod
+    def _is_html_boilerplate_element(element) -> bool:
+        for parent in [element, *element.parents]:
+            name = getattr(parent, "name", None)
+            if name in {"nav", "header", "footer", "aside"}:
+                return True
+            attrs = []
+            for key in ("class", "id", "role", "aria-label"):
+                value = parent.get(key) if hasattr(parent, "get") else None
+                if isinstance(value, list):
+                    attrs.extend(str(item).casefold() for item in value)
+                elif value:
+                    attrs.append(str(value).casefold())
+            attr_text = " ".join(attrs)
+            if re.search(r"\b(nav|navbar|breadcrumb|footer|header|sidebar|menu|toolbar|pagination|copyright)\b", attr_text):
+                return True
+        return False
+
+    @classmethod
+    def _normalize_html_text(cls, text: str) -> str:
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        kept_lines: list[str] = []
+        seen_lines: set[str] = set()
+        for raw_line in normalized.split("\n"):
+            line = cls._normalize_text(raw_line)
+            if not line or cls._is_html_noise_line(line):
+                continue
+            dedupe_key = cls._normalize_matchable_html_line(line)
+            if dedupe_key in seen_lines:
+                continue
+            seen_lines.add(dedupe_key)
+            kept_lines.append(line)
+        return "\n".join(kept_lines)
+
+    @staticmethod
+    def _is_html_noise_line(line: str) -> bool:
+        compact = re.sub(r"\s+", "", line)
+        if not compact:
+            return True
+        if len(compact) <= 2 and not re.search(r"[\u4e00-\u9fff]{2,}", compact):
+            return True
+        if any(re.fullmatch(pattern, compact, flags=re.IGNORECASE) for pattern in HTML_NOISE_LINE_PATTERNS):
+            return True
+        if len(compact) <= 12 and any(term in compact for term in HTML_NOISE_TERMS):
+            return True
+        return False
+
+    @staticmethod
+    def _is_html_metadata_table(text: str) -> bool:
+        if not text:
+            return False
+        metadata_labels = (
+            "索引号",
+            "主题分类",
+            "发文机关",
+            "成文日期",
+            "标题",
+            "发文字号",
+            "发布日期",
+            "来源",
+            "来 源",
+        )
+        hits = sum(1 for label in metadata_labels if label in text.replace(" ", ""))
+        return hits >= 3 and len(text) < 1200
+
+    @staticmethod
+    def _normalize_matchable_html_line(line: str) -> str:
+        return re.sub(r"[\s|｜]+", "", line).casefold()
 
     def _parse_pdf(self, path: Path) -> ParsedDocument:
         pdfplumber_extraction = self._extract_pdf_with_pdfplumber(path)
@@ -957,6 +1108,7 @@ class DocumentParser:
 
     @staticmethod
     def _normalize_text(text: str) -> str:
+        text = text.replace("\x00", "")
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         text = re.sub(r"[ \t]+", " ", text)
         text = re.sub(r"\n{3,}", "\n\n", text)

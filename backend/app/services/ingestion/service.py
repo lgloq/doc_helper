@@ -23,6 +23,7 @@ from app.services.ingestion.chunking import SemanticChunker
 from app.services.ingestion.embeddings import EmbeddingProviderFactory
 from app.services.ingestion.file_storage import LocalDocumentStorage, UploadInspection
 from app.services.ingestion.parsers import DocumentParser
+from app.services.ingestion.search_index import build_lexical_search_text
 from app.services.permissions.service import PermissionFilterBuilder
 
 
@@ -112,7 +113,14 @@ class DocumentIngestionService:
             version=DocumentVersionRead.model_validate(version),
         )
 
-    def ingest_document(self, actor: User, document_id: UUID, payload: DocumentIngestRequest | None = None) -> IngestionResultRead:
+    def ingest_document(
+        self,
+        actor: User,
+        document_id: UUID,
+        payload: DocumentIngestRequest | None = None,
+        *,
+        generate_embeddings: bool = True,
+    ) -> IngestionResultRead:
         document = self._get_manageable_document(actor, document_id)
         version = self._resolve_version(document, payload.version_id if payload else None)
 
@@ -123,7 +131,16 @@ class DocumentIngestionService:
         try:
             parsed_document = self.parser.parse(self.storage.resolve_path(version.storage_path))
             chunk_payloads = self.chunker.chunk_document(parsed_document)
-            embeddings = self.embedding_provider.embed_texts([chunk.content for chunk in chunk_payloads]) if chunk_payloads else []
+            if not chunk_payloads:
+                raise ValueError(
+                    "No searchable text chunks were produced during ingestion. "
+                    "Check OCR availability or document text extraction quality."
+                )
+            embeddings = (
+                self.embedding_provider.embed_texts([chunk.content for chunk in chunk_payloads])
+                if chunk_payloads and generate_embeddings
+                else []
+            )
             chunk_models = [
                 Chunk(
                     document_id=document.id,
@@ -138,6 +155,20 @@ class DocumentIngestionService:
                     paragraph_end=chunk_payload.paragraph_end,
                     char_start=chunk_payload.char_start,
                     char_end=chunk_payload.char_end,
+                    clause_full_name=chunk_payload.clause_full_name,
+                    article_number=chunk_payload.article_number,
+                    chunk_type=chunk_payload.chunk_type,
+                    heading_path=chunk_payload.heading_path,
+                    structural_search_text=chunk_payload.structural_search_text,
+                    lexical_search_text=build_lexical_search_text(
+                        document_title=document.title,
+                        section_title=chunk_payload.section_title,
+                        clause_full_name=chunk_payload.clause_full_name,
+                        article_number=chunk_payload.article_number,
+                        heading_path=chunk_payload.heading_path,
+                        structural_search_text=chunk_payload.structural_search_text,
+                        content=chunk_payload.content,
+                    ),
                     citation_metadata=chunk_payload.citation_metadata,
                     embedding=embeddings[index] if index < len(embeddings) else None,
                 )
@@ -273,6 +304,10 @@ class DocumentIngestionService:
                 "paragraph_end": chunk.paragraph_end,
                 "char_start": chunk.char_start,
                 "char_end": chunk.char_end,
+                "clause_full_name": chunk.clause_full_name,
+                "article_number": chunk.article_number,
+                "chunk_type": chunk.chunk_type,
+                "heading_path": chunk.heading_path,
                 "citation_metadata": chunk.citation_metadata,
                 "created_at": chunk.created_at,
             }

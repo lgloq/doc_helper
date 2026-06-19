@@ -310,16 +310,18 @@ def should_abstain_from_answer(
             filtered_chunks=[],
         )
 
-    dominant_document_chunks = _prefer_dominant_document(query, relevant_chunks)
-    if dominant_document_chunks:
-        relevant_chunks = dominant_document_chunks
+    if len(_extract_evidence_hints(query)) < 2:
+        dominant_document_chunks = _prefer_dominant_document(query, relevant_chunks)
+        if dominant_document_chunks:
+            relevant_chunks = dominant_document_chunks
 
     top_chunk = relevant_chunks[0]
     top_overlap = _chunk_overlap_score(query, top_chunk)
     top_score = _effective_evidence_score(query, top_chunk)
     average_score = sum(_effective_evidence_score(query, chunk) for chunk in relevant_chunks[:3]) / min(len(relevant_chunks), 3)
+    evidence_hint_coverage_count = _covered_evidence_hint_count(query, relevant_chunks)
 
-    if top_score < 0.28:
+    if top_score < 0.28 and evidence_hint_coverage_count < 2:
         return AbstainDecision(
             should_abstain=True,
             reason="insufficient_relevant_evidence",
@@ -327,7 +329,12 @@ def should_abstain_from_answer(
             filtered_chunks=[],
         )
 
-    if top_overlap < 0.12 and top_chunk.score.lexical_raw <= 0 and _effective_evidence_score(query, top_chunk) < 0.9:
+    if (
+        top_overlap < 0.12
+        and top_chunk.score.lexical_raw <= 0
+        and _effective_evidence_score(query, top_chunk) < 0.9
+        and evidence_hint_coverage_count < 2
+    ):
         return AbstainDecision(
             should_abstain=True,
             reason="insufficient_relevant_evidence",
@@ -335,7 +342,7 @@ def should_abstain_from_answer(
             filtered_chunks=[],
         )
 
-    if top_overlap < 0.18 and top_score < 0.6:
+    if top_overlap < 0.18 and top_score < 0.6 and evidence_hint_coverage_count < 2:
         return AbstainDecision(
             should_abstain=True,
             reason="insufficient_relevant_evidence",
@@ -343,7 +350,7 @@ def should_abstain_from_answer(
             filtered_chunks=[],
         )
 
-    if average_score < 0.22:
+    if average_score < 0.22 and evidence_hint_coverage_count < 2:
         return AbstainDecision(
             should_abstain=True,
             reason="insufficient_relevant_evidence",
@@ -355,7 +362,12 @@ def should_abstain_from_answer(
     if len(top_two) == 2:
         same_strength = abs(_effective_evidence_score(query, top_two[0]) - _effective_evidence_score(query, top_two[1])) <= 0.08
         different_docs = top_two[0].document_id != top_two[1].document_id
-        if same_strength and different_docs and top_overlap < 0.24:
+        if (
+            same_strength
+            and different_docs
+            and top_overlap < 0.24
+            and not _has_strong_clause_level_evidence(query, top_two)
+        ):
             return AbstainDecision(
                 should_abstain=True,
                 reason="conflicting_or_ambiguous_evidence",
@@ -368,6 +380,52 @@ def should_abstain_from_answer(
         reason="relevant_evidence_found",
         filtered_chunks=relevant_chunks,
     )
+
+
+def _has_strong_clause_level_evidence(query: str, chunks: Sequence[SearchResultChunk]) -> bool:
+    normalized_query = _normalize_text_for_match(query)
+    if any(token in normalized_query for token in ("流程", "审批", "时限", "账号", "导出", "补材料")):
+        return False
+    direct_pairs = (
+        ("个体工商户", "个体工商户"),
+        ("经营者", "个人经营"),
+        ("实际经营者", "个人经营"),
+        ("责任", "债务"),
+        ("承担", "承担"),
+        ("共同责任", "无法区分"),
+        ("土地承包", "土地承包"),
+        ("承包地", "承包地"),
+        ("收回", "不得收回"),
+        ("村集体", "不得收回"),
+        ("转让", "转让"),
+        ("本村以外", "本集体经济组织"),
+        ("合同", "合同"),
+    )
+    for chunk in chunks:
+        evidence_score = _effective_evidence_score(query, chunk)
+        evidence_text = _normalize_text_for_match(f"{chunk.section_title or ''} {chunk.content}")
+        has_structural_clause = "条款全称" in chunk.content or re.search(r"第[一二三四五六七八九十百千万零〇两\d]+条", chunk.content)
+        direct_pair_matches = sum(
+            1
+            for query_hint, evidence_hint in direct_pairs
+            if query_hint in normalized_query and evidence_hint in evidence_text
+        )
+        has_direct_subject = any(
+            token in evidence_text
+            for token in (
+                "个体工商户",
+                "债务",
+                "个人经营",
+                "家庭经营",
+                "土地承包",
+                "承包方",
+                "发包方",
+                "合伙合同",
+            )
+        )
+        if has_structural_clause and has_direct_subject and (evidence_score >= 0.9 or direct_pair_matches >= 3):
+            return True
+    return False
 
 
 def _filter_relevant_chunks(
@@ -383,8 +441,10 @@ def _filter_relevant_chunks(
     if "Table row:" in first_chunk.content and _has_structured_table_answer_row(query, first_chunk.content):
         return [first_chunk]
 
+    evidence_hints = _extract_evidence_hints(query)
+    candidate_window = 10 if len(evidence_hints) >= 2 else 6
     ranked_candidates = sorted(
-        retrieval_results[:6],
+        retrieval_results[:candidate_window],
         key=lambda chunk: (
             _chunk_relevance_score(query, chunk),
             chunk.score.rerank if chunk.score.rerank is not None else chunk.score.fused,
@@ -396,8 +456,26 @@ def _filter_relevant_chunks(
     top_score = top_chunk.score.fused
     primary_document_id = top_chunk.document_id
     filtered: list[SearchResultChunk] = []
+    selected_ids: set[UUID] = set()
+
+    if len(evidence_hints) >= 2:
+        for hint in evidence_hints[:3]:
+            matching_chunks = [
+                chunk
+                for chunk in ranked_candidates
+                if chunk.chunk_id not in selected_ids and _chunk_matches_evidence_hint(chunk, hint)
+            ]
+            if not matching_chunks:
+                continue
+            chunk = matching_chunks[0]
+            filtered.append(chunk)
+            selected_ids.add(chunk.chunk_id)
+            if len(filtered) >= 3:
+                break
 
     for chunk in ranked_candidates:
+        if chunk.chunk_id in selected_ids:
+            continue
         overlap = _chunk_overlap_score(query, chunk)
         has_lexical_support = chunk.score.lexical_raw > 0
         relevance_score = _chunk_relevance_score(query, chunk)
@@ -415,6 +493,7 @@ def _filter_relevant_chunks(
             if chunk.score.fused < top_score * 0.85 and overlap < 0.22:
                 continue
         filtered.append(chunk)
+        selected_ids.add(chunk.chunk_id)
 
     if filtered:
         return filtered[:3]
@@ -594,6 +673,48 @@ def _canonicalize_text(value: str) -> str:
     normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized
+
+
+def _normalize_text_for_match(value: str) -> str:
+    return re.sub(r"\s+", "", value.casefold())
+
+
+def _extract_evidence_hints(query: str) -> list[str]:
+    hints: list[str] = []
+    for pattern in (r"“(?P<value>[^”]{2,260})”", r'"(?P<value>[^"]{2,260})"'):
+        for match in re.finditer(pattern, query):
+            cleaned = " ".join(match.group("value").split()).strip(" ：:；;，,、")
+            if cleaned and cleaned not in hints:
+                hints.append(cleaned)
+    return hints
+
+
+def _chunk_matches_evidence_hint(chunk: SearchResultChunk, hint: str) -> bool:
+    normalized_hint = _canonicalize_text(hint).replace(" ", "")
+    if len(normalized_hint) < 4:
+        return False
+    evidence_text = " ".join(
+        part
+        for part in [chunk.document_title, chunk.section_title or "", chunk.preview, chunk.content]
+        if part
+    )
+    normalized_evidence = _canonicalize_text(evidence_text).replace(" ", "")
+    if normalized_hint in normalized_evidence:
+        return True
+    hint_features = _feature_tokens(hint)
+    evidence_features = _feature_tokens(evidence_text)
+    return _feature_overlap(hint_features, evidence_features) >= 0.7
+
+
+def _covered_evidence_hint_count(query: str, chunks: Sequence[SearchResultChunk]) -> int:
+    hints = _extract_evidence_hints(query)
+    if len(hints) < 2:
+        return 0
+    covered = 0
+    for hint in hints[:3]:
+        if any(_chunk_matches_evidence_hint(chunk, hint) for chunk in chunks):
+            covered += 1
+    return covered
 
 
 def _strip_document_suffixes(value: str) -> str:

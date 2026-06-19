@@ -44,9 +44,94 @@ class Settings(BaseSettings):
     query_rewrite_provider: str = "auto"
     query_rewrite_model: str | None = None
     query_rewrite_max_variants: int = 3
+    retrieval_evidence_query_bridge_enabled: bool = False
+    retrieval_evidence_query_bridge_max_queries: int = 3
+    retrieval_query_plan_probe_enabled: bool = True
+    retrieval_query_decomposition_enabled: bool = True
+    retrieval_query_decomposition_min_subquery_candidates: int = 4
+    retrieval_query_decomposition_cross_document_lexical_candidate_cap: int = 16
+    retrieval_query_decomposition_cross_document_indexed_sparse_candidate_cap: int = 24
+    retrieval_query_decomposition_cross_document_source_max_query_terms: int = 4
+    retrieval_query_decomposition_cross_document_skip_lexical_when_indexed_sparse_enabled: bool = True
+    retrieval_query_decomposition_same_document_skip_lexical_when_indexed_sparse_enabled: bool = True
+    retrieval_query_decomposition_cross_document_python_sparse_enabled: bool = True
+    retrieval_query_decomposition_single_anchor_candidate_cap: int = 0
+    retrieval_exact_anchor_source_enabled: bool = True
+    retrieval_table_lookup_source_enabled: bool = True
+    retrieval_table_lookup_source_candidate_cap: int = 24
+    retrieval_subquery_document_evidence_enabled: bool = True
+    retrieval_subquery_document_evidence_seed_documents: int = 3
+    retrieval_subquery_document_evidence_per_subquery: int = 4
+    retrieval_subquery_document_evidence_max_candidates: int = 32
+    retrieval_subquery_document_evidence_score_weight: float = 0.42
+    retrieval_subquery_neighbor_context_enabled: bool = True
+    retrieval_subquery_neighbor_context_seed_count: int = 4
+    retrieval_subquery_neighbor_context_window: int = 5
+    retrieval_subquery_neighbor_context_per_subquery: int = 8
+    retrieval_subquery_neighbor_context_max_candidates: int = 16
+    retrieval_subquery_neighbor_context_score_weight: float = 0.55
+    retrieval_subquery_final_coverage_max_slots: int = 2
+    retrieval_candidate_multiplier: int = 8
+    retrieval_candidate_min: int = 30
+    retrieval_candidate_max: int = 120
+    retrieval_document_diversity_enabled: bool = True
+    retrieval_document_diversity_max_chunks: int = 5
+    retrieval_document_diversity_protected_top_k_slots: int = 1
+    retrieval_domain_profile: str = "enterprise"
+    retrieval_lexical_enabled: bool = True
+    retrieval_vector_enabled: bool = True
+    retrieval_structural_enabled: bool = True
+    retrieval_fusion_strategy: str = "weighted"
+    retrieval_rrf_k: int = 60
+    retrieval_cjk_lexical_cache_enabled: bool = True
+    retrieval_cjk_python_fallback_mode: str = "auto"
+    retrieval_cjk_python_scorer: str = "bm25"
+    retrieval_cjk_sql_sparse_enabled: bool = False
+    retrieval_indexed_sparse_enabled: bool = False
+    retrieval_indexed_sparse_candidate_multiplier: int = 1
+    retrieval_indexed_sparse_sql_row_multiplier: int = 1
+    retrieval_indexed_sparse_max_query_terms: int = 10
+    retrieval_indexed_sparse_timeout_fallback_enabled: bool = True
+    retrieval_indexed_sparse_timeout_fallback_max_query_terms: int = 4
+    retrieval_indexed_sparse_timeout_python_fallback_enabled: bool = False
+    retrieval_indexed_sparse_score_weight: float = 0.48
+    retrieval_in_document_expansion_enabled: bool = True
+    retrieval_in_document_expansion_seed_count: int = 10
+    retrieval_in_document_expansion_per_document: int = 5
+    retrieval_in_document_expansion_max_candidates: int = 32
+    retrieval_in_document_expansion_score_weight: float = 0.42
+    retrieval_in_document_expansion_adjacent_window: int = 2
+    retrieval_document_evidence_sweep_enabled: bool = False
+    retrieval_document_evidence_sweep_seed_documents: int = 6
+    retrieval_document_evidence_sweep_per_document: int = 8
+    retrieval_document_evidence_sweep_max_candidates: int = 48
+    retrieval_document_evidence_sweep_score_weight: float = 0.36
+    retrieval_document_first_evidence_enabled: bool = False
+    retrieval_document_first_evidence_seed_documents: int = 4
+    retrieval_document_first_evidence_per_document: int = 24
+    retrieval_document_first_evidence_max_candidates: int = 96
+    retrieval_document_first_evidence_score_weight: float = 0.34
+    retrieval_document_neighbor_context_enabled: bool = False
+    retrieval_document_neighbor_context_seed_count: int = 80
+    retrieval_document_neighbor_context_window: int = 2
+    retrieval_document_neighbor_context_per_document: int = 64
+    retrieval_document_neighbor_context_max_candidates: int = 256
+    retrieval_document_neighbor_context_score_weight: float = 0.28
+    retrieval_evidence_preservation_enabled: bool = False
+    retrieval_evidence_preservation_pool_limit: int = 40
+    retrieval_evidence_preservation_max_slots: int = 1
+    retrieval_evidence_preservation_min_lexical_norm: float = 0.35
+    retrieval_evidence_preservation_min_fused_score: float = 0.28
+    retrieval_final_coverage_enabled: bool = True
+    retrieval_final_coverage_scan_limit: int = 160
+    retrieval_final_coverage_max_slots: int = 2
+    retrieval_final_coverage_protected_top_k_slots: int = 3
+    retrieval_final_coverage_min_rerank_score: float = 0.28
+    retrieval_final_coverage_min_fused_score: float = 0.02
+    retrieval_heuristic_rerank_enabled: bool = False
     rerank_provider: str = "heuristic"
     rerank_model: str | None = None
-    rerank_max_candidates: int = 10
+    rerank_max_candidates: int = 16
     rerank_timeout_seconds: float = 8.0
     qwen_api_key: str | None = None
     qwen_base_url: str | None = None
@@ -107,6 +192,13 @@ class Settings(BaseSettings):
             return None
         cleaned = self.llm_base_url.strip()
         return cleaned or None
+
+    @property
+    def effective_retrieval_domain_profile(self) -> str:
+        normalized = (self.retrieval_domain_profile or "enterprise").strip().lower().replace("-", "_")
+        if normalized in {"legal", "law", "stard", "stard_legal", "legal_benchmark"}:
+            return "legal_benchmark"
+        return "enterprise"
 
     @property
     def effective_openai_base_url(self) -> str | None:

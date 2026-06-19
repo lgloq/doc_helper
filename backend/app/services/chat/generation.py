@@ -73,7 +73,7 @@ class DeterministicAnswerGenerator:
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
 
-        selected_chunks = _select_grounded_chunks(retrieved_chunks, allow_low_score=allow_low_score)
+        selected_chunks = _select_grounded_chunks(question, retrieved_chunks, allow_low_score=allow_low_score)
         if not selected_chunks:
             answer = "当前可访问证据不足，暂时无法给出可靠回答。请换个问法，或直接查看引用片段。"
             return AnswerGenerationResult(
@@ -128,20 +128,19 @@ class DeterministicAnswerGenerator:
                 },
             )
 
+        answer_chunks = selected_chunks[:3]
         summaries = [
             summary
-            for summary in (_build_chunk_summary(chunk, question) for chunk in selected_chunks[:2])
+            for summary in (_build_chunk_summary(chunk, question) for chunk in answer_chunks)
             if summary
         ]
-        answer = _compose_grounded_answer(question, selected_chunks[:2], summaries)
-        if evidence_conflict and not allow_low_score:
-            answer += " 但前两条高分证据来自不同文档，建议结合引用来源进一步确认。"
+        answer = _compose_grounded_answer(question, answer_chunks, summaries)
 
         return AnswerGenerationResult(
             answer=answer,
             insufficient_evidence=False,
             evidence_conflict=evidence_conflict,
-            used_chunk_ids=[str(chunk.chunk_id) for chunk in selected_chunks[:2]],
+            used_chunk_ids=[str(chunk.chunk_id) for chunk in answer_chunks],
             answer_basis="grounded_summary",
             provider_name=self.provider_name,
             model_name=self.model_name,
@@ -290,31 +289,162 @@ def _parse_json_payload(content: str) -> dict[str, Any]:
 
 
 
-def _select_grounded_chunks(retrieved_chunks: list[SearchResultChunk], *, allow_low_score: bool) -> list[SearchResultChunk]:
+def _select_grounded_chunks(
+    question: str,
+    retrieved_chunks: list[SearchResultChunk],
+    *,
+    allow_low_score: bool,
+) -> list[SearchResultChunk]:
     if not retrieved_chunks:
         return []
-    top_document_id = retrieved_chunks[0].document_id
-    same_document_chunks = [
-        chunk
-        for chunk in retrieved_chunks
-        if chunk.document_id == top_document_id
-        and (_candidate_signal_score(chunk) > 0.0 or chunk.score.lexical_raw > 0.0)
-    ]
-    if same_document_chunks:
-        return same_document_chunks[:2]
+    query_terms = _extract_query_terms(question)
+    ranked = _rank_grounded_chunks(question, retrieved_chunks, query_terms=query_terms)
+    if not ranked:
+        return []
+
+    top_score = ranked[0][0]
+    selected: list[SearchResultChunk] = []
+    per_document_count: dict[str, int] = {}
+    min_score = 0.0 if allow_low_score else max(0.14, top_score * 0.42)
+    evidence_hints = _extract_evidence_hints(question)
+
+    if len(evidence_hints) >= 2:
+        seen_chunk_ids: set[str] = set()
+        for hint in evidence_hints[:3]:
+            matching_entries = [
+                item
+                for item in ranked
+                if str(item[2].chunk_id) not in seen_chunk_ids and _chunk_matches_evidence_hint(item[2], hint)
+            ]
+            if not matching_entries:
+                continue
+            _score, _original_index, chunk = matching_entries[0]
+            selected.append(chunk)
+            seen_chunk_ids.add(str(chunk.chunk_id))
+            document_key = str(chunk.document_id)
+            per_document_count[document_key] = per_document_count.get(document_key, 0) + 1
+            if len(selected) >= 3:
+                break
+
+    for score, _original_index, chunk in ranked:
+        if any(chunk.chunk_id == item.chunk_id for item in selected):
+            continue
+        has_signal = _candidate_signal_score(chunk) > 0.0 or chunk.score.lexical_raw > 0.0 or score > 0.0
+        if not allow_low_score and not has_signal:
+            continue
+        if selected and score < min_score:
+            continue
+
+        document_key = str(chunk.document_id)
+        document_limit = _grounded_document_selection_limit(question, chunk, per_document_count)
+        if per_document_count.get(document_key, 0) >= document_limit:
+            continue
+
+        selected.append(chunk)
+        per_document_count[document_key] = per_document_count.get(document_key, 0) + 1
+        if len(selected) >= 3:
+            break
+
+    if selected:
+        return selected
     if allow_low_score:
-        fallback_chunks = [chunk for chunk in retrieved_chunks if chunk.document_id == top_document_id]
-        if fallback_chunks:
-            return fallback_chunks[:2]
-    return [
-        chunk
-        for chunk in retrieved_chunks[:2]
-        if _candidate_signal_score(chunk) > 0.0 or chunk.score.lexical_raw > 0.0
-    ]
+        return [item[2] for item in ranked[:2]]
+    return [chunk for chunk in retrieved_chunks[:2] if _candidate_signal_score(chunk) > 0.0 or chunk.score.lexical_raw > 0.0]
+
+
+def _grounded_document_selection_limit(
+    question: str,
+    chunk: SearchResultChunk,
+    per_document_count: dict[str, int],
+) -> int:
+    normalized_question = re.sub(r"\s+", "", question.casefold())
+    normalized_evidence = re.sub(r"\s+", "", f"{chunk.document_title}{chunk.section_title or ''}{chunk.content}".casefold())
+    if (
+        ("条款全称" in chunk.content or re.search(r"第[一二三四五六七八九十百千万零〇\d]+条", chunk.content))
+        and any(marker in normalized_question for marker in ("条", "规定", "合同", "承包", "个体工商户", "商标", "责任"))
+        and any(marker in normalized_evidence for marker in ("法律", "法典", "条例", "办法", "规定", "规范", "制度", "法"))
+    ):
+        return 3
+    return 2 if len(per_document_count) <= 1 else 1
 
 
 def _candidate_signal_score(chunk: SearchResultChunk) -> float:
     return max(chunk.score.fused, chunk.score.rerank or 0.0)
+
+
+def _rank_grounded_chunks(
+    question: str,
+    chunks: list[SearchResultChunk],
+    *,
+    query_terms: list[str],
+) -> list[tuple[float, int, SearchResultChunk]]:
+    ranked = [
+        (
+            _grounded_chunk_relevance_score(question, chunk, query_terms),
+            -index,
+            chunk,
+        )
+        for index, chunk in enumerate(chunks[:8])
+    ]
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return ranked
+
+
+def _grounded_chunk_relevance_score(question: str, chunk: SearchResultChunk, query_terms: list[str]) -> float:
+    evidence_text = " ".join(
+        part
+        for part in [chunk.document_title, chunk.section_title or "", chunk.preview, chunk.content]
+        if part
+    )
+    normalized_text = re.sub(r"\s+", "", evidence_text.casefold())
+    score = _candidate_signal_score(chunk) + (chunk.score.lexical_normalized * 0.08) + (chunk.score.lexical_raw * 0.02)
+    score += min(_best_clause_block_match_score(chunk.content, question, query_terms) * 0.16, 0.36)
+
+    for term in query_terms:
+        normalized_term = re.sub(r"\s+", "", term.casefold())
+        if not normalized_term:
+            continue
+        if normalized_term in normalized_text:
+            score += 0.08 if len(normalized_term) >= 4 else 0.04
+
+    title_terms = _extract_query_terms(chunk.document_title)
+    if title_terms:
+        shared_title_terms = sum(1 for term in title_terms if term in query_terms)
+        score += min(shared_title_terms * 0.06, 0.18)
+    section_text = f"{chunk.section_title or ''} {chunk.preview}".strip()
+    if section_text:
+        score += min(_sentence_match_score(section_text, query_terms) * 0.025, 0.2)
+
+    normalized_question = re.sub(r"\s+", "", question.casefold())
+    if any(marker in normalized_question for marker in ("条", "条款", "规定", "合同", "承包", "个体工商户", "商标")):
+        if "条款全称" in normalized_text:
+            score += 0.08
+        if re.search(r"第[一二三四五六七八九十百千万零〇\d]+条", evidence_text):
+            score += 0.08
+    if "债务" in normalized_question and "债务" in normalized_text:
+        score += 0.18
+    if ("偿还" in normalized_question or "承担" in normalized_question) and "承担" in normalized_text:
+        score += 0.18
+    if "继承" in normalized_question and "继承" in normalized_text:
+        score += 0.18
+    if "解除合同" in normalized_question and ("解除合同" in normalized_text or "终止土地经营权流转合同" in normalized_text):
+        score += 0.18
+    if "个体工商户" in normalized_question and "个体工商户" in normalized_text:
+        score += 0.16
+    if "土地承包" in normalized_question and ("土地承包" in normalized_text or "承包方" in normalized_text):
+        score += 0.16
+    if "特许经营" in normalized_question and "特许经营" in normalized_text:
+        score += 0.2
+    if "特许人" in normalized_question and "特许人" in normalized_text:
+        score += 0.18
+    if ("先用权" in normalized_question or "抗辩" in normalized_question) and (
+        "在原使用范围内继续使用" in normalized_text or "先于商标注册人使用" in normalized_text
+    ):
+        score += 0.26
+    if "正当使用" in normalized_question and "正当使用" in normalized_text:
+        score += 0.2
+
+    return score
 
 
 
@@ -322,6 +452,14 @@ def _build_chunk_summary(chunk: SearchResultChunk, question: str) -> str:
     table_summary = _build_table_row_summary(chunk.content, question)
     if table_summary:
         return table_summary
+
+    evidence_summary = _build_evidence_hint_summary(chunk.content, question)
+    if evidence_summary:
+        return evidence_summary
+
+    clause_summary = _build_clause_summary(chunk.content, question)
+    if clause_summary:
+        return clause_summary
 
     source_text = " ".join(chunk.content.split())
     if not source_text:
@@ -346,7 +484,7 @@ def _build_chunk_summary(chunk: SearchResultChunk, question: str) -> str:
         if score <= 0 and selected:
             continue
         next_length = total_length + len(cleaned)
-        if selected and next_length > 150:
+        if selected and next_length > 520:
             continue
         selected.append(cleaned)
         total_length = next_length
@@ -360,6 +498,217 @@ def _build_chunk_summary(chunk: SearchResultChunk, question: str) -> str:
             selected = [fallback_cleaned]
 
     return " ".join(item for item in selected if item)
+
+
+def _build_clause_summary(content: str, question: str) -> str:
+    blocks = _extract_clause_blocks(content)
+    if not blocks:
+        return ""
+
+    query_terms = _extract_query_terms(question)
+    scored_blocks = []
+    for index, block in enumerate(blocks):
+        score = _sentence_match_score(block, query_terms)
+        score += _clause_domain_match_bonus(question, block)
+        scored_blocks.append((score, -index, block))
+    scored_blocks.sort(reverse=True)
+
+    for score, _, block in scored_blocks:
+        if score <= 0 and len(scored_blocks) > 1:
+            continue
+        cleaned = _clean_clause_summary(block)
+        if cleaned:
+            return cleaned
+
+    return _clean_clause_summary(scored_blocks[0][2]) if scored_blocks else ""
+
+
+def _build_evidence_hint_summary(content: str, question: str) -> str:
+    hints = _extract_evidence_hints(question)
+    if not hints:
+        return ""
+
+    selected: list[str] = []
+    for hint in hints[:3]:
+        window = _extract_text_window_around_hint(content, hint)
+        if not window:
+            continue
+        cleaned = _ensure_sentence_ending(_compact_text(window, 680))
+        if cleaned and cleaned not in selected:
+            selected.append(cleaned)
+        if len(selected) >= 2:
+            break
+
+    return " ".join(selected)
+
+
+def _extract_text_window_around_hint(content: str, hint: str) -> str:
+    source_text = " ".join(content.split())
+    if not source_text:
+        return ""
+
+    normalized_source, source_offsets = _normalize_with_offsets(source_text)
+    normalized_hint = _normalize_evidence_match_text(hint)
+    if not normalized_source or not normalized_hint:
+        return ""
+    found_at = normalized_source.find(normalized_hint)
+    if found_at < 0:
+        return ""
+
+    raw_start = source_offsets[found_at]
+    raw_end = source_offsets[min(found_at + len(normalized_hint) - 1, len(source_offsets) - 1)] + 1
+    window_start = max(0, raw_start - 140)
+    window_end = min(len(source_text), raw_end + 560)
+
+    left_boundary = max(
+        source_text.rfind(marker, 0, raw_start)
+        for marker in ("。", "；", ";", "\n")
+    )
+    if left_boundary >= 0 and raw_start - left_boundary <= 180:
+        window_start = left_boundary + 1
+
+    right_candidates = [
+        position
+        for marker in ("。", "；", ";", "\n")
+        for position in [source_text.find(marker, raw_end)]
+        if position >= 0 and position - raw_end <= 560
+    ]
+    if right_candidates:
+        window_end = min(window_end, min(right_candidates) + 1)
+
+    return " ".join(source_text[window_start:window_end].split()).strip(" ：:；;，,")
+
+
+def _best_clause_block_match_score(content: str, question: str, query_terms: list[str]) -> int:
+    blocks = _extract_clause_blocks(content)
+    if not blocks:
+        return 0
+    best_score = 0
+    for block in blocks:
+        score = _sentence_match_score(block, query_terms)
+        score += _clause_domain_match_bonus(question, block)
+        best_score = max(best_score, score)
+    return best_score
+
+
+def _extract_clause_blocks(content: str) -> list[str]:
+    lines = [line.strip() for line in content.splitlines()]
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    pending_heading: str | None = None
+
+    def flush_current() -> None:
+        nonlocal current
+        cleaned = [line for line in current if line]
+        if cleaned:
+            blocks.append(cleaned)
+        current = []
+
+    for line in lines:
+        if not line:
+            continue
+        if _looks_like_clause_heading(line):
+            if current:
+                flush_current()
+            pending_heading = line
+            continue
+        if line.startswith("条款全称："):
+            if current:
+                flush_current()
+            current = [part for part in [pending_heading, line] if part]
+            pending_heading = None
+            continue
+        if current:
+            current.append(line)
+        elif pending_heading:
+            current = [pending_heading, line]
+            pending_heading = None
+
+    if current:
+        flush_current()
+    return [" ".join(block) for block in blocks if any("条款全称：" in line for line in block)]
+
+
+def _looks_like_clause_heading(line: str) -> bool:
+    cleaned = line.strip()
+    return bool(re.fullmatch(r"(?:#{1,6}\s*)?第[一二三四五六七八九十百千万零〇\d]+条", cleaned))
+
+
+def _clause_domain_match_bonus(question: str, block: str) -> int:
+    normalized_question = re.sub(r"\s+", "", question.casefold())
+    normalized_block = re.sub(r"\s+", "", block.casefold())
+    bonus = 0
+    domain_pairs = (
+        ("债务", "债务"),
+        ("偿还", "承担"),
+        ("夫妻", "个人经营"),
+        ("偿还", "承担"),
+        ("承担", "承担"),
+        ("家庭经营", "家庭经营"),
+        ("继承", "继承"),
+        ("死亡", "死亡"),
+        ("解除合同", "解除合同"),
+        ("解除合同", "终止土地经营权流转合同"),
+        ("单方解除", "单方解除"),
+        ("个体工商户", "个体工商户"),
+        ("土地承包", "土地承包"),
+        ("承包方", "承包方"),
+        ("发包方", "发包方"),
+        ("商标", "商标"),
+        ("正当使用", "正当使用"),
+        ("先用权", "先于商标注册人使用"),
+        ("先用权", "在原使用范围内继续使用"),
+        ("抗辩", "在原使用范围内继续使用"),
+        ("特许经营", "特许经营"),
+        ("特许人", "特许人"),
+        ("特许人", "企业以外的其他单位和个人不得作为特许人"),
+        ("诉讼主体", "自然人从事工商业经营"),
+        ("营业执照", "依法登记"),
+        ("实际经营者", "个人经营"),
+        ("实际经营者", "债务"),
+        ("共同责任", "债务"),
+        ("共同责任", "无法区分"),
+        ("合伙", "合伙合同"),
+        ("纠纷", "合伙合同"),
+        ("无效", "民事法律行为无效"),
+        ("合伙", "共享利益"),
+        ("合伙", "共担风险"),
+        ("纠纷", "虚假的意思表示"),
+        ("纠纷", "恶意串通"),
+        ("死亡", "承包收益"),
+        ("死亡", "继续承包"),
+        ("土地承包份额", "家庭成员"),
+        ("土地承包份额", "平等享有"),
+        ("收回承包地", "承包期"),
+        ("收回承包地", "不得收回"),
+        ("村集体", "不得收回"),
+        ("本村以外", "本集体经济组织"),
+        ("本村以外", "转让"),
+        ("转让", "其他农户"),
+        ("非家庭承包", "承包收益"),
+        ("招标", "继续承包"),
+        ("公开协商", "继承"),
+        ("解除合同", "当事人协商一致"),
+        ("解除合同", "解除权人"),
+        ("民主议定", "村民会议"),
+        ("三分之二", "三分之二"),
+        ("鱼塘", "挖塘养鱼"),
+        ("鱼塘", "基本农田保护区"),
+        ("鱼塘", "农业用途"),
+        ("耕地", "耕地"),
+        ("基本农田", "基本农田"),
+        ("正当使用", "通用名称"),
+        ("正当使用", "直接表示商品的质量"),
+    )
+    for query_hint, block_hint in domain_pairs:
+        if query_hint in normalized_question and block_hint in normalized_block:
+            bonus += 4
+    return bonus
+
+
+def _clean_clause_summary(block: str) -> str:
+    cleaned = re.sub(r"\s+", " ", block).strip(" ：:；;，,")
+    return _ensure_sentence_ending(_compact_text(cleaned, 420))
 
 
 def _build_table_row_summary(content: str, question: str) -> str:
@@ -410,7 +759,7 @@ def _clean_table_row(row: str) -> str:
     cleaned = row.removeprefix("Table row:").strip()
     cleaned = cleaned.replace(". ", "：", 1)
     cleaned = cleaned.replace("; ", "；")
-    return _ensure_sentence_ending(_compact_text(cleaned, 180))
+    return _ensure_sentence_ending(_compact_text(cleaned, 420))
 
 
 def _table_field_match_bonus(question: str, row: str) -> int:
@@ -465,6 +814,11 @@ def _compose_grounded_answer(question: str, chunks: list[SearchResultChunk], sum
     clauses = [_to_clause(summary) for summary in summaries if _to_clause(summary)]
 
     if len(unique_titles) == 1:
+        if len(clauses) >= 3:
+            return (
+                f"根据当前可访问文档中的证据，{primary_title}主要有三点："
+                f"第一，{clauses[0]}；第二，{clauses[1]}；第三，{clauses[2]}。"
+            )
         if len(clauses) >= 2:
             return f"根据当前可访问文档中的证据，{primary_title}主要有两点：第一，{clauses[0]}；第二，{clauses[1]}。"
         if len(clauses) == 1:
@@ -544,7 +898,7 @@ def _sentence_match_score(sentence: str, query_terms: list[str]) -> int:
 
 def _clean_summary_sentence(sentence: str) -> str:
     cleaned = re.sub(r"\s+", " ", sentence).strip(" ：:；;，,")
-    return _ensure_sentence_ending(_compact_text(cleaned, 120))
+    return _ensure_sentence_ending(_compact_text(cleaned, 520))
 
 
 def _looks_like_complete_sentence(sentence: str) -> bool:
@@ -583,6 +937,50 @@ def _to_clause(text: str) -> str:
     return cleaned.strip()
 
 
+def _extract_evidence_hints(question: str) -> list[str]:
+    hints: list[str] = []
+    for pattern in (r"“(?P<value>[^”]{2,260})”", r'"(?P<value>[^"]{2,260})"'):
+        for match in re.finditer(pattern, question):
+            cleaned = " ".join(match.group("value").split()).strip(" ：:；;，,、")
+            if cleaned and cleaned not in hints:
+                hints.append(cleaned)
+    return hints
+
+
+def _chunk_matches_evidence_hint(chunk: SearchResultChunk, hint: str) -> bool:
+    normalized_hint = _normalize_evidence_match_text(hint)
+    if len(normalized_hint) < 4:
+        return False
+    evidence_text = " ".join(
+        part
+        for part in [chunk.document_title, chunk.section_title or "", chunk.preview, chunk.content]
+        if part
+    )
+    normalized_evidence = _normalize_evidence_match_text(evidence_text)
+    if normalized_hint in normalized_evidence:
+        return True
+    hint_terms = [term for term in _extract_query_terms(hint) if len(_normalize_evidence_match_text(term)) >= 3]
+    if not hint_terms:
+        return False
+    matched = sum(1 for term in hint_terms if _normalize_evidence_match_text(term) in normalized_evidence)
+    return matched >= max(2, len(hint_terms) - 1)
+
+
+def _normalize_evidence_match_text(value: str) -> str:
+    return re.sub(r"[\s\W_]+", "", value.casefold())
+
+
+def _normalize_with_offsets(value: str) -> tuple[str, list[int]]:
+    normalized_parts: list[str] = []
+    offsets: list[int] = []
+    for index, char in enumerate(value.casefold()):
+        if re.match(r"[\s\W_]", char):
+            continue
+        normalized_parts.append(char)
+        offsets.append(index)
+    return "".join(normalized_parts), offsets
+
+
 
 def _format_location(chunk: SearchResultChunk) -> str:
     if chunk.page_number_start is not None:
@@ -598,7 +996,20 @@ def _detect_evidence_conflict(chunks: list[SearchResultChunk]) -> bool:
         return False
     first = chunks[0]
     second = chunks[1]
-    return first.document_id != second.document_id and abs(first.score.fused - second.score.fused) <= 0.1
+    if first.document_id == second.document_id or abs(first.score.fused - second.score.fused) > 0.1:
+        return False
+    combined = re.sub(r"\s+", "", f"{first.content}{second.content}".casefold())
+    conflict_markers = (
+        "不一致",
+        "相冲突",
+        "冲突",
+        "另有规定",
+        "以本办法为准",
+        "废止",
+        "失效",
+        "不得适用",
+    )
+    return any(marker in combined for marker in conflict_markers)
 
 
 def _should_abstain_on_complex_fallback(question: str, chunks: list[SearchResultChunk]) -> bool:

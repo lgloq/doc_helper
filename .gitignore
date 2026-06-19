@@ -34,6 +34,7 @@ Thumbs.db
 .idea/
 .tmp-chrome-profile/
 .tmp-edge-profile/
+.firecrawl/
 
 # scripts
 scripts/__pycache__/

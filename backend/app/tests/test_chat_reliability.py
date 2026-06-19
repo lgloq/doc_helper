@@ -142,6 +142,120 @@ def test_reliability_explains_conflicting_documents_in_user_message() -> None:
     assert "指定" in decision.user_message or "拆成" in decision.user_message
 
 
+def test_reliability_does_not_abstain_when_strong_clause_evidence_is_available() -> None:
+    civil_doc_id = uuid4()
+    registry_doc_id = uuid4()
+    civil_chunk = _chunk(
+        content=(
+            "条款全称：中华人民共和国民法典第五十六条\n\n"
+            "个体工商户的债务，个人经营的，以个人财产承担；家庭经营的，以家庭财产承担；无法区分的，以家庭财产承担。"
+        ),
+        fused=0.76,
+        rerank=0.82,
+        document_title="中华人民共和国民法典",
+        document_id=civil_doc_id,
+    )
+    registry_chunk = _chunk(
+        content=(
+            "条款全称：个体工商户条例第二条\n\n"
+            "有经营能力的公民，经登记从事工商业经营的，为个体工商户。"
+        ),
+        fused=0.74,
+        rerank=0.81,
+        document_title="个体工商户条例",
+        document_id=registry_doc_id,
+    )
+
+    decision = should_abstain_from_answer(
+        "个体工商户营业执照上登记的经营者与实际经营者不一致的，是否承担共同责任？",
+        [civil_chunk, registry_chunk],
+        None,
+    )
+
+    assert decision.should_abstain is False
+    assert decision.filtered_chunks
+
+
+def test_reliability_preserves_each_quoted_cross_document_evidence_hint() -> None:
+    left_doc_id = uuid4()
+    right_doc_id = uuid4()
+    left_chunk = _chunk(
+        content=(
+            "4、第三期股权激励平台基本情况 2023 年 10 月 13 日，发行人召开第一届董事会第二次会议，"
+            "审议通过了第三期股权激励计划相关议案。"
+        ),
+        fused=0.42,
+        rerank=0.42,
+        chunk_index=12,
+        document_title="苏州汇川联合动力系统股份有限公司",
+        document_id=left_doc_id,
+    )
+    right_chunk = _chunk(
+        content=(
+            "九、本次发行后公司股利分配政策，公司可以采取现金、股票或者现金加股票相结合的方式分配利润，"
+            "具备现金分红条件的，应当优先采用现金分红。"
+        ),
+        fused=0.92,
+        rerank=0.92,
+        chunk_index=3,
+        document_title="深圳市东方嘉盛供应链股份有限公司首次公开发行 A 股股票招股说明书",
+        document_id=right_doc_id,
+    )
+    duplicate_right_chunk = _chunk(
+        content="报告期内实际股利分配情况显示，公司曾向全体股东按各自持股比例分配利润。",
+        fused=0.88,
+        rerank=0.88,
+        chunk_index=4,
+        document_title="深圳市东方嘉盛供应链股份有限公司首次公开发行 A 股股票招股说明书",
+        document_id=right_doc_id,
+    )
+
+    decision = should_abstain_from_answer(
+        "比较苏州汇川联合动力系统股份有限公司和深圳市东方嘉盛供应链股份有限公司两份招股与上市申报材料，"
+        "分别关注“第三期股权激励平台基本情况 2023 年 10 月 13 日”和"
+        "“公司可以采取现金、股票或者现金加股票相结合的方式分配利润”，各引用一处原文依据。",
+        [right_chunk, duplicate_right_chunk, left_chunk],
+        None,
+    )
+
+    assert decision.should_abstain is False
+    assert decision.filtered_chunks
+    filtered_ids = {chunk.document_id for chunk in decision.filtered_chunks}
+    assert left_doc_id in filtered_ids
+    assert right_doc_id in filtered_ids
+
+
+def test_reliability_allows_low_score_chunks_when_two_quoted_hints_are_covered() -> None:
+    left_doc_id = uuid4()
+    right_doc_id = uuid4()
+    left_chunk = _chunk(
+        content="05 倍（发行市净率按照每股发行价格除以发行后每股净资产计算）。",
+        fused=0.12,
+        rerank=0.12,
+        document_title="河北科力汽车装备股份有限公司上市公告书",
+        document_id=left_doc_id,
+    )
+    right_chunk = _chunk(
+        content="若上述情形发生于公司本次公开发行的新股已完成上市交易之后，公司及控股股东将按承诺回购。",
+        fused=0.11,
+        rerank=0.11,
+        document_title="中仑新材料股份有限公司上市公告书",
+        document_id=right_doc_id,
+    )
+
+    decision = should_abstain_from_answer(
+        "比较河北科力汽车装备股份有限公司和中仑新材料股份有限公司两份招股与上市申报材料，"
+        "分别关注“05 倍（发行市净率按照每股发行价格除以发行后每股净资产计算”和"
+        "“若上述情形发生于公司本次公开发行的新股已完成上市交易之后”，各引用一处原文依据。",
+        [left_chunk, right_chunk],
+        None,
+    )
+
+    assert decision.should_abstain is False
+    assert decision.filtered_chunks
+    assert {chunk.document_id for chunk in decision.filtered_chunks} == {left_doc_id, right_doc_id}
+
+
 def test_reliability_prefers_dominant_supplier_document_for_multi_clause_question() -> None:
     supplier_doc_id = uuid4()
     export_doc_id = uuid4()

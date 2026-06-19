@@ -5,6 +5,7 @@ from io import BytesIO
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.security import hash_password
 from app.models.enums import RoleName
 from app.models.role import Role
@@ -69,6 +70,9 @@ def _ingest_version(client: TestClient, token: str, document_id: str, version_id
 
 
 def test_document_versions_and_diff_flow(client: TestClient, db_session: Session, monkeypatch) -> None:
+    monkeypatch.setenv("DIFF_SUMMARY_PROVIDER", "deterministic")
+    get_settings.cache_clear()
+
     admin_role = Role(name=RoleName.ADMIN, description="Admin")
     db_session.add(admin_role)
     db_session.flush()

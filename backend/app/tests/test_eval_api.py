@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from types import SimpleNamespace
@@ -267,6 +268,43 @@ def test_eval_service_normalizes_fact_specs_for_demo_annotations() -> None:
     assert annotation["expected_key_fact_specs"][0]["aliases"][0] == "回滚超过15分钟要立即升级给平台经理"
 
 
+def test_eval_service_uses_external_benchmark_annotations_from_notes() -> None:
+    case = SimpleNamespace(
+        dataset_name="financebench_small",
+        case_name="sample external case",
+        is_demo_case=False,
+        expected_document_titles=["legacy doc"],
+        expected_answer_keywords=["legacy keyword"],
+        notes=json.dumps(
+            {
+                "benchmark_annotation": {
+                    "expected_outcome": "answer",
+                    "expected_retrieval_titles": ["financebench:10k"],
+                    "expected_evidence_titles": ["financebench:10k"],
+                    "expected_key_facts": [
+                        {
+                            "label": "Net sales were 34.2 billion",
+                            "aliases": ["net sales of $34.2 billion"],
+                            "weight": 1.0,
+                        }
+                    ],
+                    "forbidden_key_facts": ["private margin forecast"],
+                    "scoring_notes": "external annotation should override legacy keywords",
+                }
+            }
+        ),
+    )
+
+    annotation = EvalService._resolve_case_annotations(case)
+
+    assert annotation["source"] == "external_notes"
+    assert annotation["expected_retrieval_titles"] == ["financebench:10k"]
+    assert annotation["expected_evidence_titles"] == ["financebench:10k"]
+    assert annotation["expected_key_facts"] == ["Net sales were 34.2 billion"]
+    assert annotation["forbidden_key_facts"] == ["private margin forecast"]
+    assert annotation["scoring_notes"] == "external annotation should override legacy keywords"
+
+
 def test_permission_isolation_metric_treats_forbidden_fact_leak_as_failure() -> None:
     breakdown = EvalService._compute_permission_isolation_metrics(
         forbidden_titles={"安全例外登记"},
@@ -361,6 +399,155 @@ def test_eval_service_fact_support_requires_answer_and_evidence_overlap() -> Non
     assert support["support_f1"] == 0.0
     assert support["unsupported_answer_labels"] == ["回滚超过15分钟要立即升级给平台经理"]
     assert support["evidence_only_labels"] == ["经理需要在五分钟内建立事故沟通渠道并明确事故 owner"]
+
+
+def test_answer_faithfulness_scores_supported_answer_precision_not_completeness() -> None:
+    fact_specs = EvalService._normalize_fact_specs(
+        [
+            "回滚超过15分钟要立即升级给平台经理",
+            "经理需要在五分钟内建立事故沟通渠道并明确事故 owner",
+        ]
+    )
+    answer_matches = EvalService._match_fact_specs(fact_specs, "回滚超过15分钟要立即升级给平台经理。")
+    evidence_matches = EvalService._match_fact_specs_in_chunks(
+        fact_specs,
+        [
+            SimpleNamespace(
+                document_title="平台发布手册",
+                section_title="事故响应",
+                preview="",
+                content=(
+                    "回滚超过15分钟要立即升级给平台经理。"
+                    "经理需要在五分钟内建立事故沟通渠道并明确事故 owner。"
+                ),
+            )
+        ],
+    )
+    support = EvalService._compute_fact_support_metrics(
+        expected_fact_specs=fact_specs,
+        answer_fact_matches=answer_matches,
+        evidence_fact_matches=evidence_matches,
+    )
+
+    faithfulness = EvalService._compute_answer_faithfulness(
+        answer_fact_recall=answer_matches["coverage"],
+        evidence_fact_recall=evidence_matches["coverage"],
+        matched_fact_labels=answer_matches["matched_labels"],
+        missing_fact_labels=answer_matches["missing_labels"],
+        supported_fact_labels=support["supported_labels"],
+        unsupported_answer_fact_labels=support["unsupported_answer_labels"],
+        evidence_only_fact_labels=support["evidence_only_labels"],
+        prepared=SimpleNamespace(
+            answer_result=SimpleNamespace(
+                answer="根据当前可访问文档中的证据，平台发布手册主要说明：回滚超过15分钟要立即升级给平台经理。",
+                insufficient_evidence=False,
+                evidence_conflict=False,
+            ),
+            selected_chunks=[
+                SimpleNamespace(
+                    chunk_id="chunk-1",
+                    document_title="平台发布手册",
+                    section_title="事故响应",
+                    preview="",
+                    content=(
+                        "回滚超过15分钟要立即升级给平台经理。"
+                        "经理需要在五分钟内建立事故沟通渠道并明确事故 owner。"
+                    ),
+                )
+            ],
+        ),
+        refusal_expected=False,
+        support_precision=support["support_precision"],
+        supported_fact_recall=support["support_recall"],
+        forbidden_fact_leak_ratio=0.0,
+    )
+
+    assert faithfulness["score"] == 1.0
+    assert faithfulness["formula"] == "mean(max_claim_support_by_selected_evidence) - forbidden_fact_leak_rate"
+    assert faithfulness["claim_support_score"] == 1.0
+    assert faithfulness["claim_count"] == 1
+    assert faithfulness["supported_fact_precision"] == 1.0
+    assert faithfulness["supported_fact_recall"] == 0.5
+    assert faithfulness["support_f1"] == 0.6667
+    assert faithfulness["evidence_only_facts"] == ["经理需要在五分钟内建立事故沟通渠道并明确事故 owner"]
+
+
+def test_claim_level_faithfulness_scores_unsupported_claims_gradually() -> None:
+    faithfulness = EvalService._compute_answer_faithfulness(
+        answer_fact_recall=0.0,
+        evidence_fact_recall=0.0,
+        matched_fact_labels=[],
+        missing_fact_labels=[],
+        supported_fact_labels=[],
+        unsupported_answer_fact_labels=[],
+        evidence_only_fact_labels=[],
+        prepared=SimpleNamespace(
+            answer_result=SimpleNamespace(
+                answer=(
+                    "根据当前可访问文档中的证据，平台发布手册主要有两点："
+                    "第一，回滚超过15分钟要立即升级给平台经理；"
+                    "第二，事故 owner 可以在两小时后再指定。"
+                ),
+                insufficient_evidence=False,
+                evidence_conflict=False,
+            ),
+            selected_chunks=[
+                SimpleNamespace(
+                    chunk_id="chunk-1",
+                    document_title="平台发布手册",
+                    section_title="事故响应",
+                    preview="",
+                    content="回滚超过15分钟要立即升级给平台经理，并且经理需要在五分钟内明确事故 owner。",
+                )
+            ],
+        ),
+        refusal_expected=False,
+        support_precision=0.0,
+        supported_fact_recall=0.0,
+        forbidden_fact_leak_ratio=0.0,
+    )
+
+    assert faithfulness["claim_count"] == 2
+    assert faithfulness["answer_claims"][0]["support_score"] == 1.0
+    assert faithfulness["answer_claims"][1]["support_score"] < 0.5
+    assert 0.45 <= faithfulness["score"] < 0.8
+    assert faithfulness["unsupported_claims"] == ["事故 owner 可以在两小时后再指定"]
+
+
+def test_claim_level_faithfulness_penalizes_numeric_conflict() -> None:
+    score = EvalService._score_claim_against_evidence(
+        "处理时限为48小时",
+        "Table row: 审批人=采购负责人; 处理时限=24小时; 脱敏要求=客户手机号后四位。",
+    )
+
+    assert score["score"] <= 0.35
+    assert any("missing_numeric_or_date_constraints" in item for item in score["reasons"])
+
+
+def test_claim_level_faithfulness_supports_table_key_value_claims() -> None:
+    score = EvalService._score_claim_against_evidence(
+        "审批人为采购负责人，处理时限为24小时",
+        "Table row: 采购类型=紧急采购; 审批人=采购负责人; 处理时限=24小时; 脱敏要求=客户手机号后四位。",
+    )
+
+    assert score["score"] >= 0.8
+    assert any("structured_pair_support" in item for item in score["reasons"])
+
+
+def test_answer_faithfulness_claim_extraction_ignores_boilerplate() -> None:
+    claims = EvalService._extract_answer_claims(
+        "根据当前可访问文档中的证据，平台发布手册主要有两点：第一，回滚超过15分钟要立即升级给平台经理；第二，建议结合引用片段进一步确认。"
+    )
+
+    assert [item["text"] for item in claims] == ["回滚超过15分钟要立即升级给平台经理"]
+
+
+def test_answer_faithfulness_claim_extraction_ignores_no_evidence_fallback() -> None:
+    claims = EvalService._extract_answer_claims(
+        "当前可访问范围内未找到相关文档内容。该文档可能不存在，或你当前没有访问权限。"
+    )
+
+    assert claims == []
 
 
 def test_retrieval_metric_uses_precision_ranking_and_fact_coverage_for_answer_cases() -> None:

@@ -138,6 +138,44 @@ def test_csv_upload_ingest_exposes_table_text_in_chunks(client: TestClient, db_s
     assert "Request=Refund; Approver=Manager; SLA=2 days." in chunk_text
 
 
+def test_empty_parse_ingest_fails_instead_of_ready_with_zero_chunks(client: TestClient, db_session: Session) -> None:
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add(admin_role)
+    db_session.flush()
+
+    _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+    db_session.commit()
+
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    upload_response = client.post(
+        "/api/v1/documents/upload",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        files={"file": ("empty.txt", BytesIO(b"   \n\n\t"), "text/plain")},
+        data={"title": "Empty Extraction", "description": "empty parse", "status": "active"},
+    )
+    assert upload_response.status_code == 200
+    document_payload = upload_response.json()
+    document_id = document_payload["document"]["id"]
+    version_id = document_payload["version"]["id"]
+
+    ingest_response = client.post(
+        f"/api/v1/documents/{document_id}/ingest",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"version_id": version_id},
+    )
+    assert ingest_response.status_code == 422
+    assert "No searchable text chunks" in ingest_response.json()["detail"]
+
+    versions_response = client.get(
+        f"/api/v1/documents/{document_id}/versions",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert versions_response.status_code == 200
+    version_payload = versions_response.json()[0]
+    assert version_payload["ingest_status"] == "failed"
+    assert "No searchable text chunks" in version_payload["ingest_error"]
+
+
 def test_exact_duplicate_upload_with_same_title_is_rejected(client: TestClient, db_session: Session) -> None:
     admin_role = Role(name=RoleName.ADMIN, description="Admin")
     db_session.add(admin_role)

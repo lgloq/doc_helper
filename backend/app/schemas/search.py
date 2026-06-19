@@ -34,6 +34,10 @@ class SearchResultChunk(BaseModel):
     paragraph_end: int | None = None
     char_start: int | None = None
     char_end: int | None = None
+    clause_full_name: str | None = None
+    article_number: str | None = None
+    chunk_type: str | None = None
+    heading_path: str | None = None
     citation_metadata: dict | None = None
     citation_preview: dict
     score: SearchScoreBreakdown
@@ -43,6 +47,7 @@ class SearchDebugInfo(BaseModel):
     accessible_document_count: int
     lexical_candidate_count: int
     vector_candidate_count: int
+    structural_candidate_count: int = 0
     fusion_strategy: str
     pre_rerank_count: int = 0
     post_rerank_count: int = 0
@@ -54,9 +59,35 @@ class SearchDebugInfo(BaseModel):
     query_rewrite_provider: str | None = None
     query_rewrite_model: str | None = None
     query_rewrite_latency_ms: int | None = None
+    query_decomposition_applied: bool = False
+    subquery_count: int = 0
+    subquery_candidate_counts: list[dict[str, object]] = Field(default_factory=list)
+    subquery_timeout_count: int = 0
+    subquery_timeout_fallback_candidate_count: int = 0
     lexical_retrieval_latency_ms: int | None = None
+    indexed_sparse_candidate_count: int = 0
+    indexed_sparse_retrieval_latency_ms: int | None = None
+    structural_retrieval_latency_ms: int | None = None
     vector_embedding_latency_ms: int | None = None
     vector_retrieval_latency_ms: int | None = None
+    expansion_candidate_count: int = 0
+    in_document_expansion_latency_ms: int | None = None
+    document_evidence_sweep_candidate_count: int = 0
+    document_evidence_sweep_latency_ms: int | None = None
+    subquery_document_evidence_candidate_count: int = 0
+    subquery_document_evidence_latency_ms: int | None = None
+    subquery_neighbor_context_candidate_count: int = 0
+    subquery_neighbor_context_latency_ms: int | None = None
+    document_first_evidence_candidate_count: int = 0
+    document_first_evidence_latency_ms: int | None = None
+    document_neighbor_context_candidate_count: int = 0
+    document_neighbor_context_latency_ms: int | None = None
+    evidence_preservation_candidate_count: int = 0
+    evidence_preservation_selected_count: int = 0
+    final_coverage_candidate_count: int = 0
+    final_coverage_selected_count: int = 0
+    subquery_final_coverage_candidate_count: int = 0
+    subquery_final_coverage_selected_count: int = 0
     fusion_latency_ms: int | None = None
     rerank_latency_ms: int | None = None
     search_total_latency_ms: int | None = None
@@ -64,6 +95,11 @@ class SearchDebugInfo(BaseModel):
     query_plan_selected: str | None = None
     query_plan_selection_reason: str | None = None
     query_plan_probe_applied: bool = False
+    query_plan_probe_latency_ms: int | None = None
+    permission_probe_early_stop_applied: bool = False
+    permission_probe_target_hint: str | None = None
+    permission_probe_accessible_target_count: int = 0
+    permission_probe_inaccessible_target_count: int = 0
 
 
 class SearchResponse(BaseModel):

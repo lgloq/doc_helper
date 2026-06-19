@@ -18,6 +18,19 @@ type InsightsView = "eval" | "trace";
 type EvalCaseFilter = "all" | "answer_expected" | "refusal_expected";
 type EvalRunFilter = "latest_valid" | "connection_failures";
 
+function formatEvalDatasetName(value: string | null | undefined): string {
+  if (value === "demo_access_matrix_eval") {
+    return "权限隔离演示评测";
+  }
+  if (value === "demo_permission_eval") {
+    return "权限回归演示评测";
+  }
+  if (value === "zh_enterprise_v1_seed") {
+    return "中文企业文档评测集";
+  }
+  return value ?? "-";
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value ? (value as Record<string, unknown>) : null;
 }
@@ -210,7 +223,7 @@ export function InsightsPage() {
     }
     setError(null);
     setIsRunningEval(true);
-    setStatusMessage(`正在运行 ${DEMO_EVAL_DATASET} 演示评测...`);
+    setStatusMessage(`正在运行${formatEvalDatasetName(DEMO_EVAL_DATASET)}...`);
     try {
       const run = await api.runEval(token, { dataset_name: DEMO_EVAL_DATASET, top_k: 5, seed_demo_cases: true });
       setError(null);
@@ -220,11 +233,11 @@ export function InsightsPage() {
       if (run.status === "failed") {
         setStatusMessage(
           isConnectionFailure(run.error_text)
-            ? `评测已返回：${run.dataset_name} 因上游连接中断提前结束。`
-            : `评测已返回：${run.dataset_name} 运行失败。`,
+            ? `评测已返回：${formatEvalDatasetName(run.dataset_name)}因上游连接中断提前结束。`
+            : `评测已返回：${formatEvalDatasetName(run.dataset_name)}运行失败。`,
         );
       } else {
-        setStatusMessage(`评测完成：${run.dataset_name}，共运行 ${run.results.length} 条用例。`);
+        setStatusMessage(`评测完成：${formatEvalDatasetName(run.dataset_name)}，共运行 ${run.results.length} 条用例。`);
       }
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "评测运行失败。");
@@ -633,7 +646,7 @@ export function InsightsPage() {
                           type="button"
                         >
                           <div className="list-card-topline">
-                            <strong>{run.dataset_name}</strong>
+                            <strong>{formatEvalDatasetName(run.dataset_name)}</strong>
                             <StatusBadge tone={evalRunStatusTone(run.status, run.error_text)}>
                               {evalRunStatusLabel(run.status, run.error_text)}
                             </StatusBadge>
@@ -665,7 +678,7 @@ export function InsightsPage() {
             {isAdmin && selectedRun ? (
               <>
                 <div className="panel-heading">
-                  <h3>{selectedRun.dataset_name}</h3>
+                  <h3>{formatEvalDatasetName(selectedRun.dataset_name)}</h3>
                   <p>{formatDateTime(selectedRun.created_at)}</p>
                 </div>
                 {selectedRunIsBaseline ? (
