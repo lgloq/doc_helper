@@ -107,6 +107,26 @@ class DeterministicAnswerGenerator:
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
 
+        simple_table_answer = _build_simple_table_lookup_answer(question, selected_chunks[:3])
+        if simple_table_answer:
+            return AnswerGenerationResult(
+                answer=simple_table_answer,
+                insufficient_evidence=False,
+                evidence_conflict=evidence_conflict,
+                used_chunk_ids=[str(chunk.chunk_id) for chunk in selected_chunks[:3]],
+                answer_basis="simple_table_lookup_answer",
+                provider_name=self.provider_name,
+                model_name=self.model_name,
+                prompt_tokens=max((len(question) + sum(len(chunk.content) for chunk in selected_chunks[:3])) // 4, 1),
+                completion_tokens=max(len(simple_table_answer) // 4, 1),
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                raw_payload={
+                    "history_lines": history_lines,
+                    "conversation_context": conversation_context,
+                    "allow_low_score": allow_low_score,
+                },
+            )
+
         structured_answer = _build_structured_table_answer(question, selected_chunks[:3])
         if structured_answer:
             return AnswerGenerationResult(
@@ -1071,6 +1091,102 @@ def _build_complex_fallback_message(question: str, document_titles: list[str]) -
         "建议你把问题拆成两到三个更明确的子问题后再问。"
     )
 
+
+def _build_simple_table_lookup_answer(question: str, chunks: list[SearchResultChunk]) -> str | None:
+    normalized_question = re.sub(r"\s+", "", question.casefold())
+    if not any(token in normalized_question for token in ("首次响应", "响应时间", "响应要求", "多久响应")):
+        return None
+
+    row_entries: list[tuple[SearchResultChunk, dict[str, str], str]] = []
+    for chunk in chunks:
+        for row in _extract_table_rows(chunk.content):
+            parsed = _parse_table_row_fields(row)
+            if parsed:
+                row_entries.append((chunk, parsed, row))
+    if not row_entries:
+        return None
+
+    def row_score(parsed: dict[str, str], row: str) -> int:
+        normalized_row = re.sub(r"\s+", "", row.casefold())
+        score = _sentence_match_score(row, _extract_query_terms(question)) + _table_field_match_bonus(question, row)
+        if "首次响应" in parsed:
+            score += 8
+        if "历史响应时间" in parsed:
+            score += 4
+        if any(token in normalized_question for token in ("高优先级", "高优", "p1")):
+            if parsed.get("工单等级", "").casefold() == "p1":
+                score += 12
+            if parsed.get("问题类型") == "高优先级工单":
+                score += 6
+        if "当前客户工单响应矩阵" in row:
+            score += 4
+        if "已被当前矩阵替代" in row:
+            score += 2
+        return score
+
+    scored = sorted(
+        ((row_score(parsed, row), chunk, parsed, row) for chunk, parsed, row in row_entries),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    if not scored or scored[0][0] <= 0:
+        return None
+
+    current_entry = next(
+        (
+            item
+            for item in scored
+            if item[2].get("工单等级", "").casefold() == "p1" and item[2].get("首次响应")
+        ),
+        None,
+    )
+    history_entry = next(
+        (
+            item
+            for item in scored
+            if item[2].get("问题类型") == "高优先级工单" and item[2].get("历史响应时间")
+        ),
+        None,
+    )
+
+    clauses: list[str] = []
+    source_title = scored[0][1].document_title
+    if current_entry:
+        source_title = current_entry[1].document_title
+        parsed = current_entry[2]
+        level = parsed.get("工单等级") or "P1"
+        first_response = parsed.get("首次响应")
+        clauses.append(f"按当前客户工单响应矩阵，{level} 工单首次响应要求是 {first_response}")
+    elif scored[0][2].get("首次响应"):
+        parsed = scored[0][2]
+        subject = parsed.get("工单等级") or parsed.get("问题类型") or "该类工单"
+        clauses.append(f"{subject}的首次响应要求是 {parsed['首次响应']}")
+
+    if history_entry and any(token in normalized_question for token in ("高优先级", "高优")):
+        parsed = history_entry[2]
+        status = parsed.get("当前状态", "")
+        history_time = parsed.get("历史响应时间")
+        if history_time and "替代" in status:
+            clauses.append(f"历史“高优先级工单 {history_time}”口径已被当前矩阵替代")
+        elif history_time:
+            clauses.append(f"历史高优先级工单响应时间为 {history_time}")
+
+    wants_multiple_levels = any(token in normalized_question for token in ("p2", "各等级", "分别", "对比", "矩阵"))
+    if wants_multiple_levels:
+        p2_entry = next(
+            (
+                item
+                for item in scored
+                if item[2].get("工单等级", "").casefold() == "p2" and item[2].get("首次响应")
+            ),
+            None,
+        )
+        if p2_entry:
+            clauses.append(f"P2 工单首次响应要求是 {p2_entry[2]['首次响应']}")
+
+    if not clauses:
+        return None
+    return f"依据《{source_title}》，{'；'.join(clauses)}。"
 
 def _build_structured_table_answer(question: str, chunks: list[SearchResultChunk]) -> str | None:
     if not chunks:

@@ -80,6 +80,9 @@ class Settings(BaseSettings):
     retrieval_domain_profile: str = "enterprise"
     retrieval_lexical_enabled: bool = True
     retrieval_vector_enabled: bool = True
+    retrieval_vector_skip_when_keyword_hits_enabled: bool = True
+    retrieval_vector_skip_min_keyword_hits: int = 4
+    retrieval_vector_ivfflat_probes: int = 20
     retrieval_structural_enabled: bool = True
     retrieval_fusion_strategy: str = "weighted"
     retrieval_rrf_k: int = 60

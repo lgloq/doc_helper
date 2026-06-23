@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import re
 from uuid import UUID
 
@@ -21,11 +21,14 @@ from app.schemas.chat import (
     ChatSessionDetailRead,
     ChatSessionRead,
 )
+from app.schemas.search import SearchDebugInfo
+from app.services.chat.evidence_audit import build_evidence_audit
 from app.services.llm.orchestrator import CopilotOrchestrator, CopilotRunResult
 from app.services.observability.service import ObservabilityService
 
 DEFAULT_CHAT_SESSION_TITLE = "新会话"
 GENERIC_CHAT_SESSION_TITLES = {DEFAULT_CHAT_SESSION_TITLE, "New Chat"}
+CLIENT_REQUEST_STALE_AFTER_SECONDS = 180
 
 
 @dataclass
@@ -89,24 +92,111 @@ class ChatService:
     def create_message(self, actor: User, session_id: UUID, payload: ChatMessageCreate) -> ChatMessageCreateResponse:
         chat_session = self._get_session_or_404(actor, session_id, include_messages=True)
         existing_messages = list(chat_session.messages)
+        client_request_id = self._normalize_client_request_id(payload.client_request_id)
 
-        user_message = ChatMessage(
-            session_id=chat_session.id,
-            author_user_id=actor.id,
-            role=MessageRole.USER,
-            content=payload.content,
-            message_metadata={"top_k": payload.top_k},
-        )
-        if not existing_messages and self._is_generic_session_title(chat_session.title):
-            chat_session.title = self._truncate_session_title(payload.content)
-        chat_session.updated_at = datetime.now(UTC)
-        self.chat_repository.add_message(user_message)
-        self.session.flush()
+        if client_request_id:
+            restored_response = self._restore_completed_client_request(chat_session, client_request_id)
+            if restored_response:
+                return restored_response
+
+        user_message = None
+        if client_request_id:
+            user_message = self._find_client_request_user_message(chat_session, client_request_id)
+            if user_message:
+                if user_message.content.strip() != payload.content.strip():
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="client_request_id 已用于另一条问题。",
+                    )
+                if not self._is_stale_processing_request(user_message):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="该问题仍在处理中，请稍后刷新会话查看结果。",
+                    )
+                existing_messages = [message for message in existing_messages if message.id != user_message.id]
+                user_message.message_metadata = {
+                    **(user_message.message_metadata or {}),
+                    "top_k": payload.top_k,
+                    "client_request_id": client_request_id,
+                    "client_request_status": "processing",
+                    "processing_started_at": datetime.now(UTC).isoformat(),
+                    "retry_count": int((user_message.message_metadata or {}).get("retry_count") or 0) + 1,
+                }
+                chat_session.updated_at = datetime.now(UTC)
+                self.session.commit()
+
+        if user_message is None:
+            user_metadata = {"top_k": payload.top_k}
+            if client_request_id:
+                user_metadata.update(
+                    {
+                        "client_request_id": client_request_id,
+                        "client_request_status": "processing",
+                        "processing_started_at": datetime.now(UTC).isoformat(),
+                    }
+                )
+            user_message = ChatMessage(
+                session_id=chat_session.id,
+                author_user_id=actor.id,
+                role=MessageRole.USER,
+                content=payload.content,
+                message_metadata=user_metadata,
+            )
+            if not existing_messages and self._is_generic_session_title(chat_session.title):
+                chat_session.title = self._truncate_session_title(payload.content)
+            chat_session.updated_at = datetime.now(UTC)
+            self.chat_repository.add_message(user_message)
+            self.session.flush()
+            if client_request_id:
+                self.session.commit()
+
         user_message_id = user_message.id
         chat_session_id = chat_session.id
 
-        prepared = self._prepare_answer(actor, payload.content, payload.top_k, existing_messages, session_id=chat_session.id)
+        try:
+            prepared = self._prepare_answer(actor, payload.content, payload.top_k, existing_messages, session_id=chat_session.id)
+        except Exception as exc:
+            if client_request_id:
+                self.session.rollback()
+                persisted_user_message = self.chat_repository.get_message(user_message_id)
+                if persisted_user_message is not None:
+                    persisted_user_message.message_metadata = {
+                        **(persisted_user_message.message_metadata or {}),
+                        "client_request_id": client_request_id,
+                        "client_request_status": "failed",
+                        "failed_at": datetime.now(UTC).isoformat(),
+                        "error_text": str(exc),
+                    }
+                    self.session.commit()
+            raise
+
         assistant_result = prepared.answer_result
+        evidence_audit = build_evidence_audit(assistant_result.answer, prepared.selected_chunks)
+        assistant_metadata = {
+            "answer_provider": assistant_result.provider_name,
+            "answer_basis": assistant_result.answer_basis,
+            "evidence_conflict": assistant_result.evidence_conflict,
+            "retrieval_debug": prepared.retrieval_response.debug.model_dump(),
+            "used_chunk_ids": [str(item.chunk_id) for item in prepared.selected_chunks],
+            "candidate_chunk_ids": [str(item.chunk_id) for item in prepared.candidate_chunks],
+            "retrieved_chunk_ids": [str(item.chunk_id) for item in prepared.retrieval_response.matched_chunks],
+            "router_decision": prepared.router_result.decision.model_dump(mode="json"),
+            "tool_execution": prepared.tool_metadata.model_dump(mode="json"),
+            "structured_result": prepared.structured_result.model_dump(mode="json"),
+            "agent_steps": [item.model_dump(mode="json") for item in prepared.agent_steps],
+            "agent_run_trace": prepared.agent_run_trace.model_dump(mode="json") if prepared.agent_run_trace else None,
+            "evidence_audit": evidence_audit,
+            "raw_payload": assistant_result.raw_payload,
+        }
+        if client_request_id:
+            assistant_metadata.update(
+                {
+                    "client_request_id": client_request_id,
+                    "client_request_status": "completed",
+                    "completed_at": datetime.now(UTC).isoformat(),
+                    "user_message_id": str(user_message_id),
+                }
+            )
         assistant_message = ChatMessage(
             session_id=chat_session.id,
             author_user_id=None,
@@ -118,26 +208,21 @@ class ChatService:
             prompt_tokens=assistant_result.prompt_tokens,
             completion_tokens=assistant_result.completion_tokens,
             latency_ms=assistant_result.latency_ms,
-            message_metadata={
-                "answer_provider": assistant_result.provider_name,
-                "answer_basis": assistant_result.answer_basis,
-                "evidence_conflict": assistant_result.evidence_conflict,
-                "retrieval_debug": prepared.retrieval_response.debug.model_dump(),
-                "used_chunk_ids": [str(item.chunk_id) for item in prepared.selected_chunks],
-                "candidate_chunk_ids": [str(item.chunk_id) for item in prepared.candidate_chunks],
-                "retrieved_chunk_ids": [str(item.chunk_id) for item in prepared.retrieval_response.matched_chunks],
-                "router_decision": prepared.router_result.decision.model_dump(mode="json"),
-                "tool_execution": prepared.tool_metadata.model_dump(mode="json"),
-                "structured_result": prepared.structured_result.model_dump(mode="json"),
-                "agent_steps": [item.model_dump(mode="json") for item in prepared.agent_steps],
-                "agent_run_trace": prepared.agent_run_trace.model_dump(mode="json") if prepared.agent_run_trace else None,
-                "raw_payload": assistant_result.raw_payload,
-            },
+            message_metadata=assistant_metadata,
         )
         chat_session.updated_at = datetime.now(UTC)
         self.chat_repository.add_message(assistant_message)
         self.session.flush()
         assistant_message_id = assistant_message.id
+
+        if client_request_id:
+            user_message.message_metadata = {
+                **(user_message.message_metadata or {}),
+                "client_request_id": client_request_id,
+                "client_request_status": "completed",
+                "assistant_message_id": str(assistant_message_id),
+                "completed_at": datetime.now(UTC).isoformat(),
+            }
 
         citation_rows = self._build_citation_rows(assistant_message.id, prepared)
         self.chat_repository.add_citations(citation_rows)
@@ -180,6 +265,96 @@ class ChatService:
             citations=assistant_citations,
             retrieval_debug=prepared.retrieval_response.debug,
         )
+
+    def _restore_completed_client_request(
+        self,
+        chat_session: ChatSession,
+        client_request_id: str,
+    ) -> ChatMessageCreateResponse | None:
+        user_message = self._find_client_request_user_message(chat_session, client_request_id)
+        assistant_message = self._find_client_request_assistant_message(chat_session, client_request_id)
+        if user_message is None or assistant_message is None:
+            return None
+        return self._build_message_create_response_from_messages(chat_session.id, user_message, assistant_message)
+
+    def _build_message_create_response_from_messages(
+        self,
+        session_id: UUID,
+        user_message: ChatMessage,
+        assistant_message: ChatMessage,
+    ) -> ChatMessageCreateResponse:
+        hydrated_user_message = self.chat_repository.get_message(user_message.id) or user_message
+        hydrated_assistant_message = self.chat_repository.get_message(assistant_message.id) or assistant_message
+        assistant_citations = [self._serialize_citation(item) for item in getattr(hydrated_assistant_message, "citations", [])]
+        retrieval_debug = self._read_retrieval_debug_from_message(hydrated_assistant_message)
+        return ChatMessageCreateResponse(
+            session_id=session_id,
+            user_message=self._serialize_message(hydrated_user_message),
+            assistant_message=self._serialize_message(hydrated_assistant_message),
+            citations=assistant_citations,
+            retrieval_debug=retrieval_debug,
+        )
+
+    @staticmethod
+    def _read_retrieval_debug_from_message(message: ChatMessage) -> SearchDebugInfo:
+        metadata = message.message_metadata or {}
+        payload = metadata.get("retrieval_debug") if isinstance(metadata, dict) else None
+        if isinstance(payload, dict):
+            try:
+                return SearchDebugInfo.model_validate(payload)
+            except Exception:
+                pass
+        return SearchDebugInfo(
+            accessible_document_count=0,
+            lexical_candidate_count=0,
+            vector_candidate_count=0,
+            fusion_strategy="restored_without_debug",
+        )
+
+    @staticmethod
+    def _normalize_client_request_id(value: str | None) -> str | None:
+        normalized = (value or "").strip()
+        return normalized or None
+
+    @staticmethod
+    def _find_client_request_user_message(chat_session: ChatSession, client_request_id: str) -> ChatMessage | None:
+        for message in chat_session.messages:
+            metadata = message.message_metadata or {}
+            if (
+                message.role == MessageRole.USER
+                and isinstance(metadata, dict)
+                and metadata.get("client_request_id") == client_request_id
+            ):
+                return message
+        return None
+
+    @staticmethod
+    def _find_client_request_assistant_message(chat_session: ChatSession, client_request_id: str) -> ChatMessage | None:
+        for message in chat_session.messages:
+            metadata = message.message_metadata or {}
+            if (
+                message.role == MessageRole.ASSISTANT
+                and isinstance(metadata, dict)
+                and metadata.get("client_request_id") == client_request_id
+            ):
+                return message
+        return None
+
+    @staticmethod
+    def _is_stale_processing_request(user_message: ChatMessage) -> bool:
+        metadata = user_message.message_metadata or {}
+        if not isinstance(metadata, dict):
+            return True
+        if metadata.get("client_request_status") in {"completed", "failed"}:
+            return True
+        started_at = metadata.get("processing_started_at")
+        if not isinstance(started_at, str):
+            return True
+        try:
+            parsed = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        return datetime.now(UTC) - parsed > timedelta(seconds=CLIENT_REQUEST_STALE_AFTER_SECONDS)
 
     def _prepare_answer(
         self,

@@ -70,6 +70,7 @@ class SearchDebugInfo(BaseModel):
     structural_retrieval_latency_ms: int | None = None
     vector_embedding_latency_ms: int | None = None
     vector_retrieval_latency_ms: int | None = None
+    vector_retrieval_skipped: bool = False
     expansion_candidate_count: int = 0
     in_document_expansion_latency_ms: int | None = None
     document_evidence_sweep_candidate_count: int = 0

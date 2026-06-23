@@ -441,6 +441,14 @@ def _filter_relevant_chunks(
     if "Table row:" in first_chunk.content and _has_structured_table_answer_row(query, first_chunk.content):
         return [first_chunk]
 
+    structured_table_chunks = [
+        chunk
+        for chunk in retrieval_results[:10]
+        if "Table row:" in chunk.content and _has_structured_table_answer_row(query, chunk.content)
+    ]
+    if structured_table_chunks:
+        return structured_table_chunks[:3]
+
     evidence_hints = _extract_evidence_hints(query)
     candidate_window = 10 if len(evidence_hints) >= 2 else 6
     ranked_candidates = sorted(
@@ -524,6 +532,13 @@ def _has_structured_table_answer_row(query: str, content: str) -> bool:
         ("审批", "审批人="),
         ("处理时限", "处理时限="),
         ("时限", "处理时限="),
+        ("首次响应", "首次响应="),
+        ("响应时间", "首次响应="),
+        ("响应时间", "历史响应时间="),
+        ("响应要求", "首次响应="),
+        ("多久响应", "首次响应="),
+        ("高优先级", "工单等级=p1"),
+        ("高优先级", "问题类型=高优先级工单"),
         ("脱敏", "脱敏要求="),
         ("检查项", "版本更新检查清单"),
         ("必须", "是否必须=必须"),

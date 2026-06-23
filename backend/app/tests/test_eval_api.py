@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
-from app.models.eval import EvalCase, EvalRun
+from app.models.eval import EvalCase, EvalResult, EvalRun
 from app.models.enums import RoleName
 from app.models.role import Role
 from app.models.user import User
@@ -588,6 +588,83 @@ def test_citation_metric_uses_evidence_fact_coverage_for_answer_cases() -> None:
     assert breakdown["score"] == 0.75
 
 
+def test_run_eval_reuses_existing_run_for_same_client_request_id(client: TestClient, db_session: Session, monkeypatch) -> None:
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add(admin_role)
+    db_session.flush()
+
+    _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+    db_session.add(
+        EvalCase(
+            dataset_name="client_request_eval",
+            case_name="single_eval_case",
+            acting_user_email="admin@example.com",
+            question="What does the handbook require?",
+            expected_document_titles=["Public Handbook"],
+            forbidden_document_titles=[],
+            expected_answer_keywords=["holiday"],
+        )
+    )
+    db_session.commit()
+
+    def _fake_evaluate_case(self, run, case, top_k):
+        return EvalResult(
+            run_id=run.id,
+            case_id=case.id,
+            acting_user_email=case.acting_user_email,
+            retrieval_hit_rate=1.0,
+            citation_accuracy=1.0,
+            answer_faithfulness=1.0,
+            permission_isolation_correct=True,
+            overall_pass=True,
+            details_json={
+                "case_name": case.case_name,
+                "case_annotations": {"expected_outcome": "answer"},
+                "metric_breakdown": {
+                    "retrieval": {"score": 1.0},
+                    "citation": {"score": 1.0},
+                    "faithfulness": {"score": 1.0},
+                    "permission_isolation": {"score": 1.0, "passed": True},
+                    "overall": {"score": 1.0},
+                },
+            },
+        )
+
+    monkeypatch.setattr(EvalService, "_evaluate_case", _fake_evaluate_case)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    request_payload = {
+        "dataset_name": "client_request_eval",
+        "top_k": 4,
+        "seed_demo_cases": False,
+        "client_request_id": "eval-client-request-1",
+    }
+
+    first_response = client.post(
+        "/api/v1/eval/run",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json=request_payload,
+    )
+    second_response = client.post(
+        "/api/v1/eval/run",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json=request_payload,
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    first_payload = first_response.json()
+    second_payload = second_response.json()
+    assert second_payload["id"] == first_payload["id"]
+    assert first_payload["summary_json"]["client_request_id"] == "eval-client-request-1"
+    assert first_payload["summary_json"]["client_request_status"] == "completed"
+    assert first_payload["summary_json"]["requested_dataset_name"] == "client_request_eval"
+    assert first_payload["summary_json"]["requested_top_k"] == 4
+    assert len(first_payload["results"]) == 1
+
+    runs = db_session.query(EvalRun).filter(EvalRun.dataset_name == "client_request_eval").all()
+    assert len(runs) == 1
+
+
 def test_list_eval_runs_marks_stale_running_runs_as_failed(client: TestClient, db_session: Session) -> None:
     admin_role = Role(name=RoleName.ADMIN, description="Admin")
     db_session.add(admin_role)
@@ -598,7 +675,8 @@ def test_list_eval_runs_marks_stale_running_runs_as_failed(client: TestClient, d
         dataset_name="demo_permission_eval",
         status="running",
         total_cases=3,
-        started_at=datetime.now(UTC) - timedelta(minutes=10),
+        started_at=datetime.now(UTC) - timedelta(minutes=30),
+        summary_json={"client_request_id": "eval-stale-request-1", "client_request_status": "running"},
     )
     db_session.add(stale_run)
     db_session.commit()
@@ -616,6 +694,7 @@ def test_list_eval_runs_marks_stale_running_runs_as_failed(client: TestClient, d
     assert refreshed_run.status == "failed"
     assert refreshed_run.finished_at is not None
     assert refreshed_run.error_text == "Eval run did not complete and was automatically marked as failed."
+    assert refreshed_run.summary_json["client_request_status"] == "failed"
     assert payload[0]["status"] == "failed"
 
 
@@ -662,3 +741,154 @@ def test_run_eval_marks_run_failed_when_execution_raises(client: TestClient, db_
     assert failed_run.status == "failed"
     assert failed_run.finished_at is not None
     assert failed_run.error_text == "forced eval failure"
+
+
+def test_eval_dataset_and_dashboard_api_report_trends_and_failure_modes(client: TestClient, db_session: Session) -> None:
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add(admin_role)
+    db_session.flush()
+    _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+
+    first_case = EvalCase(
+        dataset_name="demo_access_matrix_eval",
+        case_name="检索失败样例",
+        acting_user_email="admin@example.com",
+        question="检索失败问题",
+        expected_document_titles=["平台发布手册"],
+        forbidden_document_titles=[],
+        expected_answer_keywords=[],
+        is_demo_case=True,
+    )
+    second_case = EvalCase(
+        dataset_name="demo_access_matrix_eval",
+        case_name="权限失败样例",
+        acting_user_email="admin@example.com",
+        question="权限失败问题",
+        expected_document_titles=[],
+        forbidden_document_titles=["安全例外登记"],
+        expected_answer_keywords=[],
+        is_demo_case=True,
+    )
+    db_session.add_all([first_case, second_case])
+    db_session.flush()
+
+    older_run = EvalRun(
+        dataset_name="demo_access_matrix_eval",
+        status="completed",
+        total_cases=2,
+        started_at=datetime.now(UTC) - timedelta(minutes=4),
+        finished_at=datetime.now(UTC) - timedelta(minutes=3),
+        summary_json={
+            "total_cases": 2,
+            "pass_count": 1,
+            "pass_rate": 0.5,
+            "retrieval_hit_rate_avg": 0.7,
+            "citation_accuracy_avg": 0.6,
+            "answer_faithfulness_avg": 0.8,
+            "permission_isolation_pass_rate": 1.0,
+            "overall_score_avg": 0.75,
+        },
+        created_at=datetime.now(UTC) - timedelta(minutes=4),
+        updated_at=datetime.now(UTC) - timedelta(minutes=4),
+    )
+    latest_run = EvalRun(
+        dataset_name="demo_access_matrix_eval",
+        status="completed",
+        total_cases=2,
+        started_at=datetime.now(UTC) - timedelta(minutes=2),
+        finished_at=datetime.now(UTC) - timedelta(minutes=1),
+        summary_json={
+            "total_cases": 2,
+            "pass_count": 0,
+            "pass_rate": 0.0,
+            "retrieval_hit_rate_avg": 0.3,
+            "citation_accuracy_avg": 0.4,
+            "answer_faithfulness_avg": 0.5,
+            "permission_isolation_pass_rate": 0.5,
+            "overall_score_avg": 0.42,
+        },
+        created_at=datetime.now(UTC) - timedelta(minutes=2),
+        updated_at=datetime.now(UTC) - timedelta(minutes=2),
+    )
+    failed_run = EvalRun(
+        dataset_name="demo_access_matrix_eval",
+        status="failed",
+        total_cases=2,
+        started_at=datetime.now(UTC) - timedelta(seconds=30),
+        finished_at=datetime.now(UTC) - timedelta(seconds=20),
+        error_text="forced failure",
+        summary_json={"total_cases": 0, "pass_count": 0},
+        created_at=datetime.now(UTC) - timedelta(seconds=30),
+        updated_at=datetime.now(UTC) - timedelta(seconds=30),
+    )
+    db_session.add_all([older_run, latest_run, failed_run])
+    db_session.flush()
+    db_session.add_all(
+        [
+            EvalResult(
+                run_id=latest_run.id,
+                case_id=first_case.id,
+                acting_user_email="admin@example.com",
+                retrieval_hit_rate=0.2,
+                citation_accuracy=0.8,
+                answer_faithfulness=0.9,
+                permission_isolation_correct=True,
+                overall_pass=False,
+                details_json={
+                    "case_name": "检索失败样例",
+                    "metric_breakdown": {
+                        "retrieval": {"score": 0.2},
+                        "citation": {"score": 0.8},
+                        "faithfulness": {"score": 0.9},
+                        "permission_isolation": {"score": 1.0, "passed": True},
+                    },
+                },
+            ),
+            EvalResult(
+                run_id=latest_run.id,
+                case_id=second_case.id,
+                acting_user_email="admin@example.com",
+                retrieval_hit_rate=1.0,
+                citation_accuracy=1.0,
+                answer_faithfulness=1.0,
+                permission_isolation_correct=False,
+                overall_pass=False,
+                details_json={
+                    "case_name": "权限失败样例",
+                    "metric_breakdown": {
+                        "retrieval": {"score": 1.0},
+                        "citation": {"score": 1.0},
+                        "faithfulness": {"score": 1.0},
+                        "permission_isolation": {"score": 0.0, "passed": False},
+                    },
+                },
+            ),
+        ]
+    )
+    db_session.commit()
+
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    datasets_response = client.get("/api/v1/eval/datasets", headers={"Authorization": f"Bearer {admin_token}"})
+    assert datasets_response.status_code == 200
+    dataset_payload = next(item for item in datasets_response.json() if item["dataset_name"] == "demo_access_matrix_eval")
+    assert dataset_payload["display_name"] == "权限隔离演示评测"
+    assert dataset_payload["case_count"] == 2
+    assert dataset_payload["demo_case_count"] == 2
+    assert dataset_payload["completed_run_count"] == 2
+    assert dataset_payload["failed_run_count"] == 1
+
+    dashboard_response = client.get(
+        "/api/v1/eval/dashboard?dataset_name=demo_access_matrix_eval&limit=5",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert dashboard_response.status_code == 200
+    dashboard = dashboard_response.json()
+    assert dashboard["dataset_name"] == "demo_access_matrix_eval"
+    assert dashboard["display_name"] == "权限隔离演示评测"
+    assert [point["run_id"] for point in dashboard["trend"]] == [str(older_run.id), str(latest_run.id)]
+    assert dashboard["trend"][-1]["overall_score_avg"] == 0.42
+    assert dashboard["latest_completed_run"]["id"] == str(latest_run.id)
+    failure_modes = {item["key"]: item for item in dashboard["failure_modes"]}
+    assert failure_modes["retrieval_failure"]["count"] == 1
+    assert failure_modes["retrieval_failure"]["example_case_names"] == ["检索失败样例"]
+    assert failure_modes["permission_failure"]["count"] == 1

@@ -1,13 +1,20 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { ErrorNotice } from "../components/ErrorNotice";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 import { useAppContext } from "../context/AppContext";
-import { api } from "../lib/api";
+import { ApiError, api } from "../lib/api";
 import { formatTraceType, formatWorkflowStatus } from "../lib/display";
 import { asArray, formatDateTime, truncate } from "../lib/format";
-import type { EvalResultRowRead, EvalRunDetailRead, EvalRunRead, TraceLogRead } from "../types/api";
+import {
+  createPendingEvalOperation,
+  listPendingEvalOperations,
+  removePendingEvalOperation,
+  touchPendingEvalOperation,
+} from "../lib/pendingOperations";
+import type { PendingEvalOperation } from "../lib/pendingOperations";
+import type { EvalDashboardRead, EvalDatasetRead, EvalResultRowRead, EvalRunDetailRead, EvalRunRead, TraceLogRead } from "../types/api";
 
 const DEMO_EVAL_DATASET = "demo_access_matrix_eval";
 const DEFAULT_VISIBLE_RUNS = 12;
@@ -53,6 +60,22 @@ function scoreFromRecord(record: Record<string, unknown> | null, key: string): s
   return typeof value === "number" ? value.toFixed(2) : "-";
 }
 
+function percentText(value: unknown): string {
+  const numeric = asNumber(value);
+  return numeric === null ? "-" : `${(numeric * 100).toFixed(1)}%`;
+}
+
+function deltaText(current: number | null | undefined, previous: number | null | undefined): string | null {
+  if (typeof current !== "number" || typeof previous !== "number") {
+    return null;
+  }
+  const delta = current - previous;
+  if (Math.abs(delta) < 0.0001) {
+    return "较上次持平";
+  }
+  const sign = delta > 0 ? "+" : "";
+  return `较上次 ${sign}${(delta * 100).toFixed(1)} pct`;
+}
 function valueFromRecord(record: Record<string, unknown> | null, key: string, fallback = "-"): string {
   return String(record?.[key] ?? fallback);
 }
@@ -84,7 +107,7 @@ function evalRunStatusTone(
   if (status === "failed") {
     return isConnectionFailure(errorText) ? "warning" : "danger";
   }
-  if (status === "running") {
+  if (status === "queued" || status === "running") {
     return "warning";
   }
   return "neutral";
@@ -152,10 +175,22 @@ function runProgressText(run: EvalRunRead | EvalRunDetailRead): string {
   }
   return formatWorkflowStatus(run.status);
 }
+function evalRunClientRequestId(run: EvalRunRead | EvalRunDetailRead): string | null {
+  const value = runSummaryRecord(run)?.client_request_id;
+  return typeof value === "string" ? value : null;
+}
+
+function findEvalRunByClientRequestId(items: EvalRunRead[], clientRequestId: string): EvalRunRead | null {
+  return items.find((run) => evalRunClientRequestId(run) === clientRequestId) ?? null;
+}
 
 export function InsightsPage() {
   const { token, user } = useAppContext();
   const [runs, setRuns] = useState<EvalRunRead[]>([]);
+  const [evalDatasets, setEvalDatasets] = useState<EvalDatasetRead[]>([]);
+  const [evalDashboard, setEvalDashboard] = useState<EvalDashboardRead | null>(null);
+  const [selectedDatasetName, setSelectedDatasetName] = useState(DEMO_EVAL_DATASET);
+  const [evalTopK, setEvalTopK] = useState(5);
   const [selectedRun, setSelectedRun] = useState<EvalRunDetailRead | null>(null);
   const [selectedResultId, setSelectedResultId] = useState<string | null>(null);
   const [traces, setTraces] = useState<TraceLogRead[]>([]);
@@ -163,6 +198,7 @@ export function InsightsPage() {
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isRunningEval, setIsRunningEval] = useState(false);
+  const [pendingEvalOperations, setPendingEvalOperations] = useState<PendingEvalOperation[]>([]);
   const [activeView, setActiveView] = useState<InsightsView>("eval");
   const [caseFilter, setCaseFilter] = useState<EvalCaseFilter>("all");
   const [runFilter, setRunFilter] = useState<EvalRunFilter>("latest_valid");
@@ -171,7 +207,122 @@ export function InsightsPage() {
   const [showAllTraceChunks, setShowAllTraceChunks] = useState(false);
   const [showAllTraceCitations, setShowAllTraceCitations] = useState(false);
   const isAdmin = user?.role?.name === "admin";
+  const evalRecoveryInFlightRef = useRef(false);
+  async function refreshEvalOverview(datasetName: string, preferredRunId?: string) {
+    if (!token || !isAdmin) {
+      return;
+    }
+    const [nextDatasets, nextRuns, nextDashboard] = await Promise.all([
+      api.listEvalDatasets(token),
+      api.listEvalRuns(token),
+      api.getEvalDashboard(token, datasetName, 8),
+    ]);
+    setEvalDatasets(nextDatasets);
+    setRuns(nextRuns);
+    setEvalDashboard(nextDashboard);
 
+    const datasetRuns = nextRuns.filter((run) => run.dataset_name === datasetName);
+    const targetRun = preferredRunId ? nextRuns.find((run) => run.id === preferredRunId) : defaultEvalRun(datasetRuns);
+    if (targetRun) {
+      setSelectedRun(await api.getEvalRun(token, targetRun.id));
+    } else {
+      setSelectedRun(null);
+    }
+  }
+
+  async function handleSelectDataset(datasetName: string) {
+    setSelectedDatasetName(datasetName);
+    setRunFilter("latest_valid");
+    setShowAllRuns(false);
+    setError(null);
+    try {
+      await refreshEvalOverview(datasetName);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "加载评测数据集失败。");
+    }
+  }
+
+  function syncPendingEvalOperations() {
+    setPendingEvalOperations(listPendingEvalOperations());
+  }
+
+  function evalRunReturnedMessage(run: EvalRunDetailRead, prefix: string): string {
+    if (run.status === "queued") {
+      return `${prefix}：${formatEvalDatasetName(run.dataset_name)}已进入后台队列。`;
+    }
+    if (run.status === "running") {
+      return `${prefix}：${formatEvalDatasetName(run.dataset_name)}仍在运行。`;
+    }
+    if (run.status === "failed") {
+      return isConnectionFailure(run.error_text)
+        ? `${prefix}：${formatEvalDatasetName(run.dataset_name)}因上游连接中断提前结束。`
+        : `${prefix}：${formatEvalDatasetName(run.dataset_name)}运行失败。`;
+    }
+    return `${prefix}：${formatEvalDatasetName(run.dataset_name)}，共运行 ${run.results.length} 条用例。`;
+  }
+
+  async function acceptEvalRunResponse(operation: PendingEvalOperation, run: EvalRunDetailRead, prefix: string) {
+    if (run.status === "queued" || run.status === "running") {
+      touchPendingEvalOperation(operation.id);
+      setSelectedRun(run);
+      await refreshEvalOverview(run.dataset_name, run.id);
+      setActiveView("eval");
+      setStatusMessage(evalRunReturnedMessage(run, prefix));
+      return;
+    }
+    removePendingEvalOperation(operation.id);
+    setSelectedRun(run);
+    await refreshEvalOverview(run.dataset_name, run.id);
+    setActiveView("eval");
+    setStatusMessage(evalRunReturnedMessage(run, prefix));
+  }
+
+  async function recoverPendingEvalRuns() {
+    if (!token || !isAdmin || evalRecoveryInFlightRef.current) {
+      return;
+    }
+    evalRecoveryInFlightRef.current = true;
+    const operations = listPendingEvalOperations();
+    setPendingEvalOperations(operations);
+    if (!operations.length) {
+      evalRecoveryInFlightRef.current = false;
+      return;
+    }
+
+    try {
+      for (const operation of operations) {
+        try {
+          const currentRuns = await api.listEvalRuns(token);
+          const existingRun = findEvalRunByClientRequestId(currentRuns, operation.id);
+          if (existingRun) {
+            const detail = await api.getEvalRun(token, existingRun.id);
+            await acceptEvalRunResponse(operation, detail, "已恢复评测结果");
+            continue;
+          }
+
+          const run = await api.runEval(token, {
+            dataset_name: operation.datasetName,
+            top_k: operation.topK,
+            seed_demo_cases: operation.seedDemoCases,
+            client_request_id: operation.id,
+          });
+          await acceptEvalRunResponse(operation, run, "已恢复评测请求");
+        } catch (nextError) {
+          touchPendingEvalOperation(operation.id, nextError instanceof Error ? nextError.message : "恢复评测失败。");
+          if (nextError instanceof ApiError && (nextError.status === 0 || nextError.status === 409)) {
+            setStatusMessage(`评测仍在后台处理：${formatEvalDatasetName(operation.datasetName)}，刷新后会继续恢复。`);
+          } else {
+            setError(nextError instanceof Error ? nextError.message : "恢复评测失败。");
+          }
+        } finally {
+          syncPendingEvalOperations();
+        }
+      }
+    } finally {
+      evalRecoveryInFlightRef.current = false;
+      syncPendingEvalOperations();
+    }
+  }
   useEffect(() => {
     if (!token) {
       return;
@@ -189,28 +340,30 @@ export function InsightsPage() {
     if (!token || !isAdmin) {
       return;
     }
-    api
-      .listEvalRuns(token)
-      .then((items) => {
-        setRuns(items);
-        const initialRun = defaultEvalRun(items);
-        if (initialRun) {
-          return api.getEvalRun(token, initialRun.id);
-        }
-        return null;
-      })
-      .then((detail) => {
-        if (detail) {
-          setSelectedRun(detail);
-        }
-      })
-      .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "加载评测记录失败。"));
+    syncPendingEvalOperations();
+    refreshEvalOverview(selectedDatasetName).catch((nextError) =>
+      setError(nextError instanceof Error ? nextError.message : "加载评测记录失败。"),
+    );
+    recoverPendingEvalRuns().catch((nextError) =>
+      setError(nextError instanceof Error ? nextError.message : "恢复评测请求失败。"),
+    );
   }, [isAdmin, token]);
 
   useEffect(() => {
     setSelectedResultId(selectedRun?.results[0]?.id ?? null);
     setCaseFilter("all");
   }, [selectedRun?.id]);
+  useEffect(() => {
+    if (!token || !isAdmin || pendingEvalOperations.length === 0) {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      recoverPendingEvalRuns().catch((nextError) =>
+        setError(nextError instanceof Error ? nextError.message : "恢复评测请求失败。"),
+      );
+    }, 5000);
+    return () => window.clearInterval(intervalId);
+  }, [isAdmin, pendingEvalOperations.length, token]);
 
   useEffect(() => {
     setShowAllTraceChunks(false);
@@ -218,35 +371,54 @@ export function InsightsPage() {
   }, [selectedTrace?.id]);
 
   async function handleRunEval() {
-    if (!token || isRunningEval) {
+    const datasetName = selectedDatasetName;
+    const existingPendingOperation = listPendingEvalOperations(datasetName)[0] ?? null;
+    const existingActiveRun = runs.find(
+      (run) => run.dataset_name === datasetName && (run.status === "queued" || run.status === "running"),
+    );
+    if (!token || isRunningEval || existingPendingOperation || existingActiveRun) {
+      if (existingPendingOperation || existingActiveRun) {
+        setStatusMessage(`评测仍在后台处理：${formatEvalDatasetName(datasetName)}，刷新后会继续恢复。`);
+      }
       return;
     }
+
+    const operation = createPendingEvalOperation({
+      datasetName,
+      topK: evalTopK,
+      seedDemoCases: datasetName.startsWith("demo_"),
+    });
+
+    syncPendingEvalOperations();
     setError(null);
     setIsRunningEval(true);
-    setStatusMessage(`正在运行${formatEvalDatasetName(DEMO_EVAL_DATASET)}...`);
+    setStatusMessage(`正在运行${formatEvalDatasetName(datasetName)}...`);
     try {
-      const run = await api.runEval(token, { dataset_name: DEMO_EVAL_DATASET, top_k: 5, seed_demo_cases: true });
+      const run = await api.runEval(token, {
+        dataset_name: datasetName,
+        top_k: operation.topK,
+        seed_demo_cases: operation.seedDemoCases,
+        client_request_id: operation.id,
+      });
+
       setError(null);
-      setSelectedRun(run);
-      setRuns(await api.listEvalRuns(token));
-      setActiveView("eval");
-      if (run.status === "failed") {
-        setStatusMessage(
-          isConnectionFailure(run.error_text)
-            ? `评测已返回：${formatEvalDatasetName(run.dataset_name)}因上游连接中断提前结束。`
-            : `评测已返回：${formatEvalDatasetName(run.dataset_name)}运行失败。`,
-        );
-      } else {
-        setStatusMessage(`评测完成：${formatEvalDatasetName(run.dataset_name)}，共运行 ${run.results.length} 条用例。`);
-      }
+      await acceptEvalRunResponse(operation, run, run.status === "completed" ? "评测完成" : "评测已返回");
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "评测运行失败。");
-      setStatusMessage(null);
+      const keepPendingOperation = nextError instanceof ApiError && (nextError.status === 0 || nextError.status === 409);
+      if (keepPendingOperation) {
+        touchPendingEvalOperation(operation.id, nextError instanceof Error ? nextError.message : undefined);
+        setStatusMessage(`评测仍在后台处理：${formatEvalDatasetName(datasetName)}，刷新后会自动恢复。`);
+        setError(null);
+      } else {
+        removePendingEvalOperation(operation.id);
+        setError(nextError instanceof Error ? nextError.message : "评测运行失败。");
+        setStatusMessage(null);
+      }
     } finally {
+      syncPendingEvalOperations();
       setIsRunningEval(false);
     }
   }
-
   async function handleSelectRun(runId: string) {
     if (!token) {
       return;
@@ -277,8 +449,12 @@ export function InsightsPage() {
   const answerSummary = asRecord(asRecord(summary?.case_type_breakdown)?.answer_expected);
   const refusalSummary = asRecord(asRecord(summary?.case_type_breakdown)?.refusal_expected);
   const selectedRunInfraFailure = selectedRun ? selectedRun.status === "failed" && isConnectionFailure(selectedRun.error_text) : false;
-  const latestCompletedRun = runs.find((run) => isCompletedEvalRun(run)) ?? null;
-  const baselineRun = runs.find((run) => isFullPassEvalRun(run)) ?? latestCompletedRun;
+  const selectedDataset = evalDatasets.find((dataset) => dataset.dataset_name === selectedDatasetName) ?? null;
+  const selectedDatasetPendingEval =
+    pendingEvalOperations.find((operation) => operation.datasetName === selectedDatasetName) ?? null;
+  const datasetRuns = runs.filter((run) => run.dataset_name === selectedDatasetName);
+  const latestCompletedRun = datasetRuns.find((run) => isCompletedEvalRun(run)) ?? null;
+  const baselineRun = datasetRuns.find((run) => isFullPassEvalRun(run)) ?? latestCompletedRun;
   const baselineRunId = baselineRun?.id ?? null;
   const selectedRunIsBaseline =
     Boolean(baselineRunId) && selectedRun?.id === baselineRunId && selectedRun?.status === "completed";
@@ -289,13 +465,19 @@ export function InsightsPage() {
     : typeof summary?.total_cases === "number"
       ? summary.total_cases
       : plannedTotalCases;
-  const validRuns = runs.filter((run) => isCompletedEvalRun(run));
-  const connectionFailureRuns = runs.filter((run) => run.status === "failed" && isConnectionFailure(run.error_text));
-  const filteredRuns = runFilter === "latest_valid" ? validRuns : connectionFailureRuns;
+  const activeRuns = datasetRuns.filter((run) => run.status === "queued" || run.status === "running");
+  const selectedDatasetActiveRun = activeRuns[0] ?? null;
+  const validRuns = datasetRuns.filter((run) => isCompletedEvalRun(run));
+  const connectionFailureRuns = datasetRuns.filter((run) => run.status === "failed" && isConnectionFailure(run.error_text));
+  const filteredRuns = runFilter === "latest_valid" ? [...activeRuns, ...validRuns] : connectionFailureRuns;
   const visibleRuns = showAllRuns ? filteredRuns : filteredRuns.slice(0, DEFAULT_VISIBLE_RUNS);
   const hiddenRunCount = Math.max(0, filteredRuns.length - visibleRuns.length);
   const runFilterBadgeText =
-    runFilter === "latest_valid" ? `${validRuns.length} 条完整` : `${connectionFailureRuns.length} 条中断`;
+    runFilter === "latest_valid"
+      ? activeRuns.length
+        ? `${activeRuns.length} 条处理中，${validRuns.length} 条完整`
+        : `${validRuns.length} 条完整`
+      : `${connectionFailureRuns.length} 条中断`;
   const visibleTraces = showAllTraces ? traces : traces.slice(0, DEFAULT_VISIBLE_TRACES);
   const hiddenTraceCount = Math.max(0, traces.length - visibleTraces.length);
 
@@ -345,6 +527,9 @@ export function InsightsPage() {
     );
   }
 
+  const latestTrendPoint = evalDashboard?.trend.length ? evalDashboard.trend[evalDashboard.trend.length - 1] : null;
+  const previousTrendPoint = evalDashboard && evalDashboard.trend.length > 1 ? evalDashboard.trend[evalDashboard.trend.length - 2] : null;
+
   function renderCaseTypeCard(bucket: Record<string, unknown> | null, fallbackTitle: string) {
     const title = typeof bucket?.label === "string" ? bucket.label : fallbackTitle;
     return (
@@ -366,6 +551,86 @@ export function InsightsPage() {
     );
   }
 
+  function renderTrendOverview() {
+    if (!latestTrendPoint) {
+      return <div className="empty-state">当前数据集还没有完整评测记录。</div>;
+    }
+    return (
+      <div className="eval-dashboard-grid">
+        {renderSummaryCard(
+          "趋势综合分",
+          latestTrendPoint.overall_score_avg.toFixed(2),
+          deltaText(latestTrendPoint.overall_score_avg, previousTrendPoint?.overall_score_avg) ?? undefined,
+        )}
+        {renderSummaryCard(
+          "检索命中",
+          percentText(latestTrendPoint.retrieval_hit_rate_avg),
+          deltaText(latestTrendPoint.retrieval_hit_rate_avg, previousTrendPoint?.retrieval_hit_rate_avg) ?? undefined,
+        )}
+        {renderSummaryCard(
+          "引用准确",
+          percentText(latestTrendPoint.citation_accuracy_avg),
+          deltaText(latestTrendPoint.citation_accuracy_avg, previousTrendPoint?.citation_accuracy_avg) ?? undefined,
+        )}
+        {renderSummaryCard(
+          "答案支撑",
+          percentText(latestTrendPoint.answer_faithfulness_avg),
+          deltaText(latestTrendPoint.answer_faithfulness_avg, previousTrendPoint?.answer_faithfulness_avg) ?? undefined,
+        )}
+      </div>
+    );
+  }
+
+  function renderTrendHistory() {
+    const points = evalDashboard?.trend ?? [];
+    if (!points.length) {
+      return null;
+    }
+    return (
+      <div className="list-card">
+        <div className="list-card-topline">
+          <strong>历史趋势</strong>
+          <StatusBadge tone="info">{points.length}</StatusBadge>
+        </div>
+        <div className="eval-trend-list">
+          {points.map((point) => (
+            <div className="eval-trend-row" key={point.run_id}>
+              <span>{formatDateTime(point.created_at)}</span>
+              <strong>{point.overall_score_avg.toFixed(2)}</strong>
+              <span>{point.pass_count} / {point.total_cases}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  function renderFailureModes() {
+    const modes = evalDashboard?.failure_modes ?? [];
+    return (
+      <div className="list-card">
+        <div className="list-card-topline">
+          <strong>失败原因</strong>
+          <StatusBadge tone={modes.length ? "warning" : "success"}>{modes.length ? `${modes.length} 类` : "无"}</StatusBadge>
+        </div>
+        {modes.length ? (
+          <div className="stack dense-stack">
+            {modes.map((mode) => (
+              <div className="eval-failure-row" key={mode.key}>
+                <div>
+                  <strong>{mode.label}</strong>
+                  <p className="muted">{mode.example_case_names.length ? mode.example_case_names.join("、") : "暂无样例"}</p>
+                </div>
+                <StatusBadge tone="warning">{mode.count}</StatusBadge>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="muted">最近完整运行没有未通过样例。</p>
+        )}
+      </div>
+    );
+  }
   function renderCaseListItem(result: EvalResultRowRead) {
     const details = result.details_json;
     const annotations = asRecord(details.case_annotations);
@@ -579,13 +844,7 @@ export function InsightsPage() {
       <PageHeader
         title="评测与追踪"
         description="先看评测结果，再按需下钻样例和追踪细节。"
-        actions={
-          isAdmin ? (
-            <button className="primary-button" disabled={isRunningEval} onClick={handleRunEval} type="button">
-              {isRunningEval ? "正在运行评测..." : "运行演示评测"}
-            </button>
-          ) : null
-        }
+        actions={null}
       />
       <ErrorNotice message={error} />
       {statusMessage ? <div className="info-block">{statusMessage}</div> : null}
@@ -615,11 +874,58 @@ export function InsightsPage() {
               <StatusBadge tone={isAdmin ? "info" : "neutral"}>{isAdmin ? runFilterBadgeText : "仅管理员"}</StatusBadge>
             </div>
             {isAdmin ? (
+              <div className="eval-control-panel">
+                <label>
+                  <span>评测集</span>
+                  <select value={selectedDatasetName} onChange={(event) => handleSelectDataset(event.target.value)}>
+                    {evalDatasets.length ? (
+                      evalDatasets.map((dataset) => (
+                        <option key={dataset.dataset_name} value={dataset.dataset_name}>
+                          {dataset.display_name}（{dataset.case_count}）
+                        </option>
+                      ))
+                    ) : (
+                      <option value={selectedDatasetName}>{formatEvalDatasetName(selectedDatasetName)}</option>
+                    )}
+                  </select>
+                </label>
+                <label>
+                  <span>Top-K</span>
+                  <input
+                    max={10}
+                    min={1}
+                    onChange={(event) => setEvalTopK(Math.min(10, Math.max(1, Number(event.target.value) || 1)))}
+                    type="number"
+                    value={evalTopK}
+                  />
+                </label>
+                <button
+                  className="primary-button"
+                  disabled={isRunningEval || Boolean(selectedDatasetPendingEval) || Boolean(selectedDatasetActiveRun)}
+                  onClick={handleRunEval}
+                  type="button"
+                >
+                  {selectedDatasetPendingEval || selectedDatasetActiveRun ? "后台处理中" : isRunningEval ? "正在运行" : "运行评测"}
+                </button>
+                <p className="muted">
+                  {selectedDatasetPendingEval
+                    ? `已有评测请求在恢复中，ID：${selectedDatasetPendingEval.id}`
+                    : selectedDatasetActiveRun
+                      ? `已有评测在后台${evalRunStatusLabel(selectedDatasetActiveRun.status, selectedDatasetActiveRun.error_text)}`
+                      : selectedDataset
+                        ? `${selectedDataset.completed_run_count} 次完整运行，${selectedDataset.failed_run_count} 次中断`
+                        : "暂无数据集统计"}
+                </p>
+              </div>
+            ) : null}
+            {isAdmin ? (
               <>
                 <div className="run-filter-bar">
                   <p className="muted">
                     {runFilter === "latest_valid"
-                      ? "这里只显示完整跑完的评测记录。"
+                      ? activeRuns.length
+                        ? "运行中的评测会固定显示在顶部，完成后进入完整记录。"
+                        : "这里只显示完整跑完的评测记录。"
                       : "这里只显示因上游连接中断而提前结束的记录。"}
                   </p>
                   <div className="run-filter-actions">
@@ -689,6 +995,11 @@ export function InsightsPage() {
                     </span>
                   </div>
                 ) : null}
+                {renderTrendOverview()}
+                <div className="insights-summary-cards">
+                  {renderTrendHistory()}
+                  {renderFailureModes()}
+                </div>
                 <div className="insights-summary-grid">
                   {renderSummaryCard("总用例数", String(totalCases))}
                   {renderSummaryCard(

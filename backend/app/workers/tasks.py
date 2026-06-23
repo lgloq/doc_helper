@@ -18,6 +18,7 @@ from app.models.chunk import Chunk
 from app.models.enums import IngestStatus
 from app.repositories.document_repository import ChunkRepository, DocumentRepository
 from app.services.ingestion.chunking import SemanticChunker
+from app.services.eval.service import EvalService
 from app.services.ingestion.embeddings import EmbeddingProviderFactory
 from app.services.ingestion.file_storage import LocalDocumentStorage
 from app.services.ingestion.parsers import DocumentParser
@@ -151,10 +152,35 @@ async def run_ingest_document(ctx: dict[str, Any], document_id: str, version_id:
     finally:
         session.close()
 
+async def run_eval_run(ctx: dict[str, Any], run_id: str) -> dict[str, Any]:
+    """在后台执行已创建的评测 run。"""
+    logger.info("开始异步评测: run_id=%s", run_id)
+    session = _get_session()
+    try:
+        service = EvalService(session)
+        detail = service.execute_queued_run(UUID(run_id))
+        logger.info("异步评测完成: run_id=%s status=%s", run_id, detail.status)
+        return {
+            "status": detail.status,
+            "run_id": str(detail.id),
+            "total_cases": detail.total_cases,
+            "result_count": len(detail.results),
+        }
+    except Exception as exc:
+        logger.exception("异步评测失败: run_id=%s", run_id)
+        try:
+            service = EvalService(session)
+            service.mark_run_enqueue_failed(UUID(run_id), str(exc) or "Async eval worker failed.")
+            session.commit()
+        except Exception:
+            logger.exception("更新异步评测失败状态时出错: run_id=%s", run_id)
+        return {"status": "failed", "run_id": run_id, "error": str(exc)}
+    finally:
+        session.close()
 
 # ARQ Worker 配置
 class WorkerSettings:
-    functions = [run_ingest_document]
+    functions = [run_ingest_document, run_eval_run]
     redis_settings = get_arq_redis_settings()
     on_startup = startup
     on_shutdown = shutdown

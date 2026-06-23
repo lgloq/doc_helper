@@ -673,6 +673,14 @@ def test_backfill_chunk_lexical_search_text_parser_defaults() -> None:
     assert args.rebuild_all is False
 
 
+def test_backfill_chunk_lexical_search_text_blank_detection() -> None:
+    module = _load_script_module("backfill_chunk_lexical_search_text.py")
+
+    assert module._has_search_text("客户响应") is True
+    assert module._has_search_text("") is False
+    assert module._has_search_text("   ") is False
+    assert module._has_search_text(None) is False
+
 def test_backfill_missing_chunk_embeddings_parser_defaults() -> None:
     module = _load_script_module("backfill_missing_chunk_embeddings.py")
 

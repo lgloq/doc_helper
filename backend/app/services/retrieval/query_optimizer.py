@@ -410,6 +410,8 @@ class QueryOptimizer:
     def _should_use_llm(query: str, target_document_title: str | None) -> bool:
         normalized = _normalize_query(query)
         has_filler = any(phrase in normalized for phrase in CHINESE_FILLER_PHRASES)
+        if _looks_like_precise_lookup_query(normalized):
+            return False
         if target_document_title:
             if len(normalized) >= 14:
                 return True
@@ -421,6 +423,30 @@ class QueryOptimizer:
         if re.search(r"[，；;。！？?]", normalized) and len(normalized) >= 20:
             return True
         return False
+
+
+def _looks_like_precise_lookup_query(normalized_query: str) -> bool:
+    if len(normalized_query) > 80:
+        return False
+    lookup_markers = (
+        "首次响应",
+        "响应时间",
+        "响应要求",
+        "多久响应",
+        "处理时限",
+        "审批人",
+        "脱敏要求",
+        "有效期",
+        "复核周期",
+        "退出要求",
+        "验收材料",
+        "验收人",
+        "保留期限",
+    )
+    question_markers = ("多少", "多久", "谁", "哪些", "要求", "是什么", "怎么", "如何")
+    return any(marker in normalized_query for marker in lookup_markers) and any(
+        marker in normalized_query for marker in question_markers
+    )
 
 
 def _build_deterministic_subqueries(query: str) -> list[QuerySubquery]:

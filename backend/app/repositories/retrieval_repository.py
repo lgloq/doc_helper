@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from typing import Sequence
 from uuid import UUID
 
-from sqlalchemy import desc, func, or_, select
+from sqlalchemy import desc, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -961,17 +961,61 @@ class RetrievalRepository:
         return len(postgres_hits) < limit
 
     def _search_vector_postgres(self, query_embedding: list[float], accessible_document_ids: Sequence[UUID], limit: int) -> list[RetrievalCandidate]:
-        distance_expr = Chunk.embedding.cosine_distance(query_embedding)
-        score_expr = (1 - distance_expr).label("vector_score")
-        statement = (
-            self._base_current_version_statement(accessible_document_ids)
-            .add_columns(score_expr)
-            .where(Chunk.embedding.is_not(None))
-            .order_by(distance_expr.asc(), Chunk.chunk_index.asc())
-            .limit(limit)
-        )
-        rows = self.session.execute(statement).all()
-        return [self._row_to_candidate(row, vector_score=float(row.vector_score or 0.0)) for row in rows]
+        self._configure_vector_search_probes()
+        query_vector = self._vector_literal(query_embedding)
+        prefetch_limits = self._vector_prefetch_limits(limit)
+        best_candidates: list[RetrievalCandidate] = []
+        for prefetch_limit in prefetch_limits:
+            prefetch_rows = self.session.execute(
+                text(
+                    """
+                    SELECT id AS chunk_id,
+                           1 - (embedding <=> CAST(:query_vector AS vector)) AS vector_score
+                    FROM chunks
+                    WHERE embedding IS NOT NULL
+                    ORDER BY embedding <=> CAST(:query_vector AS vector)
+                    LIMIT :prefetch_limit
+                    """
+                ),
+                {"query_vector": query_vector, "prefetch_limit": prefetch_limit},
+            ).all()
+            if not prefetch_rows:
+                return []
+
+            ordered_ids = [row.chunk_id for row in prefetch_rows]
+            score_by_chunk_id = {row.chunk_id: float(row.vector_score or 0.0) for row in prefetch_rows}
+            statement = self._base_current_version_statement(accessible_document_ids).where(Chunk.id.in_(ordered_ids))
+            rows = self.session.execute(statement).all()
+            candidates_by_id = {
+                row.chunk_id: self._row_to_candidate(row, vector_score=score_by_chunk_id.get(row.chunk_id, 0.0))
+                for row in rows
+            }
+            best_candidates = [candidates_by_id[chunk_id] for chunk_id in ordered_ids if chunk_id in candidates_by_id]
+            if len(best_candidates) >= limit or len(prefetch_rows) < prefetch_limit:
+                break
+        return best_candidates[:limit]
+
+    def _configure_vector_search_probes(self) -> None:
+        probes = max(1, int(getattr(self.settings, "retrieval_vector_ivfflat_probes", 20) or 20))
+        probes = min(probes, 100)
+        self.session.execute(text(f"SET LOCAL ivfflat.probes = {probes}"))
+
+    @staticmethod
+    def _vector_literal(values: Sequence[float]) -> str:
+        return "[" + ",".join(f"{float(value):.8f}" for value in values) + "]"
+
+    @staticmethod
+    def _vector_prefetch_limits(limit: int) -> list[int]:
+        requested = max(int(limit or 1), 1)
+        first = max(requested * 20, 200)
+        second = max(requested * 50, 1000)
+        third = max(requested * 100, 3000)
+        limits: list[int] = []
+        for value in (first, second, third):
+            capped = min(value, 5000)
+            if capped not in limits:
+                limits.append(capped)
+        return limits
 
     def _search_lexical_python(self, query_text: str, accessible_document_ids: Sequence[UUID], limit: int) -> list[RetrievalCandidate]:
         use_bm25 = self._uses_python_bm25_scorer()

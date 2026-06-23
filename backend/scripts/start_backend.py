@@ -36,7 +36,9 @@ def main() -> None:
 
     settings = get_settings()
     command = [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-    if settings.debug:
+    reload_flag = os.getenv("UVICORN_RELOAD", "").strip().lower()
+    reload_disabled = reload_flag in {"0", "false", "no", "off"}
+    if settings.debug and not reload_disabled:
         command.append("--reload")
     os.execvp(command[0], command)
 

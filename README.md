@@ -144,7 +144,7 @@ docker-compose.yml
 - 基于上下文的多步骤处理、处理轨迹与轻量上下文复用
 - 待办提取 / 周报草稿 / FAQ 草稿
 - 文档版本上传、版本对比与摘要
-- Eval 服务、固定评测报告与权限隔离回归
+- Eval 服务、固定评测报告、权限隔离回归和前端评测控制台
 - Observability trace 与简单 dashboard API
 - React 前端整合页面
 
@@ -165,7 +165,7 @@ docker-compose.yml
 - 已覆盖管理员用户维护、角色权限、部门 ACL、文档 ACL 和权限隔离回归验证
 - 当前后端测试已覆盖多工具串联、版本对比后停止、未知工具拒绝、`max_steps` 生效、无权限追问拒答与证据不足阻断结构化生成等场景
 - 检索调试信息会记录 `pre_rerank_count / post_rerank_count / rerank_strategy`，便于回看召回后重排阶段
-- 当前中文企业文档 RAG 证据包见 [`docs/ZH_ENTERPRISE_RAG_BENCHMARK_EVIDENCE_PACK.md`](docs/ZH_ENTERPRISE_RAG_BENCHMARK_EVIDENCE_PACK.md)，指标摘要见 [`docs/RAG_BENCHMARK_METRICS_SUMMARY.md`](docs/RAG_BENCHMARK_METRICS_SUMMARY.md)。导入脚本支持本地 manifest、FinanceBench、BEIR、ConcurrentQA 和格式覆盖入口。
+- 当前中文企业文档 RAG 证据包见 [`docs/ZH_ENTERPRISE_RAG_BENCHMARK_EVIDENCE_PACK.md`](docs/ZH_ENTERPRISE_RAG_BENCHMARK_EVIDENCE_PACK.md)，指标摘要见 [`docs/RAG_BENCHMARK_METRICS_SUMMARY.md`](docs/RAG_BENCHMARK_METRICS_SUMMARY.md)。导入脚本支持本地 manifest、FinanceBench、BEIR、ConcurrentQA 和格式覆盖入口；Insights 页面支持选择评测集、运行 Top-K 评测、查看历史趋势和失败原因分布。
 
 ## 候选重排 Provider
 检索链路保持 `ACL -> hybrid retrieval -> rerank -> grounded answer`。默认使用本地 heuristic rerank，不依赖外部服务；也可以通过环境变量显式切换到 LLM rerank 或 Qwen rerank provider 做实验。

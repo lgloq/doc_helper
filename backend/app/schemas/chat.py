@@ -69,6 +69,7 @@ class ChatSessionDetailRead(ChatSessionRead):
 class ChatMessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=4000)
     top_k: int = Field(default=5, ge=1, le=10)
+    client_request_id: str | None = Field(default=None, min_length=8, max_length=80)
 
 
 class ChatMessageCreateResponse(BaseModel):

@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 from app.schemas.search import SearchResultChunk, SearchScoreBreakdown
 from app.schemas.llm import RouterDecision, RouterDecisionResult
 from app.services.chat.memory import ConversationMemory
-from app.services.chat.generation import DeterministicAnswerGenerator, OpenAIAnswerGenerator
+from app.services.chat.generation import AnswerGenerationResult, DeterministicAnswerGenerator, OpenAIAnswerGenerator
 from app.services.llm.orchestrator import CopilotOrchestrator
 
 
@@ -71,6 +71,39 @@ def _with_score(
         }
     )
 
+
+def test_deterministic_answer_keeps_simple_first_response_lookup_concise() -> None:
+    generator = DeterministicAnswerGenerator()
+    content = (
+        "Table row: 当前客户工单响应矩阵. 工单等级=P1; 首次响应=5 分钟内; "
+        "升级条件=核心业务中断、无法登录、付费能力不可用或数据损坏风险; "
+        "负责人=一线客服立即通知值班经理; 必须记录的信息=影响范围、事故 owner、下一次同步时间.\n"
+        "Table row: 当前客户工单响应矩阵. 工单等级=P2; 首次响应=30 分钟内; "
+        "升级条件=关键流程受限，但仍有临时绕过方式; 负责人=客服组长跟进.\n"
+        "Table row: 历史响应口径. 问题类型=高优先级工单; 历史响应时间=10 分钟内; "
+        "历史处理方式=先建沟通群，再通知值班经理; 当前状态=已被当前矩阵替代.\n"
+        "Table row: 角色职责矩阵. 角色=客服组长; 主要职责=判断问题等级、协调跨团队处理、复核客户回复."
+    )
+
+    result = generator.generate(
+        question="客服接到高优先级工单后，首次响应时间要求是多少？",
+        retrieved_chunks=[
+            _chunk(
+                content=content,
+                preview="当前客户工单响应矩阵。",
+                section_title="当前客户工单响应矩阵",
+            )
+        ],
+        history_lines=[],
+    )
+
+    assert result.insufficient_evidence is False
+    assert result.answer_basis == "simple_table_lookup_answer"
+    assert "P1 工单首次响应要求是 5 分钟内" in result.answer
+    assert "10 分钟内" in result.answer
+    assert "已被当前矩阵替代" in result.answer
+    assert "P2 工单首次响应" not in result.answer
+    assert "角色职责" not in result.answer
 
 def test_deterministic_answer_uses_table_row_beyond_preview() -> None:
     generator = DeterministicAnswerGenerator()
@@ -575,6 +608,94 @@ def test_openai_answer_generator_uses_structured_table_fallback_for_complex_supp
     assert result.raw_payload
     assert result.raw_payload["fallback_reason"] == "upstream_answer_generation_failed"
 
+
+def test_orchestrator_prefers_simple_table_lookup_fastpath_for_first_response_question() -> None:
+    document_id = uuid4()
+    candidate_chunks = [
+        _chunk(
+            content=(
+                "Table row: 当前客户工单响应矩阵. 工单等级=P1; 首次响应=5 分钟内; "
+                "升级条件=核心业务中断、无法登录、付费能力不可用或数据损坏风险; 负责人=一线客服立即通知值班经理.\n"
+                "Table row: 当前客户工单响应矩阵. 工单等级=P2; 首次响应=30 分钟内; "
+                "升级条件=关键流程受限，但仍有临时绕过方式; 负责人=客服组长跟进.\n"
+                "Table row: 历史响应口径. 问题类型=高优先级工单; 历史响应时间=10 分钟内; "
+                "历史处理方式=客服直接记录; 当前状态=已被当前矩阵替代."
+            ),
+            preview="客户工单响应矩阵。",
+            document_id=document_id,
+            document_title="运营审批与客户响应规范",
+        )
+    ]
+
+    question = "客服接到高优先级工单后，首次响应时间要求是多少？"
+    focused_chunks = CopilotOrchestrator._focus_generation_chunks(question, candidate_chunks)
+
+    assert focused_chunks
+    assert "工单等级=P1" in focused_chunks[0].content
+
+    generation = CopilotOrchestrator._try_structured_table_fastpath(
+        question=question,
+        candidate_chunks=focused_chunks,
+        history_lines=[],
+        conversation_context=None,
+        allow_low_score=False,
+    )
+
+    assert generation is not None
+    assert generation.answer_basis == "simple_table_lookup_answer"
+    assert "P1 工单首次响应要求是 5 分钟内" in generation.answer
+    assert "10 分钟内" in generation.answer
+    assert "已被当前矩阵替代" in generation.answer
+    assert "P2 工单首次响应" not in generation.answer
+
+
+def test_orchestrator_uses_focused_table_preview_for_citation() -> None:
+    candidate_chunk = _chunk(
+        content=(
+            "文档说明：这里有一段很长的说明文字，用于模拟普通预览被开头内容占满的情况。"
+            "系统在展示引用时应当展示真正命中答案的表格行，而不是只展示这段说明文字。\n"
+            "Table row: 当前客户工单响应矩阵. 工单等级=P1; 首次响应=5 分钟内; "
+            "升级条件=核心业务中断、无法登录、付费能力不可用或数据损坏风险; 负责人=一线客服立即通知值班经理.\n"
+            "Table row: 当前客户工单响应矩阵. 工单等级=P2; 首次响应=30 分钟内; "
+            "升级条件=关键流程受限，但仍有临时绕过方式; 负责人=客服组长跟进."
+        ),
+        preview="文档说明：这里有一段很长的说明文字，用于模拟普通预览被开头内容占满的情况。",
+        document_title="运营审批与客户响应规范",
+    )
+
+    question = "客服接到高优先级工单后，首次响应时间要求是多少？"
+    focused_chunks = CopilotOrchestrator._focus_generation_chunks(question, [candidate_chunk])
+    selected = CopilotOrchestrator._select_citation_chunks(focused_chunks, [candidate_chunk.chunk_id])
+
+    assert selected
+    assert selected[0].chunk_id == candidate_chunk.chunk_id
+    assert "工单等级=P1" in selected[0].preview
+    assert "首次响应=5 分钟内" in selected[0].preview
+
+
+def test_orchestrator_marks_table_fastpath_confidence_high() -> None:
+    chunk = _with_score(
+        _chunk(
+            content="Table row: 当前客户工单响应矩阵. 工单等级=P1; 首次响应=5 分钟内.",
+            preview="Table row: 当前客户工单响应矩阵. 工单等级=P1; 首次响应=5 分钟内.",
+        ),
+        fused=0.06,
+        rerank=0.06,
+    )
+    result = AnswerGenerationResult(
+        answer="依据《运营审批与客户响应规范》，P1 工单首次响应要求是 5 分钟内。",
+        insufficient_evidence=False,
+        evidence_conflict=False,
+        used_chunk_ids=[str(chunk.chunk_id)],
+        answer_basis="simple_table_lookup_answer",
+        provider_name="deterministic",
+        model_name="grounded-fallback-v2",
+        prompt_tokens=10,
+        completion_tokens=10,
+        latency_ms=1,
+    )
+
+    assert CopilotOrchestrator._compute_confidence([chunk], result) == "high"
 
 def test_orchestrator_prefers_structured_table_fastpath_for_complex_supplier_question() -> None:
     supplier_doc_id = uuid4()

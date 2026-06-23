@@ -11,6 +11,8 @@ import type {
   DocumentRead,
   DocumentUploadResponse,
   DocumentVersionRead,
+  EvalDashboardRead,
+  EvalDatasetRead,
   EvalRunDetailRead,
   EvalRunRead,
   FAQEntryRead,
@@ -28,6 +30,9 @@ import type {
 } from "../types/api";
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "";
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const CHAT_REQUEST_TIMEOUT_MS = 90_000;
+const EVAL_REQUEST_TIMEOUT_MS = 30_000;
 
 export class ApiError extends Error {
   status: number;
@@ -44,6 +49,7 @@ export class ApiError extends Error {
 interface RequestOptions extends Omit<RequestInit, "body"> {
   token?: string | null;
   body?: BodyInit | object | null;
+  timeoutMs?: number;
 }
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
@@ -58,15 +64,37 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     body = JSON.stringify(body);
   }
 
+  const timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const controller = new AbortController();
+  const abortFromCaller = () => controller.abort();
+  if (options.signal?.aborted) {
+    controller.abort();
+  } else {
+    options.signal?.addEventListener("abort", abortFromCaller, { once: true });
+  }
+  const timeoutHandle = timeoutMs > 0 ? window.setTimeout(() => controller.abort(), timeoutMs) : undefined;
+  const { token: _token, body: _body, timeoutMs: _timeoutMs, signal: _signal, ...fetchOptions } = options;
+
   let response: Response;
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
-      ...options,
+      ...fetchOptions,
       headers,
       body: body ?? undefined,
+      signal: controller.signal,
     });
   } catch (error) {
-    throw new ApiError("网络请求失败，请确认前后端服务已启动。", 0, error);
+    const isAbortError = error instanceof DOMException && error.name === "AbortError";
+    throw new ApiError(
+      isAbortError ? "请求超时，后端可能仍在处理，请稍后刷新会话查看结果。" : "网络请求失败，请确认前后端服务已启动。",
+      0,
+      error,
+    );
+  } finally {
+    if (timeoutHandle !== undefined) {
+      window.clearTimeout(timeoutHandle);
+    }
+    options.signal?.removeEventListener("abort", abortFromCaller);
   }
 
   const contentType = response.headers.get("content-type") ?? "";
@@ -269,11 +297,12 @@ export const api = {
       token,
     });
   },
-  sendChatMessage(token: string, sessionId: string, content: string, topK = 5) {
+  sendChatMessage(token: string, sessionId: string, content: string, topK = 5, clientRequestId?: string | null) {
     return request<ChatMessageCreateResponse>(`/api/v1/chat/sessions/${sessionId}/messages`, {
       method: "POST",
       token,
-      body: { content, top_k: topK },
+      body: { content, top_k: topK, client_request_id: clientRequestId ?? undefined },
+      timeoutMs: CHAT_REQUEST_TIMEOUT_MS,
     });
   },
   extractTasks(token: string, sessionId: string, maxItems = 8) {
@@ -306,15 +335,30 @@ export const api = {
   listFaqs(token: string) {
     return request<FAQEntryRead[]>("/api/v1/faqs", { token });
   },
-  runEval(token: string, payload?: { dataset_name?: string; top_k?: number; seed_demo_cases?: boolean }) {
-    return request<EvalRunDetailRead>("/api/v1/eval/run", {
+  listEvalDatasets(token: string) {
+    return request<EvalDatasetRead[]>("/api/v1/eval/datasets", { token });
+  },
+  getEvalDashboard(token: string, datasetName?: string | null, limit = 8) {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (datasetName) {
+      params.set("dataset_name", datasetName);
+    }
+    return request<EvalDashboardRead>(`/api/v1/eval/dashboard?${params.toString()}`, { token });
+  },
+  runEval(
+    token: string,
+    payload?: { dataset_name?: string; top_k?: number; seed_demo_cases?: boolean; client_request_id?: string },
+  ) {
+    return request<EvalRunDetailRead>("/api/v1/eval/run/async", {
       method: "POST",
       token,
       body: {
         dataset_name: payload?.dataset_name ?? "demo_permission_eval",
         top_k: payload?.top_k ?? 5,
         seed_demo_cases: payload?.seed_demo_cases ?? true,
+        client_request_id: payload?.client_request_id ?? undefined,
       },
+      timeoutMs: EVAL_REQUEST_TIMEOUT_MS,
     });
   },
   listEvalRuns(token: string) {

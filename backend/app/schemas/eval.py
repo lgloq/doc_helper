@@ -29,6 +29,7 @@ class EvalRunRequest(BaseModel):
     case_ids: list[UUID] = Field(default_factory=list)
     top_k: int = Field(default=5, ge=1, le=10)
     seed_demo_cases: bool = True
+    client_request_id: str | None = Field(default=None, min_length=8, max_length=80)
 
 
 class EvalResultRowRead(ORMModel):
@@ -60,3 +61,43 @@ class EvalRunRead(ORMModel):
 
 class EvalRunDetailRead(EvalRunRead):
     results: list[EvalResultRowRead] = Field(default_factory=list)
+
+
+class EvalDatasetRead(BaseModel):
+    dataset_name: str
+    display_name: str
+    case_count: int
+    demo_case_count: int
+    completed_run_count: int
+    failed_run_count: int
+    latest_run: EvalRunRead | None = None
+
+
+class EvalTrendPointRead(BaseModel):
+    run_id: UUID
+    dataset_name: str
+    created_at: datetime
+    status: str
+    total_cases: int
+    pass_count: int
+    pass_rate: float
+    retrieval_hit_rate_avg: float
+    citation_accuracy_avg: float
+    answer_faithfulness_avg: float
+    permission_isolation_pass_rate: float
+    overall_score_avg: float
+
+
+class EvalFailureModeRead(BaseModel):
+    key: str
+    label: str
+    count: int
+    example_case_names: list[str] = Field(default_factory=list)
+
+
+class EvalDashboardRead(BaseModel):
+    dataset_name: str | None = None
+    display_name: str | None = None
+    trend: list[EvalTrendPointRead] = Field(default_factory=list)
+    failure_modes: list[EvalFailureModeRead] = Field(default_factory=list)
+    latest_completed_run: EvalRunRead | None = None

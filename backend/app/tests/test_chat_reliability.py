@@ -3,6 +3,7 @@ from __future__ import annotations
 from uuid import UUID, uuid4
 
 from app.schemas.search import SearchResultChunk, SearchScoreBreakdown
+from app.services.chat.evidence_audit import build_evidence_audit
 from app.services.chat.reliability import should_abstain_from_answer
 
 
@@ -46,6 +47,81 @@ def _chunk(
         ),
     )
 
+
+def test_reliability_prefers_response_time_table_rows_over_meta_chunks() -> None:
+    meta_chunk = _chunk(
+        content=(
+            "本文档用于演示企业知识库系统在客户支持、权限控制、引用式问答等场景下的处理能力。"
+            "为了方便上传后立即测试，你可以尝试以下问题：P1 工单的首次响应时间是多少？"
+        ),
+        fused=0.45,
+        document_title="客户支持、数据导出与知识库维护协作规范",
+    )
+    faq_chunk = _chunk(
+        content=(
+            "Table row: FAQ 沉淀候选. 问题=临时高权限访问多久回收; "
+            "推荐回答要点=最长 7 天，到期自动回收权限."
+        ),
+        fused=0.18,
+        document_title="运营审批与客户响应规范",
+    )
+    table_chunk = _chunk(
+        content=(
+            "Table row: 当前客户工单响应矩阵. 工单等级=P1; 首次响应=5 分钟内; "
+            "升级条件=核心业务中断、无法登录、付费能力不可用或数据损坏风险; "
+            "负责人=一线客服立即通知值班经理."
+        ),
+        fused=0.08,
+        document_title="运营审批与客户响应规范",
+    )
+
+    decision = should_abstain_from_answer(
+        "客服接到高优先级工单后，首次响应时间要求是多少？",
+        [meta_chunk, faq_chunk, table_chunk],
+        None,
+    )
+
+    assert decision.should_abstain is False
+    assert decision.filtered_chunks
+    assert decision.filtered_chunks[0].chunk_id == table_chunk.chunk_id
+    assert "首次响应=5 分钟内" in decision.filtered_chunks[0].content
+
+
+def test_evidence_audit_supports_precise_table_lookup_answer() -> None:
+    table_chunk = _chunk(
+        content=(
+            "Table row: 当前客户工单响应矩阵. 工单等级=P1; 首次响应=5 分钟内; "
+            "升级条件=核心业务中断、无法登录、付费能力不可用或数据损坏风险; "
+            "负责人=一线客服立即通知值班经理."
+        ),
+        document_title="运营审批与客户响应规范",
+    )
+
+    audit = build_evidence_audit(
+        "依据《运营审批与客户响应规范》，按当前客户工单响应矩阵，P1 工单首次响应要求是 5 分钟内。",
+        [table_chunk],
+    )
+
+    assert audit["status"] == "supported"
+    assert audit["score"] == 1.0
+    assert audit["supported_count"] == 1
+    assert audit["claims"][0]["support_status"] == "supported"
+
+def test_evidence_audit_does_not_join_values_across_table_rows() -> None:
+    table_chunk = _chunk(
+        content=(
+            "Table row: 当前客户工单响应矩阵. 工单等级=P1; 首次响应=5 分钟内.\n"
+            "Table row: 当前客户工单响应矩阵. 工单等级=P2; 首次响应=30 分钟内."
+        ),
+        document_title="运营审批与客户响应规范",
+    )
+
+    audit = build_evidence_audit(
+        "依据《运营审批与客户响应规范》，P1 工单首次响应要求是 30 分钟内。",
+        [table_chunk],
+    )
+
+    assert audit["claims"][0]["support_status"] != "supported"
 
 def test_reliability_keeps_relevant_l4_pdf_table_row() -> None:
     l4_chunk = _chunk(
@@ -304,3 +380,28 @@ def test_reliability_prefers_dominant_supplier_document_for_multi_clause_questio
     assert decision.should_abstain is False
     assert decision.filtered_chunks
     assert all(chunk.document_id == supplier_doc_id for chunk in decision.filtered_chunks)
+
+
+def test_evidence_audit_links_answer_claims_to_selected_citations() -> None:
+    chunk = _chunk(
+        content=(
+            "客户事故响应流程：经理需要在五分钟内建立事故沟通渠道，"
+            "并同步客户影响范围与恢复进展。"
+        ),
+        document_title="客户事故响应指南",
+    )
+
+    audit = build_evidence_audit(
+        "经理需要在五分钟内建立事故沟通渠道。账号可以两小时后回收。",
+        [chunk],
+    )
+
+    assert audit["claim_count"] == 2
+    assert audit["supported_count"] == 1
+    assert audit["unsupported_count"] == 1
+    assert audit["status"] == "needs_review"
+    assert audit["claims"][0]["support_status"] == "supported"
+    assert audit["claims"][0]["support_score"] == 1.0
+    assert audit["claims"][0]["support_citations"][0]["rank"] == 1
+    assert audit["claims"][0]["support_citations"][0]["document_title"] == "客户事故响应指南"
+    assert audit["claims"][1]["support_status"] == "unsupported"

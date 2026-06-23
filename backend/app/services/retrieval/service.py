@@ -369,13 +369,21 @@ class RetrievalService:
         else:
             structural_hits = self._collect_structural_hits(query_plan.lexical_queries, accessible_document_ids, candidate_pool)
         structural_latency_ms = int((perf_counter() - structural_started) * 1000)
+        skip_vector_retrieval = self._skip_vector_when_keyword_hits_exist(
+            query_plan,
+            [*lexical_hits, *indexed_sparse_hits, *structural_hits],
+        )
         vector_embedding_started = perf_counter()
-        query_embedding = self.embedding_provider.embed_texts([query_plan.retrieval_query])[0] if self.settings.retrieval_vector_enabled else []
+        query_embedding = (
+            self.embedding_provider.embed_texts([query_plan.retrieval_query])[0]
+            if self.settings.retrieval_vector_enabled and not skip_vector_retrieval
+            else []
+        )
         vector_embedding_latency_ms = int((perf_counter() - vector_embedding_started) * 1000)
         vector_retrieval_started = perf_counter()
         vector_hits = (
             self.retrieval_repository.search_vector(query_embedding, accessible_document_ids, candidate_pool)
-            if self.settings.retrieval_vector_enabled and query_embedding
+            if self.settings.retrieval_vector_enabled and query_embedding and not skip_vector_retrieval
             else []
         )
         vector_retrieval_latency_ms = int((perf_counter() - vector_retrieval_started) * 1000)
@@ -568,6 +576,7 @@ class RetrievalService:
                 structural_retrieval_latency_ms=structural_latency_ms,
                 vector_embedding_latency_ms=vector_embedding_latency_ms,
                 vector_retrieval_latency_ms=vector_retrieval_latency_ms,
+                vector_retrieval_skipped=skip_vector_retrieval,
                 expansion_candidate_count=len(expansion_hits),
                 in_document_expansion_latency_ms=in_document_expansion_latency_ms,
                 document_evidence_sweep_candidate_count=len(document_sweep_hits),
@@ -596,6 +605,20 @@ class RetrievalService:
                 query_plan_probe_latency_ms=probe_latency_ms,
                 ),
             )
+
+    def _skip_vector_when_keyword_hits_exist(
+        self,
+        query_plan: QueryOptimizationPlan,
+        keyword_hits: list[RetrievalCandidate],
+    ) -> bool:
+        if not bool(getattr(self.settings, "retrieval_vector_skip_when_keyword_hits_enabled", False)):
+            return False
+        if self._subquery_source_retrieval_applies(query_plan):
+            return False
+        min_hits = max(1, int(getattr(self.settings, "retrieval_vector_skip_min_keyword_hits", 1) or 1))
+        unique_hit_count = len({hit.chunk_id for hit in keyword_hits})
+        return unique_hit_count >= min_hits
+
 
     def _permission_probe_early_stop(
         self,

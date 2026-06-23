@@ -24,7 +24,7 @@ from app.schemas.document import (
     DocumentVersionRead,
     IngestionResultRead,
 )
-from app.schemas.eval import EvalCaseRead, EvalResultRowRead, EvalRunDetailRead, EvalRunRead, EvalRunRequest
+from app.schemas.eval import EvalCaseRead, EvalDashboardRead, EvalDatasetRead, EvalFailureModeRead, EvalResultRowRead, EvalRunDetailRead, EvalRunRead, EvalRunRequest, EvalTrendPointRead
 from app.schemas.health import HealthDependencyStatus, HealthResponse
 from app.schemas.llm import (
     CopilotExecutionMetadata,
@@ -101,6 +101,10 @@ __all__ = [
     "EvalRunRead",
     "EvalRunDetailRead",
     "EvalResultRowRead",
+    "EvalDatasetRead",
+    "EvalTrendPointRead",
+    "EvalFailureModeRead",
+    "EvalDashboardRead",
     "TraceLogRead",
     "RouterAccessibleDocument",
     "RouterDecision",

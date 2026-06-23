@@ -183,6 +183,7 @@ export interface SearchDebugInfo {
   accessible_document_count: number;
   lexical_candidate_count: number;
   vector_candidate_count: number;
+  vector_retrieval_skipped?: boolean;
   fusion_strategy: string;
   pre_rerank_count?: number;
   post_rerank_count?: number;
@@ -244,6 +245,39 @@ export interface AgentRunTraceRead {
   observations: ToolObservationRead[];
   final_status: string;
   final_reason: string | null;
+}
+
+export type AnswerClaimSupportStatus = "supported" | "partial" | "unsupported" | string;
+
+export interface AnswerSupportCitationRead {
+  rank: number;
+  chunk_id: string | null;
+  document_id: string | null;
+  document_title: string | null;
+  version_number: number | null;
+  location: string | null;
+}
+
+export interface AnswerClaimSupportRead {
+  index: number;
+  text: string;
+  normalized: string;
+  length: number;
+  support_status: AnswerClaimSupportStatus;
+  support_score: number;
+  support_citations: AnswerSupportCitationRead[];
+  support_reasons: string[];
+}
+
+export interface AnswerEvidenceAuditRead {
+  status: "supported" | "partial" | "needs_review" | "not_applicable" | string;
+  score: number | null;
+  claim_count: number;
+  supported_count: number;
+  partial_count: number;
+  unsupported_count: number;
+  claims: AnswerClaimSupportRead[];
+  extraction_method: string;
 }
 
 export interface ChatCitationRead {
@@ -411,6 +445,45 @@ export interface EvalRunDetailRead extends EvalRunRead {
   results: EvalResultRowRead[];
 }
 
+export interface EvalDatasetRead {
+  dataset_name: string;
+  display_name: string;
+  case_count: number;
+  demo_case_count: number;
+  completed_run_count: number;
+  failed_run_count: number;
+  latest_run: EvalRunRead | null;
+}
+
+export interface EvalTrendPointRead {
+  run_id: string;
+  dataset_name: string;
+  created_at: string;
+  status: string;
+  total_cases: number;
+  pass_count: number;
+  pass_rate: number;
+  retrieval_hit_rate_avg: number;
+  citation_accuracy_avg: number;
+  answer_faithfulness_avg: number;
+  permission_isolation_pass_rate: number;
+  overall_score_avg: number;
+}
+
+export interface EvalFailureModeRead {
+  key: string;
+  label: string;
+  count: number;
+  example_case_names: string[];
+}
+
+export interface EvalDashboardRead {
+  dataset_name: string | null;
+  display_name: string | null;
+  trend: EvalTrendPointRead[];
+  failure_modes: EvalFailureModeRead[];
+  latest_completed_run: EvalRunRead | null;
+}
 export interface DocumentAccessCheckRead {
   source: string;
   matched: boolean;

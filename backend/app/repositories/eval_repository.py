@@ -23,6 +23,11 @@ class EvalRepository:
         statement = statement.order_by(EvalCase.dataset_name.asc(), EvalCase.case_name.asc())
         return list(self.session.scalars(statement).all())
 
+    def list_dataset_names(self) -> list[str]:
+        case_names = self.session.scalars(select(EvalCase.dataset_name)).all()
+        run_names = self.session.scalars(select(EvalRun.dataset_name)).all()
+        return sorted({name for name in [*case_names, *run_names] if name})
+
     def get_cases_by_ids(self, case_ids: list[UUID]) -> list[EvalCase]:
         if not case_ids:
             return []
@@ -41,8 +46,21 @@ class EvalRepository:
         for result in results:
             self.session.add(result)
 
-    def list_runs(self) -> list[EvalRun]:
-        statement = select(EvalRun).order_by(EvalRun.created_at.desc())
+    def list_runs(
+        self,
+        *,
+        dataset_name: str | None = None,
+        statuses: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list[EvalRun]:
+        statement = select(EvalRun)
+        if dataset_name:
+            statement = statement.where(EvalRun.dataset_name == dataset_name)
+        if statuses:
+            statement = statement.where(EvalRun.status.in_(statuses))
+        statement = statement.order_by(EvalRun.created_at.desc())
+        if limit is not None:
+            statement = statement.limit(limit)
         return list(self.session.scalars(statement).all())
 
     def get_run(self, run_id: UUID) -> EvalRun | None:

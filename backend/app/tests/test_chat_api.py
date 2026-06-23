@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -208,6 +208,13 @@ def test_chat_roundtrip_persists_history_and_targeted_citations(client: TestClie
     assert payload["citations"]
     assert payload["citations"][0]["document_title"] == "客户事故响应指南"
     metadata = payload["assistant_message"]["message_metadata"]
+    evidence_audit = metadata["evidence_audit"]
+    assert evidence_audit["claim_count"] >= 1
+    assert evidence_audit["supported_count"] >= 1
+    supported_claims = [item for item in evidence_audit["claims"] if item["support_status"] == "supported"]
+    assert supported_claims
+    assert supported_claims[0]["support_citations"][0]["rank"] == 1
+    assert supported_claims[0]["support_citations"][0]["document_title"] == "客户事故响应指南"
     steps = _agent_steps(payload)
     trace = _agent_run_trace(payload)
     assert metadata["router_decision"]["intent"] == "document_qa"
@@ -669,6 +676,56 @@ def test_topic_qa_prefers_support_manual_for_first_response_time_question(client
     assert metadata["router_decision"]["intent"] == "topic_qa"
     assert metadata["tool_execution"]["tool_name"] == "search_docs"
 
+
+def test_chat_message_client_request_id_replays_completed_response(client: TestClient, db_session: Session) -> None:
+    _seed_roles_and_users(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+
+    document_id, _ = _upload_and_ingest(
+        client,
+        admin_token,
+        "客户支持规范",
+        "P1 工单：五分钟内完成首次响应，十分钟内完成内部升级。",
+    )
+    _grant_acl(
+        client,
+        admin_token,
+        document_id,
+        {"principal_type": "public", "can_view": True, "can_manage": False},
+    )
+
+    session_id = _create_session(client, admin_token)
+    request_body = {
+        "content": "客服接到高优先级工单后，首次响应时间要求是多少？",
+        "top_k": 5,
+        "client_request_id": f"chat-{uuid4().hex}",
+    }
+    first = client.post(
+        f"/api/v1/chat/sessions/{session_id}/messages",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json=request_body,
+    )
+    second = client.post(
+        f"/api/v1/chat/sessions/{session_id}/messages",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json=request_body,
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_payload = first.json()
+    second_payload = second.json()
+    assert second_payload["user_message"]["id"] == first_payload["user_message"]["id"]
+    assert second_payload["assistant_message"]["id"] == first_payload["assistant_message"]["id"]
+    assert second_payload["assistant_message"]["message_metadata"]["client_request_status"] == "completed"
+
+    messages = (
+        db_session.query(ChatMessage)
+        .filter(ChatMessage.session_id == UUID(session_id))
+        .order_by(ChatMessage.created_at.asc())
+        .all()
+    )
+    assert [message.role for message in messages] == [MessageRole.USER, MessageRole.ASSISTANT]
 
 def test_policy_checklist_question_does_not_generate_tasks(client: TestClient, db_session: Session) -> None:
     _seed_roles_and_users(db_session)

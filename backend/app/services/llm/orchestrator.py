@@ -683,7 +683,9 @@ class CopilotOrchestrator:
             )
         generation = self._merge_answer_metrics(router_result, generation)
         validated_ids = validate_used_chunk_ids(generation.used_chunk_ids, {str(item.chunk_id) for item in candidate_chunks})
-        selected_chunks = self._select_citation_chunks(candidate_chunks, validated_ids)
+        selected_chunks = self._select_citation_chunks(generation_chunks, validated_ids)
+        if not selected_chunks:
+            selected_chunks = self._select_citation_chunks(candidate_chunks, validated_ids)
 
         if not generation.insufficient_evidence and not selected_chunks:
             generation = self._refusal_generation_result(
@@ -866,7 +868,7 @@ class CopilotOrchestrator:
             conversation_context=conversation_context,
             allow_low_score=allow_low_score,
         )
-        if generation.answer_basis == "structured_table_answer" and not generation.insufficient_evidence:
+        if generation.answer_basis in {"simple_table_lookup_answer", "structured_table_answer"} and not generation.insufficient_evidence:
             return generation
         return None
 
@@ -1499,6 +1501,8 @@ class CopilotOrchestrator:
         dominant_share = max(document_distribution.values()) / len(selected_chunks)
         if answer_result.evidence_conflict:
             return "medium" if top_score >= 0.6 else "low"
+        if answer_result.answer_basis in {"simple_table_lookup_answer", "structured_table_answer"}:
+            return "high"
         if len(selected_chunks) >= 2 and top_score >= 0.7 and average_score >= 0.55 and dominant_share >= 0.5:
             return "high"
         if top_score >= 0.4:
@@ -1577,6 +1581,10 @@ def _looks_like_structured_table_lookup(question: str) -> bool:
         "审批",
         "审批链路",
         "处理时限",
+        "首次响应",
+        "响应时间",
+        "响应要求",
+        "多久响应",
         "时限",
         "脱敏",
         "检查项",
@@ -1691,26 +1699,30 @@ def _focus_table_rows_for_question(question: str, chunk: SearchResultChunk) -> S
         if strict_rows:
             rows = strict_rows
 
-    scored_rows = [
-        (_table_row_focus_score(question, row), -index, row)
-        for index, row in enumerate(rows)
-    ]
-    scored_rows.sort(reverse=True)
-    best_score = scored_rows[0][0] if scored_rows else 0
+    priority_rows = _priority_table_rows_for_question(question, rows)
+    if priority_rows:
+        selected = priority_rows[:2]
+    else:
+        scored_rows = [
+            (_table_row_focus_score(question, row), -index, row)
+            for index, row in enumerate(rows)
+        ]
+        scored_rows.sort(reverse=True)
+        best_score = scored_rows[0][0] if scored_rows else 0
 
-    selected: list[str] = []
-    for score, _, row in scored_rows:
-        if score <= 0 and selected:
-            continue
-        if selected and best_score > 0 and score < best_score * 0.75:
-            continue
-        if row not in selected:
-            selected.append(row)
-        if len(selected) >= 2:
-            break
+        selected: list[str] = []
+        for score, _, row in scored_rows:
+            if score <= 0 and selected:
+                continue
+            if selected and best_score > 0 and score < best_score * 0.75:
+                continue
+            if row not in selected:
+                selected.append(row)
+            if len(selected) >= 2:
+                break
 
-    if not selected and scored_rows:
-        selected = [scored_rows[0][2]]
+        if not selected and scored_rows:
+            selected = [scored_rows[0][2]]
 
     supporting_lines = _select_supporting_narrative_lines(question, chunk.content)
     prefix_parts = [part for part in [chunk.section_title, chunk.preview] if part and "Table row:" not in part]
@@ -1719,6 +1731,24 @@ def _focus_table_rows_for_question(question: str, chunk: SearchResultChunk) -> S
         return chunk
     return chunk.model_copy(update={"content": focused_content, "preview": focused_content[:500]})
 
+
+def _priority_table_rows_for_question(question: str, rows: list[str]) -> list[str]:
+    normalized_question = _normalize_for_focus(question)
+    if not any(token in normalized_question for token in ("首次响应", "响应时间", "响应要求", "多久响应")):
+        return []
+    if not any(token in normalized_question for token in ("高优先级", "高优", "p1")):
+        return []
+
+    current_rows: list[str] = []
+    history_rows: list[str] = []
+    for row in rows:
+        normalized_row = _normalize_for_focus(row)
+        if "工单等级=p1" in normalized_row and "首次响应=" in normalized_row:
+            current_rows.append(row)
+        elif "问题类型=高优先级工单" in normalized_row and "历史响应时间=" in normalized_row:
+            history_rows.append(row)
+
+    return [*current_rows[:1], *history_rows[:1]]
 
 def _extract_table_rows(content: str) -> list[str]:
     return [line.strip() for line in content.splitlines() if line.strip().startswith("Table row:")]
@@ -1779,6 +1809,9 @@ def _table_row_focus_score(question: str, row: str) -> int:
         (("有效期",), ("有效期=",)),
         (("回收责任人", "责任人"), ("回收责任人=",)),
         (("日志要求", "日志"), ("日志要求=",)),
+        (("首次响应", "响应时间", "响应要求", "多久响应"), ("首次响应=",)),
+        (("响应时间",), ("历史响应时间=",)),
+        (("高优先级", "高优"), ("工单等级=p1", "问题类型=高优先级工单")),
         (("数据处理服务",), ("交付类型=数据处理服务",)),
         (("验收材料", "材料"), ("验收材料=",)),
         (("验收人",), ("验收人=",)),
@@ -1786,6 +1819,12 @@ def _table_row_focus_score(question: str, row: str) -> int:
     )
     for query_hints, row_hints in domain_pairs:
         if any(hint in normalized_question for hint in query_hints) and any(hint in normalized_row for hint in row_hints):
+            score += 8
+
+    if any(hint in normalized_question for hint in ("高优先级", "高优", "p1")):
+        if "工单等级=p1" in normalized_row and "首次响应=" in normalized_row:
+            score += 18
+        elif "问题类型=高优先级工单" in normalized_row and "历史响应时间=" in normalized_row:
             score += 8
 
     return score
@@ -1847,6 +1886,10 @@ def _required_table_row_markers(question: str) -> tuple[str, ...]:
         return ("准入等级=l4", "l4高风险")
     if "数据处理服务" in normalized_question:
         return ("交付类型=数据处理服务",)
+    if any(token in normalized_question for token in ("首次响应", "响应时间", "响应要求", "多久响应")):
+        if any(token in normalized_question for token in ("高优先级", "高优", "p1")):
+            return ("工单等级=p1", "问题类型=高优先级工单", "首次响应=")
+        return ("首次响应=", "历史响应时间=")
     if any(token in normalized_question for token in ("先救火", "紧急", "最小权限", "最低权限", "补材料", "关账号", "禁止发法", "导出文件")):
         return ("紧急场景=", "可先执行动作=", "事后补齐材料=", "账号关闭时限=", "禁止方式=")
     if "生产环境" in normalized_question:

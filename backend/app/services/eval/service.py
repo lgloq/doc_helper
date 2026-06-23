@@ -18,13 +18,23 @@ from app.models.enums import RoleName
 from app.models.user import User
 from app.repositories.eval_repository import EvalRepository
 from app.repositories.user_repository import UserRepository
-from app.schemas.eval import EvalRunDetailRead, EvalRunRead, EvalRunRequest, EvalResultRowRead
+from app.schemas.eval import (
+    EvalDashboardRead,
+    EvalDatasetRead,
+    EvalFailureModeRead,
+    EvalRunDetailRead,
+    EvalRunRead,
+    EvalRunRequest,
+    EvalResultRowRead,
+    EvalTrendPointRead,
+)
 from app.services.chat.service import ChatService, PreparedChatAnswer
 from app.services.eval.bootstrap import seed_demo_eval_cases
 from app.services.eval.demo_cases import resolve_demo_eval_annotation
 from app.services.observability.service import ObservabilityService
 
-STALE_EVAL_RUN_THRESHOLD = timedelta(minutes=5)
+STALE_QUEUED_EVAL_RUN_THRESHOLD = timedelta(minutes=5)
+STALE_RUNNING_EVAL_RUN_THRESHOLD = timedelta(minutes=15)
 
 
 class EvalService:
@@ -37,6 +47,12 @@ class EvalService:
 
     def run_eval(self, actor: User, payload: EvalRunRequest) -> EvalRunDetailRead:
         self._ensure_admin(actor)
+        client_request_id = self._normalize_client_request_id(payload.client_request_id)
+        if client_request_id:
+            existing_run = self._find_client_request_run(client_request_id)
+            if existing_run is not None:
+                return self.get_run(actor, existing_run.id)
+
         if payload.seed_demo_cases:
             seed_demo_eval_cases()
 
@@ -44,40 +60,233 @@ class EvalService:
         if not cases:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No eval cases found for the requested dataset.")
 
+        request_metadata = self._build_client_request_metadata(
+            payload,
+            client_request_id,
+            status="running",
+            selected_case_ids=[case.id for case in cases],
+        )
+        run = self._create_eval_run(
+            payload,
+            cases,
+            status="running",
+            request_metadata=request_metadata,
+            started_at=datetime.now(UTC),
+        )
+        return self._execute_run_cases(run, cases, payload.top_k, request_metadata, actor=actor)
+
+    def create_queued_run(self, actor: User, payload: EvalRunRequest) -> tuple[EvalRunDetailRead, bool]:
+        self._ensure_admin(actor)
+        client_request_id = self._normalize_client_request_id(payload.client_request_id)
+        if client_request_id:
+            existing_run = self._find_client_request_run(client_request_id)
+            if existing_run is not None:
+                return self.get_run(actor, existing_run.id), False
+
+        if payload.seed_demo_cases:
+            seed_demo_eval_cases()
+
+        cases = self._select_cases(payload)
+        if not cases:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No eval cases found for the requested dataset.")
+
+        request_metadata = self._build_client_request_metadata(
+            payload,
+            client_request_id,
+            status="queued",
+            selected_case_ids=[case.id for case in cases],
+            force=True,
+        )
+        run = self._create_eval_run(payload, cases, status="queued", request_metadata=request_metadata)
+        return self._build_run_detail(run), True
+
+    def attach_job_to_run(self, run_id: UUID, job_id: str) -> EvalRunDetailRead:
+        run = self.eval_repository.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Eval run not found.")
+        summary = run.summary_json if isinstance(run.summary_json, dict) else {}
+        run.summary_json = {**summary, "job_id": job_id}
+        self.session.commit()
+        self.session.refresh(run)
+        return self._build_run_detail(run)
+
+    def mark_run_enqueue_failed(self, run_id: UUID, error_text: str) -> EvalRunDetailRead:
+        run = self.eval_repository.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Eval run not found.")
+        run.status = "failed"
+        run.finished_at = datetime.now(UTC)
+        run.error_text = error_text[:1000]
+        summary = run.summary_json if isinstance(run.summary_json, dict) else {}
+        run.summary_json = {
+            **summary,
+            "client_request_status": "failed",
+        }
+        self.session.commit()
+        self.session.refresh(run)
+        return self._build_run_detail(run)
+
+    def execute_queued_run(self, run_id: UUID) -> EvalRunDetailRead:
+        run = self.eval_repository.get_run(run_id)
+        if run is None:
+            raise RuntimeError(f"Eval run {run_id} was not found.")
+        if run.status in {"completed", "failed"}:
+            return self._build_run_detail(run)
+        if run.status == "running" and run.started_at is not None:
+            return self._build_run_detail(run)
+
+        summary = run.summary_json if isinstance(run.summary_json, dict) else {}
+        case_ids = self._selected_case_ids_from_summary(summary)
+        cases = self.eval_repository.get_cases_by_ids(case_ids) if case_ids else self.eval_repository.list_cases(run.dataset_name)
+        if not cases:
+            run.status = "failed"
+            run.finished_at = datetime.now(UTC)
+            run.error_text = "No eval cases found for the queued run."
+            run.summary_json = {**summary, "client_request_status": "failed"}
+            self.session.commit()
+            self.session.refresh(run)
+            return self._build_run_detail(run)
+
+        top_k = self._top_k_from_summary(summary)
+        run.status = "running"
+        run.started_at = run.started_at or datetime.now(UTC)
+        run.total_cases = len(cases)
+        run.summary_json = {**summary, "client_request_status": "running"}
+        self.session.commit()
+        self.session.refresh(run)
+        return self._execute_run_cases(run, cases, top_k, run.summary_json or {})
+
+    def _create_eval_run(
+        self,
+        payload: EvalRunRequest,
+        cases,
+        *,
+        status: str,
+        request_metadata: dict,
+        started_at: datetime | None = None,
+    ) -> EvalRun:
         run = EvalRun(
             dataset_name=payload.dataset_name,
-            status="running",
+            status=status,
             total_cases=len(cases),
-            started_at=datetime.now(UTC),
+            started_at=started_at,
+            summary_json=request_metadata or None,
         )
         self.eval_repository.add_run(run)
         self.session.commit()
         self.session.refresh(run)
+        return run
 
+    def _execute_run_cases(
+        self,
+        run: EvalRun,
+        cases,
+        top_k: int,
+        request_metadata: dict,
+        *,
+        actor: User | None = None,
+    ) -> EvalRunDetailRead:
         results: list[EvalResult] = []
         try:
             for case in cases:
-                result = self._evaluate_case_with_retry(run, case, payload.top_k)
+                result = self._evaluate_case_with_retry(run, case, top_k)
                 results.append(result)
                 self.eval_repository.add_results([result])
+                run.summary_json = self._with_client_request_metadata(
+                    self._build_running_progress_summary(len(results), len(cases)),
+                    request_metadata,
+                    status="running",
+                )
                 self.session.commit()
 
             run.status = "completed"
             run.finished_at = datetime.now(UTC)
-            run.summary_json = self._build_summary(results)
+            run.summary_json = self._with_client_request_metadata(
+                self._build_summary(results),
+                request_metadata,
+                status="completed",
+            )
             run.error_text = None
             self.session.commit()
             self.session.refresh(run)
         except Exception as exc:
             run.status = "failed"
             run.finished_at = datetime.now(UTC)
-            run.summary_json = self._build_summary(results)
+            run.summary_json = self._with_client_request_metadata(
+                self._build_summary(results),
+                request_metadata,
+                status="failed",
+            )
             run.error_text = str(exc)[:1000] if str(exc) else "Eval run failed before completion."
             self.session.commit()
             self.session.refresh(run)
-            return self.get_run(actor, run.id)
 
-        return self.get_run(actor, run.id)
+        if actor is not None:
+            return self.get_run(actor, run.id)
+        return self._build_run_detail(run)
+
+    @staticmethod
+    def _normalize_client_request_id(value: str | None) -> str | None:
+        normalized = (value or "").strip()
+        return normalized or None
+
+    def _find_client_request_run(self, client_request_id: str) -> EvalRun | None:
+        for run in self.eval_repository.list_runs():
+            summary = run.summary_json if isinstance(run.summary_json, dict) else {}
+            if summary.get("client_request_id") == client_request_id:
+                return run
+        return None
+
+    @staticmethod
+    def _build_client_request_metadata(
+        payload: EvalRunRequest,
+        client_request_id: str | None,
+        *,
+        status: str,
+        selected_case_ids: list[UUID] | None = None,
+        force: bool = False,
+    ) -> dict:
+        if not client_request_id and not force:
+            return {}
+        return {
+            "client_request_id": client_request_id,
+            "client_request_status": status,
+            "requested_dataset_name": payload.dataset_name,
+            "requested_top_k": payload.top_k,
+            "requested_case_ids": [str(item) for item in payload.case_ids],
+            "requested_seed_demo_cases": payload.seed_demo_cases,
+            "selected_case_ids": [str(item) for item in selected_case_ids or []],
+        }
+
+    @staticmethod
+    def _with_client_request_metadata(summary: dict, metadata: dict, *, status: str) -> dict:
+        if not metadata:
+            return summary
+        return {
+            **summary,
+            **metadata,
+            "client_request_status": status,
+        }
+
+    @staticmethod
+    def _selected_case_ids_from_summary(summary: dict) -> list[UUID]:
+        values = summary.get("selected_case_ids") or summary.get("requested_case_ids") or []
+        if not isinstance(values, list):
+            return []
+        case_ids: list[UUID] = []
+        for value in values:
+            try:
+                case_ids.append(UUID(str(value)))
+            except (TypeError, ValueError):
+                continue
+        return case_ids
+
+    @staticmethod
+    def _top_k_from_summary(summary: dict) -> int:
+        value = summary.get("requested_top_k")
+        if isinstance(value, int):
+            return min(10, max(1, value))
+        return 5
 
     def list_runs(self, actor: User) -> list[EvalRunRead]:
         self._ensure_admin(actor)
@@ -91,12 +300,63 @@ class EvalService:
         run = self.eval_repository.get_run(run_id)
         if run is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Eval run not found.")
-        results = self.eval_repository.list_results_for_run(run_id)
+        return self._build_run_detail(run)
+
+    def _build_run_detail(self, run: EvalRun) -> EvalRunDetailRead:
+        results = self.eval_repository.list_results_for_run(run.id)
         return EvalRunDetailRead.model_validate(
             {
                 **EvalRunRead.model_validate(run).model_dump(),
                 "results": [EvalResultRowRead.model_validate(item) for item in results],
             }
+        )
+
+    def list_datasets(self, actor: User) -> list[EvalDatasetRead]:
+        self._ensure_admin(actor)
+        self._reconcile_stale_runs()
+        datasets: list[EvalDatasetRead] = []
+        for dataset_name in self.eval_repository.list_dataset_names():
+            cases = self.eval_repository.list_cases(dataset_name)
+            runs = self.eval_repository.list_runs(dataset_name=dataset_name)
+            completed_count = sum(1 for run in runs if run.status == "completed")
+            failed_count = sum(1 for run in runs if run.status == "failed")
+            datasets.append(
+                EvalDatasetRead(
+                    dataset_name=dataset_name,
+                    display_name=self._display_dataset_name(dataset_name),
+                    case_count=len(cases),
+                    demo_case_count=sum(1 for case in cases if case.is_demo_case),
+                    completed_run_count=completed_count,
+                    failed_run_count=failed_count,
+                    latest_run=EvalRunRead.model_validate(runs[0]) if runs else None,
+                )
+            )
+        return datasets
+
+    def get_dashboard(self, actor: User, dataset_name: str | None = None, *, limit: int = 8) -> EvalDashboardRead:
+        self._ensure_admin(actor)
+        self._reconcile_stale_runs()
+        selected_dataset = dataset_name or self._default_dashboard_dataset_name()
+        if not selected_dataset:
+            return EvalDashboardRead()
+
+        completed_runs = self.eval_repository.list_runs(
+            dataset_name=selected_dataset,
+            statuses=["completed"],
+            limit=max(1, limit),
+        )
+        trend = [self._trend_point_from_run(run) for run in reversed(completed_runs)]
+        latest_completed_run = completed_runs[0] if completed_runs else None
+        failure_modes: list[EvalFailureModeRead] = []
+        if latest_completed_run is not None:
+            failure_modes = self._failure_modes_for_results(self.eval_repository.list_results_for_run(latest_completed_run.id))
+
+        return EvalDashboardRead(
+            dataset_name=selected_dataset,
+            display_name=self._display_dataset_name(selected_dataset),
+            trend=trend,
+            failure_modes=failure_modes,
+            latest_completed_run=EvalRunRead.model_validate(latest_completed_run) if latest_completed_run else None,
         )
 
     def _evaluate_case_with_retry(self, run: EvalRun, case, top_k: int, *, max_attempts: int = 2) -> EvalResult:
@@ -1116,6 +1376,112 @@ class EvalService:
             "reason": blocking_reason,
         }
 
+    def _default_dashboard_dataset_name(self) -> str | None:
+        completed_runs = self.eval_repository.list_runs(statuses=["completed"], limit=1)
+        if completed_runs:
+            return completed_runs[0].dataset_name
+        dataset_names = self.eval_repository.list_dataset_names()
+        return dataset_names[0] if dataset_names else None
+
+    @staticmethod
+    def _display_dataset_name(dataset_name: str) -> str:
+        labels = {
+            "demo_access_matrix_eval": "权限隔离演示评测",
+            "demo_permission_eval": "权限回归演示评测",
+            "zh_enterprise_v1_seed": "中文企业文档评测集",
+            "format_coverage_zh_parser": "格式覆盖回归集",
+        }
+        if dataset_name in labels:
+            return labels[dataset_name]
+        return dataset_name.replace("_", " ")
+
+    @staticmethod
+    def _trend_point_from_run(run: EvalRun) -> EvalTrendPointRead:
+        summary = run.summary_json if isinstance(run.summary_json, dict) else {}
+        return EvalTrendPointRead(
+            run_id=run.id,
+            dataset_name=run.dataset_name,
+            created_at=run.created_at,
+            status=run.status,
+            total_cases=run.total_cases,
+            pass_count=EvalService._summary_int(summary, "pass_count"),
+            pass_rate=EvalService._summary_float(summary, "pass_rate"),
+            retrieval_hit_rate_avg=EvalService._summary_float(summary, "retrieval_hit_rate_avg"),
+            citation_accuracy_avg=EvalService._summary_float(summary, "citation_accuracy_avg"),
+            answer_faithfulness_avg=EvalService._summary_float(summary, "answer_faithfulness_avg"),
+            permission_isolation_pass_rate=EvalService._summary_float(summary, "permission_isolation_pass_rate"),
+            overall_score_avg=EvalService._summary_float(summary, "overall_score_avg"),
+        )
+
+    @staticmethod
+    def _failure_modes_for_results(results: list[EvalResult]) -> list[EvalFailureModeRead]:
+        labels = {
+            "permission_failure": "权限隔离问题",
+            "retrieval_failure": "检索命中不足",
+            "citation_failure": "引用证据不足",
+            "answer_faithfulness_failure": "答案支撑不足",
+            "overall_failure": "综合分未达标",
+        }
+        counts: dict[str, int] = {}
+        examples: dict[str, list[str]] = {}
+        for result in results:
+            key = EvalService._failure_mode_key(result)
+            if key is None:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+            case_name = str((result.details_json or {}).get("case_name") or result.case_id)
+            examples.setdefault(key, [])
+            if case_name not in examples[key] and len(examples[key]) < 3:
+                examples[key].append(case_name)
+        return [
+            EvalFailureModeRead(
+                key=key,
+                label=labels.get(key, key),
+                count=count,
+                example_case_names=examples.get(key, []),
+            )
+            for key, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        ]
+
+    @staticmethod
+    def _failure_mode_key(result: EvalResult) -> str | None:
+        if result.overall_pass:
+            return None
+        details = result.details_json or {}
+        metric_breakdown = details.get("metric_breakdown") if isinstance(details, dict) else {}
+        metric_breakdown = metric_breakdown if isinstance(metric_breakdown, dict) else {}
+        permission = metric_breakdown.get("permission_isolation") if isinstance(metric_breakdown.get("permission_isolation"), dict) else {}
+        retrieval = metric_breakdown.get("retrieval") if isinstance(metric_breakdown.get("retrieval"), dict) else {}
+        citation = metric_breakdown.get("citation") if isinstance(metric_breakdown.get("citation"), dict) else {}
+        faithfulness = metric_breakdown.get("faithfulness") if isinstance(metric_breakdown.get("faithfulness"), dict) else {}
+
+        if not result.permission_isolation_correct or permission.get("passed") is False:
+            return "permission_failure"
+        if EvalService._metric_score(retrieval, result.retrieval_hit_rate) < 0.5:
+            return "retrieval_failure"
+        if EvalService._metric_score(citation, result.citation_accuracy) < 0.5:
+            return "citation_failure"
+        if EvalService._metric_score(faithfulness, result.answer_faithfulness) < 0.7:
+            return "answer_faithfulness_failure"
+        return "overall_failure"
+
+    @staticmethod
+    def _metric_score(payload: dict, fallback: float) -> float:
+        value = payload.get("score") if isinstance(payload, dict) else None
+        if isinstance(value, (int, float)):
+            return float(value)
+        return float(fallback or 0.0)
+
+    @staticmethod
+    def _summary_float(summary: dict, key: str) -> float:
+        value = summary.get(key)
+        return round(float(value), 4) if isinstance(value, (int, float)) else 0.0
+
+    @staticmethod
+    def _summary_int(summary: dict, key: str) -> int:
+        value = summary.get(key)
+        return int(value) if isinstance(value, int) else 0
+
     @staticmethod
     def _build_summary(results: list[EvalResult]) -> dict:
         summary = EvalService._build_result_summary(results)
@@ -1195,20 +1561,64 @@ class EvalService:
         now = datetime.now(UTC)
         stale_runs: list[EvalRun] = []
         for run in self.eval_repository.list_runs():
-            if run.status != "running" or run.finished_at is not None:
+            if run.status not in {"queued", "running"} or run.finished_at is not None:
                 continue
-            reference_time = run.started_at or run.created_at
+            reference_time = self._stale_reference_time(run)
             if reference_time is None:
                 continue
-            if now - reference_time < STALE_EVAL_RUN_THRESHOLD:
+            threshold = (
+                STALE_QUEUED_EVAL_RUN_THRESHOLD
+                if run.status == "queued"
+                else STALE_RUNNING_EVAL_RUN_THRESHOLD
+            )
+            if now - reference_time < threshold:
                 continue
             run.status = "failed"
             run.finished_at = now
             if not run.error_text:
                 run.error_text = "Eval run did not complete and was automatically marked as failed."
+            if isinstance(run.summary_json, dict):
+                run.summary_json = {
+                    **run.summary_json,
+                    "client_request_status": "failed",
+                }
             stale_runs.append(run)
         if stale_runs:
             self.session.commit()
+
+    @staticmethod
+    def _build_running_progress_summary(completed_cases: int, total_cases: int) -> dict:
+        return {
+            "completed_cases": completed_cases,
+            "total_cases": total_cases,
+            "last_progress_at": datetime.now(UTC).isoformat(),
+        }
+
+    @staticmethod
+    def _stale_reference_time(run: EvalRun) -> datetime | None:
+        if run.status == "queued":
+            return EvalService._ensure_aware_datetime(run.created_at)
+
+        summary = run.summary_json if isinstance(run.summary_json, dict) else {}
+        progress_time = EvalService._parse_summary_datetime(summary.get("last_progress_at"))
+        return progress_time or EvalService._ensure_aware_datetime(run.started_at) or EvalService._ensure_aware_datetime(run.created_at)
+
+    @staticmethod
+    def _parse_summary_datetime(value: object) -> datetime | None:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            return EvalService._ensure_aware_datetime(datetime.fromisoformat(value))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _ensure_aware_datetime(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
     @staticmethod
     def _extract_eval_error(prepared: PreparedChatAnswer) -> str | None:

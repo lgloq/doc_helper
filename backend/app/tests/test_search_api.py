@@ -18,7 +18,7 @@ from app.models.user import User
 from app.schemas.search import SearchRequest
 from app.services.ingestion.structure import extract_chunk_structure
 from app.services.ingestion.search_index import build_lexical_search_text
-from app.services.retrieval.query_optimizer import QuerySubquery
+from app.services.retrieval.query_optimizer import QueryOptimizer, QuerySubquery
 from app.services.retrieval.service import (
     SUBQUERY_DOCUMENT_EVIDENCE_SOURCE,
     SUBQUERY_NEIGHBOR_CONTEXT_SOURCE,
@@ -312,6 +312,25 @@ def test_search_returns_chat_ready_scores_and_citation_metadata(client: TestClie
     assert payload["debug"]["search_total_latency_ms"] is not None
 
 
+def test_query_optimizer_skips_llm_rewrite_for_precise_lookup_question(monkeypatch) -> None:
+    def _fail_rewrite(*args, **kwargs):
+        raise AssertionError("LLM query rewrite should not run for precise lookup questions")
+
+    monkeypatch.setattr("app.services.retrieval.query_optimizer.request_chat_completion", _fail_rewrite)
+    optimizer = QueryOptimizer(
+        Settings(
+            query_rewrite_provider="openai_compatible",
+            llm_api_key="test-key",
+            llm_base_url="https://example.invalid",
+            llm_chat_model="test-model",
+        )
+    )
+
+    plan = optimizer.build("客服接到高优先级工单后，首次响应时间要求是多少？")
+
+    assert plan.rewrite_provider is None
+    assert "llm_rewrite" not in plan.applied_strategies
+    assert plan.retrieval_query
 def test_search_debug_exposes_query_rewrite_plan(client: TestClient, db_session: Session, monkeypatch) -> None:
     monkeypatch.setenv("RETRIEVAL_QUERY_PLAN_PROBE_ENABLED", "true")
     get_settings.cache_clear()
@@ -1325,6 +1344,46 @@ def test_search_can_disable_vector_retrieval_for_local_baseline(db_session: Sess
     assert response.matched_chunks
     assert response.matched_chunks[0].document_id == document_id
 
+
+def test_search_skips_vector_when_keyword_hits_are_sufficient(db_session: Session) -> None:
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add(admin_role)
+    db_session.flush()
+    admin = _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+
+    document_id = _create_ready_chunked_document(
+        db_session,
+        admin,
+        title="客户工单响应规范",
+        chunks=[("响应矩阵", "高优先级工单按照 P1 处理，首次响应要求是 5 分钟内。")],
+    )
+
+    class FailingEmbeddingProvider:
+        def embed_texts(self, texts):
+            raise AssertionError("vector embedding should not run when keyword hits are sufficient")
+
+    service = RetrievalService(db_session)
+    service.settings = Settings(
+        retrieval_vector_enabled=True,
+        retrieval_vector_skip_when_keyword_hits_enabled=True,
+        retrieval_vector_skip_min_keyword_hits=1,
+        retrieval_indexed_sparse_enabled=True,
+        retrieval_structural_enabled=False,
+        retrieval_candidate_multiplier=1,
+        retrieval_candidate_min=3,
+        retrieval_candidate_max=3,
+        retrieval_in_document_expansion_enabled=False,
+    )
+    service.embedding_provider = FailingEmbeddingProvider()
+
+    response = service.search(admin, SearchRequest(query="高优先级工单首次响应要求是多少？", top_k=1))
+
+    assert response.debug.vector_retrieval_skipped is True
+    assert response.debug.vector_candidate_count == 0
+    assert response.debug.vector_embedding_latency_ms is not None
+    assert response.debug.vector_retrieval_latency_ms is not None
+    assert response.matched_chunks
+    assert response.matched_chunks[0].document_id == document_id
 
 def test_search_can_enable_indexed_sparse_candidate_source(db_session: Session) -> None:
     admin_role = Role(name=RoleName.ADMIN, description="Admin")
@@ -3187,7 +3246,7 @@ def test_repository_reuses_cjk_lexical_index_for_repeated_queries(db_session: Se
     )
 
     repository = RetrievalRepository(db_session)
-    repository.settings = Settings(retrieval_cjk_python_fallback_mode="always")
+    repository.settings = Settings(retrieval_cjk_python_fallback_mode="always", retrieval_cjk_lexical_cache_enabled=True)
     first_hits = repository.search_lexical("个体工商户债务承担", [document_id], 3)
     second_hits = repository.search_lexical("个体工商户登记经营者", [document_id], 3)
 
@@ -3342,6 +3401,7 @@ def test_repository_python_bm25_scorer_uses_corpus_idf_for_cjk_terms(db_session:
     repository.settings = Settings(
         retrieval_cjk_python_fallback_mode="always",
         retrieval_cjk_python_scorer="bm25",
+        retrieval_cjk_lexical_cache_enabled=True,
     )
     hits = repository.search_lexical("客户手机号脱敏审批处理时限", [common_document_id, rare_document_id], 2)
 

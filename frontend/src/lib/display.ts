@@ -52,6 +52,7 @@ const WORKFLOW_STATUS_LABELS: Record<string, string> = {
   published: "已发布",
   pending: "待处理",
   processing: "处理中",
+  queued: "排队中",
   running: "进行中",
   failed: "失败",
 };

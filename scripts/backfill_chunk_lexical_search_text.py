@@ -4,7 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 BACKEND_DIR = ROOT_DIR / "backend"
@@ -15,6 +15,7 @@ from app.db.session import SessionLocal
 from app.models.chunk import Chunk
 from app.models.document import Document, DocumentVersion
 from app.services.ingestion.search_index import build_lexical_search_text
+from app.services.ingestion.structure import extract_chunk_structure
 
 
 def main() -> None:
@@ -53,10 +54,18 @@ def backfill_lexical_search_text(
         if document_title_prefix:
             statement = statement.where(Document.title.like(f"{document_title_prefix}%"))
         if only_missing:
-            statement = statement.where(Chunk.lexical_search_text.is_(None))
+            statement = statement.where(
+                or_(
+                    Chunk.lexical_search_text.is_(None),
+                    func.length(func.trim(Chunk.lexical_search_text)) == 0,
+                )
+            )
 
         updated = 0
         for chunk, document_title in session.execute(statement).yield_per(batch_size):
+            if not _has_search_text(chunk.structural_search_text) or not only_missing:
+                structure = extract_chunk_structure(chunk.content, chunk.section_title)
+                chunk.structural_search_text = structure["structural_search_text"]
             chunk.lexical_search_text = build_lexical_search_text(
                 document_title=document_title,
                 section_title=chunk.section_title,
@@ -73,6 +82,10 @@ def backfill_lexical_search_text(
         return updated
     finally:
         session.close()
+
+
+def _has_search_text(value: str | None) -> bool:
+    return bool(str(value or "").strip())
 
 
 if __name__ == "__main__":
