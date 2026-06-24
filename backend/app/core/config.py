@@ -44,9 +44,13 @@ class Settings(BaseSettings):
     query_rewrite_provider: str = "auto"
     query_rewrite_model: str | None = None
     query_rewrite_max_variants: int = 3
+    query_rewrite_timeout_seconds: float = 2.0
     retrieval_evidence_query_bridge_enabled: bool = False
     retrieval_evidence_query_bridge_max_queries: int = 3
     retrieval_query_plan_probe_enabled: bool = True
+    retrieval_query_plan_probe_simple_skip_enabled: bool = True
+    retrieval_query_plan_probe_max_candidates: int = 3
+    retrieval_query_plan_probe_timeout_ms: int = 300
     retrieval_query_decomposition_enabled: bool = True
     retrieval_query_decomposition_min_subquery_candidates: int = 4
     retrieval_query_decomposition_cross_document_lexical_candidate_cap: int = 16
@@ -84,6 +88,8 @@ class Settings(BaseSettings):
     retrieval_vector_skip_min_keyword_hits: int = 4
     retrieval_vector_ivfflat_probes: int = 20
     retrieval_structural_enabled: bool = True
+    retrieval_structural_simple_query_skip_enabled: bool = True
+    retrieval_structural_timeout_ms: int = 1200
     retrieval_fusion_strategy: str = "weighted"
     retrieval_rrf_k: int = 60
     retrieval_cjk_lexical_cache_enabled: bool = True
@@ -109,6 +115,9 @@ class Settings(BaseSettings):
     retrieval_document_evidence_sweep_per_document: int = 8
     retrieval_document_evidence_sweep_max_candidates: int = 48
     retrieval_document_evidence_sweep_score_weight: float = 0.36
+    retrieval_document_evidence_sweep_min_remaining_budget_ms: int = 700
+    retrieval_latency_budget_simple_ms: int = 4500
+    retrieval_latency_budget_complex_ms: int = 12000
     retrieval_document_first_evidence_enabled: bool = False
     retrieval_document_first_evidence_seed_documents: int = 4
     retrieval_document_first_evidence_per_document: int = 24

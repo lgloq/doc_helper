@@ -28,6 +28,7 @@ export function ExecutionTrace({ steps, runTrace, retrievalDebug, originalQuery 
   const finalAction = runTrace ? [...runTrace.actions].reverse().find((item) => item.action_type !== "tool_call") : undefined;
   const compactContextSummary = formatContextSummary(runTrace?.tool_plan.context_summary);
   const retrievalSummary = retrievalDebug ? buildRetrievalSummary(retrievalDebug, originalQuery) : null;
+  const latencyRows = retrievalDebug ? buildLatencyRows(retrievalDebug) : [];
 
   return (
     <details className="execution-trace">
@@ -69,15 +70,27 @@ export function ExecutionTrace({ steps, runTrace, retrievalDebug, originalQuery 
             {retrievalDebug.query_plan_selection_reason ? (
               <p className="muted">选中原因：{retrievalDebug.query_plan_selection_reason}</p>
             ) : null}
-            {retrievalSummary?.hasDetails ? (
+            {retrievalSummary?.hasDetails || latencyRows.length ? (
               <details className="execution-trace-secondary execution-trace-retrieval-details">
                 <summary>查看检索细节</summary>
                 <div className="execution-trace-secondary-list">
-                  {retrievalSummary.originalQuery ? <p className="muted">原始问题：{retrievalSummary.originalQuery}</p> : null}
-                  {retrievalSummary.methodSummary ? <p className="muted">改写方式：{retrievalSummary.methodSummary}</p> : null}
-                  {retrievalSummary.routeSummary ? <p className="muted">分路情况：{retrievalSummary.routeSummary}</p> : null}
+                  {retrievalSummary?.originalQuery ? <p className="muted">原始问题：{retrievalSummary.originalQuery}</p> : null}
+                  {retrievalSummary?.methodSummary ? <p className="muted">改写方式：{retrievalSummary.methodSummary}</p> : null}
+                  {retrievalSummary?.routeSummary ? <p className="muted">分路情况：{retrievalSummary.routeSummary}</p> : null}
                   {retrievalDebug.query_plan_probe_applied ? <p className="muted">方案选优：已执行低成本试探</p> : null}
-                  {retrievalSummary.lexicalVariants.length ? (
+                  {latencyRows.length ? (
+                    <div className="execution-trace-detail-block">
+                      <p className="muted">阶段耗时：</p>
+                      <ul className="execution-trace-detail-list">
+                        {latencyRows.map((row) => (
+                          <li key={row.key}>
+                            <strong>{row.label}</strong>：{formatLatencyValue(row.latencyMs)}{row.status ? ` · ${row.status}` : ""}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  {retrievalSummary?.lexicalVariants.length ? (
                     <div className="execution-trace-detail-block">
                       <p className="muted">关键词检索变体：</p>
                       <ul className="execution-trace-detail-list">
@@ -285,6 +298,101 @@ function shortenText(value: string, maxLength: number): string {
   return `${value.slice(0, maxLength - 1)}…`;
 }
 
+interface LatencyRow {
+  key: string;
+  label: string;
+  latencyMs: number | null | undefined;
+  status?: string | null;
+}
+
+function buildLatencyRows(retrievalDebug: SearchDebugInfo): LatencyRow[] {
+  const rows: LatencyRow[] = [];
+  const addRow = (key: string, label: string, latencyMs: number | null | undefined, status?: string | null) => {
+    if (typeof latencyMs === "number" || status) {
+      rows.push({ key, label, latencyMs, status });
+    }
+  };
+
+  addRow("permission", "权限过滤", retrievalDebug.permission_filter_latency_ms);
+  addRow(
+    "query-rewrite",
+    "Query Rewrite",
+    retrievalDebug.llm_rewrite_latency_ms ?? retrievalDebug.query_rewrite_latency_ms,
+    retrievalDebug.llm_rewrite_skipped_reason ? formatSkipReason(retrievalDebug.llm_rewrite_skipped_reason) : null,
+  );
+  addRow(
+    "query-plan-probe",
+    "Query Plan Probe",
+    retrievalDebug.query_plan_probe_latency_ms,
+    retrievalDebug.query_plan_probe_applied ? null : formatSkipReason(retrievalDebug.query_plan_probe_skipped_reason),
+  );
+  addRow("lexical", "Lexical Retrieval", retrievalDebug.lexical_retrieval_latency_ms);
+  addRow("indexed-sparse", "Indexed Sparse", retrievalDebug.indexed_sparse_retrieval_latency_ms);
+  addRow(
+    "structural",
+    "Structural Retrieval",
+    retrievalDebug.structural_retrieval_latency_ms,
+    retrievalDebug.structural_retrieval_timeout
+      ? "超时降级"
+      : retrievalDebug.structural_retrieval_skipped
+        ? formatSkipReason(retrievalDebug.structural_retrieval_skip_reason)
+        : null,
+  );
+  addRow("vector-embedding", "Vector Embedding", retrievalDebug.vector_embedding_latency_ms);
+  addRow(
+    "vector",
+    "Vector Retrieval",
+    retrievalDebug.vector_retrieval_latency_ms,
+    retrievalDebug.vector_retrieval_timeout ? "超时降级" : formatSkipReason(retrievalDebug.vector_retrieval_skip_reason),
+  );
+  addRow("expansion", "Evidence Expansion", retrievalDebug.in_document_expansion_latency_ms);
+  addRow(
+    "evidence-sweep",
+    "Evidence Sweep",
+    retrievalDebug.document_evidence_sweep_latency_ms,
+    retrievalDebug.document_evidence_sweep_skipped
+      ? formatSkipReason(retrievalDebug.document_evidence_sweep_skip_reason)
+      : null,
+  );
+  addRow("subquery-document", "Subquery Evidence", retrievalDebug.subquery_document_evidence_latency_ms);
+  addRow("subquery-neighbor", "Subquery Neighbor", retrievalDebug.subquery_neighbor_context_latency_ms);
+  addRow("first-evidence", "First Evidence", retrievalDebug.document_first_evidence_latency_ms);
+  addRow("neighbor-context", "Neighbor Context", retrievalDebug.document_neighbor_context_latency_ms);
+  addRow("fusion", "Fusion", retrievalDebug.fusion_latency_ms);
+  addRow("rerank", "Rerank", retrievalDebug.rerank_latency_ms);
+  addRow("total", "Search Total", retrievalDebug.search_total_latency_ms);
+  return rows;
+}
+
+function formatLatencyValue(value: number | null | undefined): string {
+  return typeof value === "number" ? `${value} ms` : "未执行";
+}
+
+function formatSkipReason(reason?: string | null): string | null {
+  if (!reason) {
+    return null;
+  }
+  const labels: Record<string, string> = {
+    disabled: "已关闭",
+    lexical_disabled: "关键词检索已关闭",
+    no_accessible_documents: "无可访问文档",
+    single_candidate: "单一方案跳过",
+    candidate_limit: "候选过多跳过",
+    simple_query: "简单问题跳过",
+    simple_or_precise_query: "精确问题跳过",
+    simple_query_without_structural_anchor: "无条款锚点跳过",
+    keyword_hits_sufficient: "关键词候选充足",
+    no_seed_candidates: "无种子候选",
+    latency_budget_exhausted: "预算不足跳过",
+    provider_deterministic: "规则模式",
+    unsupported_provider: "不支持的改写服务",
+    missing_credentials: "缺少改写凭据",
+    upstream_failed: "改写服务失败",
+    empty_suggestion: "无有效改写",
+  };
+  return labels[reason] ?? reason;
+}
+
 interface RetrievalSummary {
   retrievalQuery: string;
   originalQuery: string | null;
@@ -357,6 +465,8 @@ function formatRewriteStrategy(strategy: string): string {
     normalize: "规范化",
     focus_keywords: "关键词聚焦",
     title_anchor: "标题锚定",
+    domain_expansion: "领域词扩展",
+    evidence_bridge: "证据意图扩展",
     llm_rewrite: "LLM 改写",
   };
   return labels[strategy] ?? strategy;

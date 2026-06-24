@@ -231,6 +231,13 @@ def test_chat_roundtrip_persists_history_and_targeted_citations(client: TestClie
         "answer_generation",
     ]
 
+    latency_breakdown = metadata["latency_breakdown"]
+    assert latency_breakdown["total_latency_ms"] >= 0
+    assert latency_breakdown["retrieval_latency_ms"] is not None
+    assert _find_step(payload, "query_analysis")["metadata"]["router_latency_ms"] is not None
+    assert _find_step(payload, "tool_execution")["metadata"]["retrieval_latency_ms"] is not None
+    assert "answer_generation_latency_ms" in _find_step(payload, "answer_generation")["metadata"]
+
 
 def test_delete_chat_session_removes_session_and_messages(client: TestClient, db_session: Session) -> None:
     _seed_roles_and_users(db_session)
@@ -1399,4 +1406,3 @@ def test_insufficient_evidence_does_not_force_workflow_generation(client: TestCl
     assert tool_step["status"] == "skipped"
     assert evidence_step["status"] == "refused"
     assert trace["observations"] == []
-

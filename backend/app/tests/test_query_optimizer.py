@@ -123,6 +123,64 @@ def test_query_optimizer_skips_llm_rewrite_for_short_direct_topic_question() -> 
     assert optimizer._should_use_llm("节假日安排是什么样的？", None) is False
 
 
+def test_query_optimizer_skips_llm_rewrite_for_simple_target_document_lookup(monkeypatch) -> None:
+    def fail_rewrite(*args, **kwargs):
+        raise AssertionError("LLM query rewrite should not run for simple target-document lookup")
+
+    monkeypatch.setattr("app.services.retrieval.query_optimizer.request_chat_completion", fail_rewrite)
+    optimizer = QueryOptimizer(
+        Settings(
+            query_rewrite_provider="openai_compatible",
+            llm_api_key="test-key",
+            llm_base_url="https://example.invalid",
+            llm_chat_model="test-model",
+        )
+    )
+
+    plan = optimizer.build("总体目标是什么？", target_document_title="工业领域数据安全能力提升实施方案")
+
+    assert "llm_rewrite" not in plan.applied_strategies
+    assert plan.llm_rewrite_attempted is False
+    assert plan.llm_rewrite_skipped_reason == "simple_or_precise_query"
+
+
+def test_query_optimizer_uses_configured_llm_rewrite_timeout(monkeypatch) -> None:
+    captured: dict[str, float] = {}
+
+    class Message:
+        content = '{"retrieval_query":"供应商准入 风险 赔偿 责任","lexical_queries":["供应商准入 风险 赔偿"]}'
+
+    class Choice:
+        message = Message()
+
+    class Response:
+        choices = [Choice()]
+
+    def fake_request_chat_completion(*args, **kwargs):
+        captured["timeout"] = kwargs["timeout"]
+        return Response()
+
+    monkeypatch.setattr("app.services.retrieval.query_optimizer.has_openai_compatible_credentials", lambda settings: True)
+    monkeypatch.setattr("app.services.retrieval.query_optimizer.create_openai_compatible_client", lambda settings: object())
+    monkeypatch.setattr("app.services.retrieval.query_optimizer.request_chat_completion", fake_request_chat_completion)
+    optimizer = QueryOptimizer(
+        Settings(
+            query_rewrite_provider="openai_compatible",
+            query_rewrite_timeout_seconds=0.25,
+            llm_api_key="test-key",
+            llm_base_url="https://example.invalid",
+            llm_chat_model="test-model",
+        )
+    )
+
+    plan = optimizer.build("请帮我梳理供应商准入风险以及赔偿责任相关的制度要求")
+
+    assert captured["timeout"] == 0.25
+    assert plan.llm_rewrite_attempted is True
+    assert plan.llm_rewrite_latency_ms is not None
+    assert "llm_rewrite" in plan.applied_strategies
+
+
 def test_query_optimizer_enterprise_profile_does_not_apply_legal_benchmark_expansion() -> None:
     optimizer = QueryOptimizer(Settings(query_rewrite_provider="deterministic"))
 

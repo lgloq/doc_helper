@@ -7,6 +7,7 @@ from time import perf_counter
 from typing import Callable, Iterable
 from uuid import UUID
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -166,6 +167,7 @@ class RetrievalService:
         self.retrieval_repository = RetrievalRepository(session)
         self.embedding_provider = EmbeddingProviderFactory.create()
         self._settings = get_settings()
+        self._last_structural_timeout = False
         self._configure_retrieval_components()
 
     @property
@@ -189,20 +191,22 @@ class RetrievalService:
         target_document_title: str | None = None,
     ) -> SearchResponse:
         search_started = perf_counter()
+        permission_started = perf_counter()
         accessible_document_ids = self.permission_builder.resolve_accessible_document_ids(self.session, actor, require_manage=False)
         if scoped_document_ids is not None:
             scoped_set = {item for item in scoped_document_ids}
             accessible_document_ids = [item for item in accessible_document_ids if item in scoped_set]
+        permission_filter_latency_ms = int((perf_counter() - permission_started) * 1000)
         query_plan = self.query_optimizer.build(payload.query, target_document_title=target_document_title)
         probe_applied = False
         probe_latency_ms = 0
+        probe_skip_reason = self._query_plan_probe_skip_reason(
+            query_plan,
+            accessible_document_ids=accessible_document_ids,
+            target_document_title=target_document_title,
+        )
         probe_started = perf_counter()
-        if (
-            self.settings.retrieval_query_plan_probe_enabled
-            and bool(getattr(self.settings, "retrieval_lexical_enabled", True))
-            and len(query_plan.candidates) > 1
-            and accessible_document_ids
-        ):
+        if probe_skip_reason is None:
             probe_applied = self._select_best_query_plan(
                 query_plan,
                 accessible_document_ids=accessible_document_ids,
@@ -231,11 +235,15 @@ class RetrievalService:
                     query_rewrite_provider=query_plan.rewrite_provider,
                     query_rewrite_model=query_plan.rewrite_model,
                     query_rewrite_latency_ms=query_plan.rewrite_latency_ms,
+                    llm_rewrite_attempted=query_plan.llm_rewrite_attempted,
+                    llm_rewrite_skipped_reason=query_plan.llm_rewrite_skipped_reason,
+                    llm_rewrite_latency_ms=query_plan.llm_rewrite_latency_ms,
                     query_decomposition_applied=self._query_decomposition_applies(query_plan),
                     subquery_count=len(query_plan.subqueries),
                     subquery_candidate_counts=[],
                     subquery_timeout_count=0,
                     subquery_timeout_fallback_candidate_count=0,
+                    permission_filter_latency_ms=permission_filter_latency_ms,
                     lexical_retrieval_latency_ms=0,
                     indexed_sparse_candidate_count=0,
                     indexed_sparse_retrieval_latency_ms=0,
@@ -268,6 +276,7 @@ class RetrievalService:
                     query_plan_selection_reason=query_plan.selected_candidate_reason,
                     query_plan_probe_applied=probe_applied,
                     query_plan_probe_latency_ms=probe_latency_ms,
+                    query_plan_probe_skipped_reason=probe_skip_reason,
                     permission_probe_early_stop_applied=True,
                     permission_probe_target_hint=permission_probe_early_stop.target_hint,
                     permission_probe_accessible_target_count=permission_probe_early_stop.accessible_target_count,
@@ -295,19 +304,24 @@ class RetrievalService:
                     query_rewrite_provider=query_plan.rewrite_provider,
                     query_rewrite_model=query_plan.rewrite_model,
                     query_rewrite_latency_ms=query_plan.rewrite_latency_ms,
+                    llm_rewrite_attempted=query_plan.llm_rewrite_attempted,
+                    llm_rewrite_skipped_reason=query_plan.llm_rewrite_skipped_reason,
+                    llm_rewrite_latency_ms=query_plan.llm_rewrite_latency_ms,
                     query_decomposition_applied=self._query_decomposition_applies(query_plan),
                     subquery_count=len(query_plan.subqueries),
                     subquery_candidate_counts=[],
                     subquery_timeout_count=0,
+                    subquery_timeout_fallback_candidate_count=0,
+                    permission_filter_latency_ms=permission_filter_latency_ms,
                     search_total_latency_ms=int((perf_counter() - search_started) * 1000),
                     query_plan_candidate_count=query_plan.candidate_count,
                     query_plan_selected=query_plan.selected_candidate.label,
                     query_plan_selection_reason=query_plan.selected_candidate_reason,
                     query_plan_probe_applied=probe_applied,
                     query_plan_probe_latency_ms=probe_latency_ms,
+                    query_plan_probe_skipped_reason=probe_skip_reason,
                 ),
             )
-
         candidate_pool = self._candidate_pool_size(payload.top_k)
         lexical_started = perf_counter()
         subquery_candidate_counts: list[dict[str, object]] = []
@@ -351,7 +365,11 @@ class RetrievalService:
             indexed_sparse_hits = self._collect_indexed_sparse_hits(query_plan.lexical_queries, accessible_document_ids, candidate_pool)
         indexed_sparse_latency_ms = int((perf_counter() - indexed_sparse_started) * 1000)
         structural_started = perf_counter()
-        if self._subquery_source_retrieval_applies(query_plan):
+        structural_skip_reason = self._structural_retrieval_skip_reason(query_plan, target_document_title=target_document_title)
+        structural_timeout = False
+        if structural_skip_reason is not None:
+            structural_hits = []
+        elif self._subquery_source_retrieval_applies(query_plan):
             structural_result = self._collect_decomposed_source_hits(
                 query_plan.subqueries,
                 accessible_document_ids,
@@ -368,22 +386,30 @@ class RetrievalService:
             subquery_timeout_count += structural_result.timeout_count
         else:
             structural_hits = self._collect_structural_hits(query_plan.lexical_queries, accessible_document_ids, candidate_pool)
+            structural_timeout = self._last_structural_timeout
         structural_latency_ms = int((perf_counter() - structural_started) * 1000)
+        vector_enabled = bool(self.settings.retrieval_vector_enabled)
         skip_vector_retrieval = self._skip_vector_when_keyword_hits_exist(
             query_plan,
             [*lexical_hits, *indexed_sparse_hits, *structural_hits],
         )
+        if not vector_enabled:
+            vector_skip_reason = "disabled"
+        elif skip_vector_retrieval:
+            vector_skip_reason = "keyword_hits_sufficient"
+        else:
+            vector_skip_reason = None
         vector_embedding_started = perf_counter()
         query_embedding = (
             self.embedding_provider.embed_texts([query_plan.retrieval_query])[0]
-            if self.settings.retrieval_vector_enabled and not skip_vector_retrieval
+            if vector_enabled and not skip_vector_retrieval
             else []
         )
         vector_embedding_latency_ms = int((perf_counter() - vector_embedding_started) * 1000)
         vector_retrieval_started = perf_counter()
         vector_hits = (
             self.retrieval_repository.search_vector(query_embedding, accessible_document_ids, candidate_pool)
-            if self.settings.retrieval_vector_enabled and query_embedding and not skip_vector_retrieval
+            if vector_enabled and query_embedding and not skip_vector_retrieval
             else []
         )
         vector_retrieval_latency_ms = int((perf_counter() - vector_retrieval_started) * 1000)
@@ -409,7 +435,17 @@ class RetrievalService:
             )
             fusion_latency_ms += int((perf_counter() - fusion_started) * 1000)
         sweep_started = perf_counter()
-        document_sweep_hits = self._collect_document_evidence_sweep(query_plan.retrieval_query, fused_candidates.values())
+        fused_candidates_for_sweep = list(fused_candidates.values())
+        document_sweep_skip_reason = self._document_evidence_sweep_skip_reason(
+            query_plan,
+            fused_candidates_for_sweep,
+            search_started=search_started,
+        )
+        document_sweep_hits = (
+            []
+            if document_sweep_skip_reason is not None
+            else self._collect_document_evidence_sweep(query_plan.retrieval_query, fused_candidates_for_sweep)
+        )
         document_evidence_sweep_latency_ms = int((perf_counter() - sweep_started) * 1000)
         if document_sweep_hits:
             fusion_started = perf_counter()
@@ -565,22 +601,33 @@ class RetrievalService:
                 query_rewrite_provider=query_plan.rewrite_provider,
                 query_rewrite_model=query_plan.rewrite_model,
                 query_rewrite_latency_ms=query_plan.rewrite_latency_ms,
+                llm_rewrite_attempted=query_plan.llm_rewrite_attempted,
+                llm_rewrite_skipped_reason=query_plan.llm_rewrite_skipped_reason,
+                llm_rewrite_latency_ms=query_plan.llm_rewrite_latency_ms,
                 query_decomposition_applied=self._query_decomposition_applies(query_plan),
                 subquery_count=len(query_plan.subqueries),
                 subquery_candidate_counts=subquery_candidate_counts,
                 subquery_timeout_count=subquery_timeout_count,
                 subquery_timeout_fallback_candidate_count=subquery_timeout_fallback_candidate_count,
+                permission_filter_latency_ms=permission_filter_latency_ms,
                 lexical_retrieval_latency_ms=lexical_latency_ms,
                 indexed_sparse_candidate_count=len(indexed_sparse_hits),
                 indexed_sparse_retrieval_latency_ms=indexed_sparse_latency_ms,
                 structural_retrieval_latency_ms=structural_latency_ms,
+                structural_retrieval_skipped=structural_skip_reason is not None,
+                structural_retrieval_skip_reason=structural_skip_reason,
+                structural_retrieval_timeout=structural_timeout,
                 vector_embedding_latency_ms=vector_embedding_latency_ms,
                 vector_retrieval_latency_ms=vector_retrieval_latency_ms,
-                vector_retrieval_skipped=skip_vector_retrieval,
+                vector_retrieval_skipped=vector_skip_reason is not None,
+                vector_retrieval_skip_reason=vector_skip_reason,
+                vector_retrieval_timeout=False,
                 expansion_candidate_count=len(expansion_hits),
                 in_document_expansion_latency_ms=in_document_expansion_latency_ms,
                 document_evidence_sweep_candidate_count=len(document_sweep_hits),
                 document_evidence_sweep_latency_ms=document_evidence_sweep_latency_ms,
+                document_evidence_sweep_skipped=document_sweep_skip_reason is not None,
+                document_evidence_sweep_skip_reason=document_sweep_skip_reason,
                 subquery_document_evidence_candidate_count=len(subquery_document_hits),
                 subquery_document_evidence_latency_ms=subquery_document_evidence_latency_ms,
                 subquery_neighbor_context_candidate_count=len(subquery_neighbor_hits),
@@ -603,8 +650,9 @@ class RetrievalService:
                 query_plan_selection_reason=query_plan.selected_candidate_reason,
                 query_plan_probe_applied=probe_applied,
                 query_plan_probe_latency_ms=probe_latency_ms,
-                ),
-            )
+                query_plan_probe_skipped_reason=probe_skip_reason,
+            ),
+        )
 
     def _skip_vector_when_keyword_hits_exist(
         self,
@@ -619,6 +667,134 @@ class RetrievalService:
         unique_hit_count = len({hit.chunk_id for hit in keyword_hits})
         return unique_hit_count >= min_hits
 
+    def _query_plan_probe_skip_reason(
+        self,
+        query_plan: QueryOptimizationPlan,
+        *,
+        accessible_document_ids: list[UUID],
+        target_document_title: str | None,
+    ) -> str | None:
+        if not bool(getattr(self.settings, "retrieval_query_plan_probe_enabled", True)):
+            return "disabled"
+        if not bool(getattr(self.settings, "retrieval_lexical_enabled", True)):
+            return "lexical_disabled"
+        if not accessible_document_ids:
+            return "no_accessible_documents"
+        if query_plan.candidate_count <= 1:
+            return "single_candidate"
+        max_candidates = max(0, int(getattr(self.settings, "retrieval_query_plan_probe_max_candidates", 0) or 0))
+        if max_candidates > 0 and query_plan.candidate_count > max_candidates:
+            return "candidate_limit"
+        if (
+            bool(getattr(self.settings, "retrieval_query_plan_probe_simple_skip_enabled", True))
+            and not target_document_title
+            and self._is_simple_retrieval_query(query_plan)
+        ):
+            return "simple_query"
+        return None
+
+    def _structural_retrieval_skip_reason(
+        self,
+        query_plan: QueryOptimizationPlan,
+        *,
+        target_document_title: str | None,
+    ) -> str | None:
+        if not bool(getattr(self.settings, "retrieval_structural_enabled", True)):
+            return "disabled"
+        if not bool(getattr(self.settings, "retrieval_structural_simple_query_skip_enabled", True)):
+            return None
+        if target_document_title or self._has_structural_anchor(query_plan):
+            return None
+        if self._is_simple_retrieval_query(query_plan):
+            return "simple_query_without_structural_anchor"
+        return None
+
+    def _document_evidence_sweep_skip_reason(
+        self,
+        query_plan: QueryOptimizationPlan,
+        candidates: Iterable[RerankCandidate],
+        *,
+        search_started: float,
+    ) -> str | None:
+        if not bool(getattr(self.settings, "retrieval_document_evidence_sweep_enabled", False)):
+            return "disabled"
+        candidate_list = list(candidates)
+        if not candidate_list:
+            return "no_seed_candidates"
+        if self._is_simple_retrieval_query(query_plan):
+            return "simple_query"
+        min_remaining = max(
+            0,
+            int(getattr(self.settings, "retrieval_document_evidence_sweep_min_remaining_budget_ms", 0) or 0),
+        )
+        if min_remaining > 0 and self._remaining_latency_budget_ms(search_started, query_plan) < min_remaining:
+            return "latency_budget_exhausted"
+        return None
+
+    def _remaining_latency_budget_ms(self, search_started: float, query_plan: QueryOptimizationPlan) -> int:
+        budget_ms = self._latency_budget_ms(query_plan)
+        if budget_ms <= 0:
+            return 2_147_483_647
+        elapsed_ms = int((perf_counter() - search_started) * 1000)
+        return max(0, budget_ms - elapsed_ms)
+
+    def _latency_budget_ms(self, query_plan: QueryOptimizationPlan) -> int:
+        setting_name = "retrieval_latency_budget_simple_ms" if self._is_simple_retrieval_query(query_plan) else "retrieval_latency_budget_complex_ms"
+        return max(0, int(getattr(self.settings, setting_name, 0) or 0))
+
+    def _is_simple_retrieval_query(self, query_plan: QueryOptimizationPlan) -> bool:
+        if query_plan.query_decomposition_applied:
+            return False
+        if query_plan.subqueries:
+            return False
+        if self._has_structural_anchor(query_plan):
+            return False
+        if "title_anchor" in query_plan.applied_strategies:
+            return False
+        text = self._query_plan_text(query_plan)
+        original_query = query_plan.original_query
+        original_compact = self._compact_match_text(original_query)
+        if len(original_compact) > 96:
+            return False
+        if any(marker in text for marker in ('“', '”', '"', '比较', '分别', '各自', '同时核对', '两个事项')):
+            return False
+        if re.search(r"(?:和|及|与|以及|、).{0,18}(?:是什么|哪些|要求|结论|清单|材料|流程|条件)", original_query):
+            return False
+        return True
+
+    def _has_structural_anchor(self, query_plan: QueryOptimizationPlan) -> bool:
+        text = self._query_plan_text(query_plan)
+        if re.search(r"第[一二三四五六七八九十百千万零〇两0-9]+[章节条款项]", text):
+            return True
+        structural_markers = ("条款全称", "章节", "小节", "章标题", "节标题", "条款标题", "款项")
+        return any(marker in text for marker in structural_markers)
+
+    @staticmethod
+    def _query_plan_text(query_plan: QueryOptimizationPlan) -> str:
+        return " ".join(
+            item
+            for item in [query_plan.original_query, query_plan.retrieval_query, *query_plan.lexical_queries]
+            if item
+        )
+
+    def _set_local_statement_timeout(self, timeout_ms: int) -> bool:
+        if timeout_ms <= 0 or not self._is_postgresql_session():
+            return False
+        self.session.execute(text(f"SET LOCAL statement_timeout = {int(timeout_ms)}"))
+        return True
+
+    def _clear_local_statement_timeout(self) -> None:
+        if not self._is_postgresql_session():
+            return
+        try:
+            self.session.execute(text("SET LOCAL statement_timeout = 0"))
+        except Exception:
+            self.session.rollback()
+
+    def _is_postgresql_session(self) -> bool:
+        bind = getattr(self.session, "bind", None) or self.session.get_bind()
+        dialect = getattr(bind, "dialect", None)
+        return getattr(dialect, "name", "") == "postgresql"
 
     def _permission_probe_early_stop(
         self,
@@ -721,7 +897,13 @@ class RetrievalService:
         accessible_document_ids: list[UUID],
         target_document_title: str | None,
     ) -> QueryPlanProbeResult:
-        hits = self._collect_lexical_hits(candidate.lexical_queries[:3], accessible_document_ids, PLAN_PROBE_LIMIT)
+        timeout_ms = max(0, int(getattr(self.settings, "retrieval_query_plan_probe_timeout_ms", 0) or 0))
+        timeout_applied = self._set_local_statement_timeout(timeout_ms)
+        try:
+            hits = self._collect_lexical_hits(candidate.lexical_queries[:3], accessible_document_ids, PLAN_PROBE_LIMIT)
+        finally:
+            if timeout_applied:
+                self._clear_local_statement_timeout()
         top_scores = [hit.lexical_score or 0.0 for hit in hits[:3]]
         top_documents = [hit.document_title for hit in hits[:3]]
         concentration = 0.0
@@ -1210,18 +1392,28 @@ class RetrievalService:
         accessible_document_ids: list[UUID],
         candidate_pool: int,
     ) -> list[RetrievalCandidate]:
+        self._last_structural_timeout = False
         if not self.settings.retrieval_structural_enabled:
             return []
         merged: dict[UUID, RetrievalCandidate] = {}
         structural_limit = max(candidate_pool, min(candidate_pool * 2, self.settings.retrieval_candidate_max))
+        timeout_ms = max(0, int(getattr(self.settings, "retrieval_structural_timeout_ms", 0) or 0))
         for query in queries:
+            timeout_applied = False
+            timeout_error = False
             try:
+                timeout_applied = self._set_local_statement_timeout(timeout_ms)
                 candidates = self.retrieval_repository.search_structural(query, accessible_document_ids, structural_limit)
             except Exception as exc:
-                if not self._is_timeout_error(exc):
+                timeout_error = self._is_timeout_error(exc)
+                if not timeout_error:
                     raise
                 self.session.rollback()
+                self._last_structural_timeout = True
                 continue
+            finally:
+                if timeout_applied and not timeout_error:
+                    self._clear_local_statement_timeout()
             for candidate in candidates:
                 existing = merged.get(candidate.chunk_id)
                 if existing is None or (candidate.lexical_score or 0.0) > (existing.lexical_score or 0.0):
@@ -1229,7 +1421,6 @@ class RetrievalService:
         hits = list(merged.values())
         hits.sort(key=lambda item: ((item.lexical_score or 0.0), -item.chunk_index), reverse=True)
         return hits[:candidate_pool]
-
     def _collect_indexed_sparse_hits(
         self,
         queries: list[str],

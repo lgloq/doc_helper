@@ -1240,6 +1240,7 @@ class CopilotOrchestrator:
                     "previous_intent": conversation_memory.previous_intent,
                     "older_message_count": conversation_memory.older_message_count,
                     "agent_run_trace_available": agent_run_trace is not None,
+                    "router_latency_ms": router_result.latency_ms,
                 },
             ),
             AgentStep(
@@ -1262,6 +1263,7 @@ class CopilotOrchestrator:
                 tool_name=tool_name,
                 metadata={
                     **tool_metadata.tool_output_summary,
+                    "retrieval_latency_ms": retrieval_response.debug.search_total_latency_ms,
                     "observations": [item.model_dump(mode="json") for item in agent_run_trace.observations] if agent_run_trace else [],
                 },
             ),
@@ -1289,9 +1291,21 @@ class CopilotOrchestrator:
                     "answer_basis": answer_result.answer_basis,
                     "artifact_type": getattr(structured_result, "artifact_type", None),
                     "refusal_reason": getattr(structured_result, "refusal_reason", None),
+                    "answer_generation_latency_ms": self._answer_generation_latency_ms(router_result, answer_result),
+                    "answer_total_latency_ms": answer_result.latency_ms,
                 },
             ),
         ]
+
+    @staticmethod
+    def _answer_generation_latency_ms(
+        router_result: RouterDecisionResult,
+        answer_result: AnswerGenerationResult,
+    ) -> int | None:
+        if answer_result.latency_ms is None:
+            return None
+        router_latency_ms = router_result.latency_ms or 0
+        return max(0, int(answer_result.latency_ms) - int(router_latency_ms))
 
     @staticmethod
     def _resolve_target_document(
@@ -1931,5 +1945,3 @@ def _empty_search_response(query: str) -> SearchResponse:
             fusion_strategy="min-max weighted sum",
         ),
     )
-
-

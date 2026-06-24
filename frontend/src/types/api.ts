@@ -183,6 +183,7 @@ export interface SearchDebugInfo {
   accessible_document_count: number;
   lexical_candidate_count: number;
   vector_candidate_count: number;
+  structural_candidate_count?: number;
   vector_retrieval_skipped?: boolean;
   fusion_strategy: string;
   pre_rerank_count?: number;
@@ -195,10 +196,49 @@ export interface SearchDebugInfo {
   query_rewrite_provider?: string | null;
   query_rewrite_model?: string | null;
   query_rewrite_latency_ms?: number | null;
+  llm_rewrite_attempted?: boolean;
+  llm_rewrite_skipped_reason?: string | null;
+  llm_rewrite_latency_ms?: number | null;
+  query_decomposition_applied?: boolean;
+  subquery_count?: number;
+  subquery_candidate_counts?: Record<string, unknown>[];
+  subquery_timeout_count?: number;
+  subquery_timeout_fallback_candidate_count?: number;
+  permission_filter_latency_ms?: number | null;
+  lexical_retrieval_latency_ms?: number | null;
+  indexed_sparse_candidate_count?: number;
+  indexed_sparse_retrieval_latency_ms?: number | null;
+  structural_retrieval_latency_ms?: number | null;
+  structural_retrieval_skipped?: boolean;
+  structural_retrieval_skip_reason?: string | null;
+  structural_retrieval_timeout?: boolean;
+  vector_embedding_latency_ms?: number | null;
+  vector_retrieval_latency_ms?: number | null;
+  vector_retrieval_skip_reason?: string | null;
+  vector_retrieval_timeout?: boolean;
+  expansion_candidate_count?: number;
+  in_document_expansion_latency_ms?: number | null;
+  document_evidence_sweep_candidate_count?: number;
+  document_evidence_sweep_latency_ms?: number | null;
+  document_evidence_sweep_skipped?: boolean;
+  document_evidence_sweep_skip_reason?: string | null;
+  subquery_document_evidence_candidate_count?: number;
+  subquery_document_evidence_latency_ms?: number | null;
+  subquery_neighbor_context_candidate_count?: number;
+  subquery_neighbor_context_latency_ms?: number | null;
+  document_first_evidence_candidate_count?: number;
+  document_first_evidence_latency_ms?: number | null;
+  document_neighbor_context_candidate_count?: number;
+  document_neighbor_context_latency_ms?: number | null;
+  fusion_latency_ms?: number | null;
+  rerank_latency_ms?: number | null;
+  search_total_latency_ms?: number | null;
   query_plan_candidate_count?: number;
   query_plan_selected?: string | null;
   query_plan_selection_reason?: string | null;
   query_plan_probe_applied?: boolean;
+  query_plan_probe_latency_ms?: number | null;
+  query_plan_probe_skipped_reason?: string | null;
 }
 
 export interface AgentStepRead {

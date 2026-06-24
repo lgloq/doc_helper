@@ -109,6 +109,9 @@ class QueryOptimizationPlan:
     selected_candidate_key: str | None = None
     selected_candidate_reason: str | None = None
     subqueries: list[QuerySubquery] = field(default_factory=list)
+    llm_rewrite_attempted: bool = False
+    llm_rewrite_skipped_reason: str | None = None
+    llm_rewrite_latency_ms: int | None = None
 
     @property
     def selected_candidate(self) -> QueryPlanCandidate:
@@ -172,8 +175,14 @@ class QueryRewriteSuggestion:
 class QueryOptimizer:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
+        self._last_llm_rewrite_attempted = False
+        self._last_llm_rewrite_skipped_reason: str | None = None
+        self._last_llm_rewrite_latency_ms: int | None = None
 
     def build(self, query: str, *, target_document_title: str | None = None) -> QueryOptimizationPlan:
+        self._last_llm_rewrite_attempted = False
+        self._last_llm_rewrite_skipped_reason = None
+        self._last_llm_rewrite_latency_ms = None
         original_query = query.strip()
         normalized_query = _normalize_query(original_query)
         focused_query = _focus_query(normalized_query)
@@ -295,6 +304,9 @@ class QueryOptimizer:
             candidates=candidates,
             selected_candidate_key=candidates[-1].key,
             subqueries=_build_deterministic_subqueries(original_query),
+            llm_rewrite_attempted=self._last_llm_rewrite_attempted,
+            llm_rewrite_skipped_reason=self._last_llm_rewrite_skipped_reason,
+            llm_rewrite_latency_ms=self._last_llm_rewrite_latency_ms,
         )
 
     def _append_candidate(
@@ -357,15 +369,20 @@ class QueryOptimizer:
     ) -> QueryRewriteSuggestion | None:
         provider = (self.settings.query_rewrite_provider or "auto").strip().lower()
         if provider == "deterministic":
+            self._last_llm_rewrite_skipped_reason = "provider_deterministic"
             return None
         if not self._should_use_llm(original_query, target_document_title):
+            self._last_llm_rewrite_skipped_reason = "simple_or_precise_query"
             return None
         if provider not in {"auto", "openai_compatible", "openai"}:
+            self._last_llm_rewrite_skipped_reason = "unsupported_provider"
             return None
         if not has_openai_compatible_credentials(self.settings):
+            self._last_llm_rewrite_skipped_reason = "missing_credentials"
             return None
 
         client = create_openai_compatible_client(self.settings)
+        self._last_llm_rewrite_attempted = True
         started = time.perf_counter()
         try:
             response = request_chat_completion(
@@ -381,12 +398,15 @@ class QueryOptimizer:
                 ),
                 temperature=0.0,
                 response_format={"type": "json_object"},
-                timeout=8.0,
+                timeout=max(0.1, float(getattr(self.settings, "query_rewrite_timeout_seconds", 2.0) or 2.0)),
             )
         except Exception:
+            self._last_llm_rewrite_latency_ms = int((time.perf_counter() - started) * 1000)
+            self._last_llm_rewrite_skipped_reason = "upstream_failed"
             return None
 
         latency_ms = int((time.perf_counter() - started) * 1000)
+        self._last_llm_rewrite_latency_ms = latency_ms
         content = response.choices[0].message.content or "{}"
         payload = _parse_json_payload(content)
         candidate_retrieval_query = _normalize_query(str(payload.get("retrieval_query") or retrieval_query))
@@ -397,6 +417,7 @@ class QueryOptimizer:
         ]
         candidate_lexical_queries = _unique_nonempty_queries(candidate_lexical_queries)[: self.settings.query_rewrite_max_variants]
         if not candidate_retrieval_query and not candidate_lexical_queries:
+            self._last_llm_rewrite_skipped_reason = "empty_suggestion"
             return None
         return QueryRewriteSuggestion(
             retrieval_query=candidate_retrieval_query or retrieval_query,
@@ -413,9 +434,11 @@ class QueryOptimizer:
         if _looks_like_precise_lookup_query(normalized):
             return False
         if target_document_title:
-            if len(normalized) >= 14:
+            if _looks_like_simple_target_document_lookup(normalized):
+                return False
+            if len(normalized) >= 48:
                 return True
-            return has_filler and len(normalized) >= 10
+            return has_filler and len(normalized) >= 24
         if len(normalized) >= 24:
             return True
         if len(normalized) >= 18 and has_filler:
@@ -437,16 +460,46 @@ def _looks_like_precise_lookup_query(normalized_query: str) -> bool:
         "审批人",
         "脱敏要求",
         "有效期",
+        "目标",
+        "总体目标",
+        "主要目标",
+        "适用情形",
+        "适用范围",
+        "基本原则",
         "复核周期",
         "退出要求",
         "验收材料",
         "验收人",
         "保留期限",
     )
-    question_markers = ("多少", "多久", "谁", "哪些", "要求", "是什么", "怎么", "如何")
+    question_markers = ("多少", "多久", "谁", "哪些", "要求", "是什么", "怎么", "如何", "目标", "情形", "范围")
     return any(marker in normalized_query for marker in lookup_markers) and any(
         marker in normalized_query for marker in question_markers
     )
+
+
+def _looks_like_simple_target_document_lookup(normalized_query: str) -> bool:
+    if len(normalized_query) > 80:
+        return False
+    simple_markers = (
+        "哪些",
+        "什么",
+        "多久",
+        "多少",
+        "谁",
+        "如何",
+        "怎么",
+        "是否",
+        "能否",
+        "要求",
+        "信息",
+        "材料",
+        "审批",
+        "时限",
+        "适用",
+        "目标",
+    )
+    return any(marker in normalized_query for marker in simple_markers)
 
 
 def _build_deterministic_subqueries(query: str) -> list[QuerySubquery]:

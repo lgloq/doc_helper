@@ -1250,6 +1250,114 @@ def test_search_uses_structural_clause_candidates(db_session: Session) -> None:
     assert response.matched_chunks[0].clause_full_name == "客户数据导出管理办法第九条"
 
 
+def test_search_simple_query_skips_structural_retrieval_and_plan_probe(
+    db_session: Session,
+    monkeypatch,
+) -> None:
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add(admin_role)
+    db_session.flush()
+    admin = _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+    document_id = uuid4()
+    candidate = RetrievalCandidate(
+        chunk_id=uuid4(),
+        document_id=document_id,
+        document_title="工业领域数据安全能力提升实施方案",
+        document_version_id=uuid4(),
+        version_number=1,
+        chunk_index=0,
+        content="工业领域数据安全能力提升实施方案的目标是提升数据安全保护能力。",
+        token_count=24,
+        section_title="总体目标",
+        page_number_start=None,
+        page_number_end=None,
+        paragraph_start=None,
+        paragraph_end=None,
+        char_start=None,
+        char_end=None,
+        citation_metadata={},
+        lexical_score=0.9,
+        vector_score=None,
+    )
+    service = RetrievalService(db_session)
+    service.settings = Settings(
+        query_rewrite_provider="deterministic",
+        retrieval_vector_enabled=False,
+        retrieval_structural_enabled=True,
+        retrieval_indexed_sparse_enabled=False,
+        retrieval_query_plan_probe_enabled=True,
+        retrieval_in_document_expansion_enabled=False,
+        retrieval_document_diversity_enabled=False,
+        retrieval_final_coverage_enabled=False,
+    )
+    monkeypatch.setattr(
+        service.permission_builder,
+        "resolve_accessible_document_ids",
+        lambda session, actor, require_manage=False: [document_id],
+    )
+    monkeypatch.setattr(service.retrieval_repository, "search_lexical", lambda query, document_ids, limit: [candidate])
+
+    def fail_structural(query: str, document_ids: list[UUID], limit: int) -> list[RetrievalCandidate]:
+        raise AssertionError("simple query without article/section anchor should skip structural retrieval")
+
+    monkeypatch.setattr(service.retrieval_repository, "search_structural", fail_structural)
+
+    response = service.search(
+        admin,
+        SearchRequest(query="工业领域数据安全能力提升实施方案的目标是什么？", top_k=1),
+    )
+
+    assert response.matched_chunks
+    assert response.debug.query_plan_probe_applied is False
+    assert response.debug.query_plan_probe_skipped_reason == "simple_query"
+    assert response.debug.structural_retrieval_skipped is True
+    assert response.debug.structural_retrieval_skip_reason == "simple_query_without_structural_anchor"
+    assert response.debug.structural_candidate_count == 0
+    assert response.debug.vector_retrieval_skip_reason == "disabled"
+
+
+def test_search_structural_timeout_falls_back_with_debug(
+    db_session: Session,
+    monkeypatch,
+) -> None:
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add(admin_role)
+    db_session.flush()
+    admin = _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+    document_id = uuid4()
+    service = RetrievalService(db_session)
+    service.settings = Settings(
+        query_rewrite_provider="deterministic",
+        retrieval_vector_enabled=False,
+        retrieval_structural_enabled=True,
+        retrieval_structural_timeout_ms=1,
+        retrieval_indexed_sparse_enabled=False,
+        retrieval_query_plan_probe_enabled=False,
+        retrieval_in_document_expansion_enabled=False,
+        retrieval_document_diversity_enabled=False,
+        retrieval_final_coverage_enabled=False,
+    )
+    monkeypatch.setattr(
+        service.permission_builder,
+        "resolve_accessible_document_ids",
+        lambda session, actor, require_manage=False: [document_id],
+    )
+    monkeypatch.setattr(service.retrieval_repository, "search_lexical", lambda query, document_ids, limit: [])
+
+    def timeout_structural(query: str, document_ids: list[UUID], limit: int) -> list[RetrievalCandidate]:
+        raise RuntimeError("canceling statement due to statement timeout")
+
+    monkeypatch.setattr(service.retrieval_repository, "search_structural", timeout_structural)
+
+    response = service.search(admin, SearchRequest(query="客户数据导出管理办法第九条审批要求", top_k=1))
+
+    assert response.matched_chunks == []
+    assert response.debug.structural_retrieval_skipped is False
+    assert response.debug.structural_retrieval_timeout is True
+    assert response.debug.structural_retrieval_latency_ms is not None
+    assert response.debug.query_plan_probe_skipped_reason == "disabled"
+
+
 def test_structural_article_anchors_keep_law_title_pairing(db_session: Session) -> None:
     admin_role = Role(name=RoleName.ADMIN, description="Admin")
     db_session.add(admin_role)

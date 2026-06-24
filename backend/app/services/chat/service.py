@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 import re
 from uuid import UUID
 
@@ -153,8 +154,10 @@ class ChatService:
         user_message_id = user_message.id
         chat_session_id = chat_session.id
 
+        prepare_started = perf_counter()
         try:
             prepared = self._prepare_answer(actor, payload.content, payload.top_k, existing_messages, session_id=chat_session.id)
+            request_latency_ms = int((perf_counter() - prepare_started) * 1000)
         except Exception as exc:
             if client_request_id:
                 self.session.rollback()
@@ -172,6 +175,7 @@ class ChatService:
 
         assistant_result = prepared.answer_result
         evidence_audit = build_evidence_audit(assistant_result.answer, prepared.selected_chunks)
+        latency_breakdown = self._build_latency_breakdown(prepared, request_latency_ms)
         assistant_metadata = {
             "answer_provider": assistant_result.provider_name,
             "answer_basis": assistant_result.answer_basis,
@@ -186,6 +190,7 @@ class ChatService:
             "agent_steps": [item.model_dump(mode="json") for item in prepared.agent_steps],
             "agent_run_trace": prepared.agent_run_trace.model_dump(mode="json") if prepared.agent_run_trace else None,
             "evidence_audit": evidence_audit,
+            "latency_breakdown": latency_breakdown,
             "raw_payload": assistant_result.raw_payload,
         }
         if client_request_id:
@@ -265,6 +270,22 @@ class ChatService:
             citations=assistant_citations,
             retrieval_debug=prepared.retrieval_response.debug,
         )
+
+    @staticmethod
+    def _build_latency_breakdown(prepared: PreparedChatAnswer, total_latency_ms: int) -> dict[str, int | None]:
+        router_latency_ms = prepared.router_result.latency_ms
+        retrieval_latency_ms = prepared.retrieval_response.debug.search_total_latency_ms
+        answer_total_latency_ms = prepared.answer_result.latency_ms
+        generation_latency_ms = None
+        if answer_total_latency_ms is not None:
+            generation_latency_ms = max(0, int(answer_total_latency_ms) - int(router_latency_ms or 0))
+        return {
+            "router_latency_ms": router_latency_ms,
+            "retrieval_latency_ms": retrieval_latency_ms,
+            "answer_generation_latency_ms": generation_latency_ms,
+            "answer_total_latency_ms": answer_total_latency_ms,
+            "total_latency_ms": total_latency_ms,
+        }
 
     def _restore_completed_client_request(
         self,
