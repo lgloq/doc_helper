@@ -312,6 +312,13 @@ class EvalService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Eval run not found.")
         return self._build_run_detail(run)
 
+    def get_reconciled_run_detail(self, run_id: UUID) -> EvalRunDetailRead | None:
+        self._reconcile_stale_runs()
+        run = self.eval_repository.get_run(run_id)
+        if run is None:
+            return None
+        return self._build_run_detail(run)
+
     def _build_run_detail(self, run: EvalRun) -> EvalRunDetailRead:
         results = self.eval_repository.list_results_for_run(run.id)
         return EvalRunDetailRead.model_validate(

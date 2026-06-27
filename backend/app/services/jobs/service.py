@@ -266,6 +266,7 @@ class OperationJobService:
 
     def get_job(self, actor: User, job_id: UUID) -> OperationJobRead:
         job = self._require_job(actor, job_id)
+        self._reconcile_terminal_resource_state(job)
         return self._serialize(job)
 
     async def execute_job(self, job_id: UUID) -> OperationJobRead:
@@ -444,7 +445,35 @@ class OperationJobService:
         for key, expected_value in expected_payload.items():
             if actual_payload.get(key) != expected_value:
                 raise self._client_request_conflict()
+        self._reconcile_terminal_resource_state(job)
         return self._serialize(job)
+
+    def _reconcile_terminal_resource_state(self, job: OperationJob) -> OperationJob:
+        if job.status not in {JOB_STATUS_QUEUED, JOB_STATUS_RUNNING}:
+            return job
+        if job.job_type == JOB_TYPE_EVAL_RUN:
+            return self._reconcile_eval_job_state(job)
+        return job
+
+    def _reconcile_eval_job_state(self, job: OperationJob) -> OperationJob:
+        if not job.resource_id:
+            return job
+        try:
+            run_id = UUID(str(job.resource_id))
+        except (TypeError, ValueError):
+            return job
+
+        run_detail = EvalService(self.session).get_reconciled_run_detail(run_id)
+        if run_detail is None or run_detail.status not in {"completed", "failed"}:
+            return job
+
+        job.status = self._map_eval_status(run_detail.status)
+        job.result_payload = run_detail.model_dump(mode="json")
+        job.error_text = run_detail.error_text
+        job.finished_at = run_detail.finished_at or datetime.now(UTC)
+        self.session.commit()
+        self.session.refresh(job)
+        return job
 
     @staticmethod
     def _client_request_conflict() -> HTTPException:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -7,6 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
+from app.models.eval import EvalRun
 from app.models.enums import RoleName
 from app.models.operation_job import OperationJob
 from app.models.role import Role
@@ -298,6 +300,63 @@ def test_get_operation_job_enforces_owner_scope(client: TestClient, db_session: 
     assert owner_response.status_code == 200
     assert admin_response.status_code == 200
     assert other_response.status_code == 404
+
+
+def test_get_eval_operation_job_reconciles_terminal_eval_run(client: TestClient, db_session: Session) -> None:
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add(admin_role)
+    db_session.flush()
+    admin = _create_user(db_session, admin_role, "admin@example.com", "admin-pass")
+    finished_at = datetime.now(UTC)
+    run = EvalRun(
+        dataset_name="async_eval_dataset",
+        status="failed",
+        total_cases=2,
+        finished_at=finished_at,
+        error_text="Eval run did not complete.",
+        summary_json={
+            "client_request_id": "eval-terminal-reconcile-1",
+            "client_request_status": "failed",
+            "completed_cases": 1,
+            "total_cases": 2,
+        },
+    )
+    db_session.add(run)
+    db_session.flush()
+    job = OperationJob(
+        job_type=JOB_TYPE_EVAL_RUN,
+        status="running",
+        user_id=admin.id,
+        client_request_id="eval-terminal-reconcile-1",
+        resource_type="eval_run",
+        resource_id=str(run.id),
+        request_payload={
+            "dataset_name": "async_eval_dataset",
+            "case_ids": [],
+            "top_k": 5,
+            "seed_demo_cases": False,
+            "client_request_id": "eval-terminal-reconcile-1",
+            "run_id": str(run.id),
+        },
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    response = client.get(f"/api/v1/jobs/{job.id}", headers={"Authorization": f"Bearer {admin_token}"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "failed"
+    assert payload["error_text"] == "Eval run did not complete."
+    assert payload["finished_at"] is not None
+    assert payload["result_payload"]["id"] == str(run.id)
+    assert payload["result_payload"]["status"] == "failed"
+
+    db_session.refresh(job)
+    assert job.status == "failed"
+    assert job.finished_at is not None
+    assert job.result_payload["status"] == "failed"
 
 
 def test_operation_job_service_routes_job_types_to_dedicated_queues() -> None:
