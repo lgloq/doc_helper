@@ -15,7 +15,9 @@ from app.schemas.chat import (
     ChatSessionDetailRead,
     ChatSessionRead,
 )
+from app.schemas.operation_job import OperationJobRead
 from app.services.chat.service import ChatService
+from app.services.jobs.service import OperationJobService
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -50,7 +52,7 @@ def get_chat_session(
 
 
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_chat_session(
+def delete_session(
     session_id: UUID,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_db_session),
@@ -69,3 +71,14 @@ def create_chat_message(
 ) -> ChatMessageCreateResponse:
     service = ChatService(session)
     return service.create_message(current_user, session_id, payload)
+
+
+@router.post("/sessions/{session_id}/messages/async", response_model=OperationJobRead)
+async def create_chat_message_async(
+    session_id: UUID,
+    payload: ChatMessageCreate,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_db_session),
+) -> OperationJobRead:
+    service = OperationJobService(session)
+    return await service.enqueue_chat_message(current_user, session_id, payload)

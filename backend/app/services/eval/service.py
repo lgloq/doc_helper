@@ -28,6 +28,7 @@ from app.schemas.eval import (
     EvalResultRowRead,
     EvalTrendPointRead,
 )
+from app.services.diagnostics import PIPELINE_STAGE_LABELS, build_eval_pipeline_diagnosis
 from app.services.chat.service import ChatService, PreparedChatAnswer
 from app.services.eval.bootstrap import seed_demo_eval_cases
 from app.services.eval.demo_cases import resolve_demo_eval_annotation
@@ -125,6 +126,15 @@ class EvalService:
         self.session.commit()
         self.session.refresh(run)
         return self._build_run_detail(run)
+
+    def discard_unstarted_queued_run(self, run_id: UUID) -> None:
+        run = self.eval_repository.get_run(run_id)
+        if run is None:
+            return
+        if run.status != "queued" or run.started_at is not None or self.eval_repository.list_results_for_run(run.id):
+            return
+        self.session.delete(run)
+        self.session.commit()
 
     def execute_queued_run(self, run_id: UUID) -> EvalRunDetailRead:
         run = self.eval_repository.get_run(run_id)
@@ -406,6 +416,26 @@ class EvalService:
 
         prepared = self.chat_service.preview_answer(actor, case.question, top_k=top_k)
         metrics = self._compute_metrics(case, prepared)
+        pipeline_diagnosis = build_eval_pipeline_diagnosis(
+            session=self.session,
+            actor=actor,
+            expected_titles=list(metrics["case_annotations"]["expected_retrieval_titles"]),
+            expected_outcome=str(metrics["case_annotations"]["expected_outcome"]),
+            overall_pass=metrics["overall_pass"],
+            retrieval_breakdown=metrics["metric_breakdown"]["retrieval"],
+            citation_breakdown=metrics["metric_breakdown"]["citation"],
+            faithfulness_breakdown=metrics["metric_breakdown"]["faithfulness"],
+            permission_breakdown=metrics["metric_breakdown"]["permission_isolation"],
+            permission_checks=metrics["permission_checks"],
+            retrieval_debug=prepared.retrieval_response.debug,
+            matched_expected_titles=metrics["matched_expected_titles"],
+            missing_expected_titles=metrics["missing_expected_titles"],
+            matched_citation_titles=metrics["matched_citation_titles"],
+            missing_citation_titles=metrics["missing_citation_titles"],
+            unsupported_answer_facts=metrics["unsupported_answer_facts"],
+            unsupported_answer_claims=metrics["unsupported_answer_claims"],
+            insufficient_evidence=prepared.answer_result.insufficient_evidence,
+        )
         trace_id = None
         try:
             trace = self.observability_service.record_trace(
@@ -429,6 +459,7 @@ class EvalService:
                     "router_decision": prepared.router_result.decision.model_dump(mode="json"),
                     "tool_execution": prepared.tool_metadata.model_dump(mode="json"),
                     "structured_result": prepared.structured_result.model_dump(mode="json"),
+                    "pipeline_diagnosis": pipeline_diagnosis,
                 },
                 model_name=prepared.answer_result.model_name,
                 latency_ms=prepared.answer_result.latency_ms,
@@ -468,6 +499,7 @@ class EvalService:
             "tool_execution": prepared.tool_metadata.model_dump(mode="json"),
             "structured_result": prepared.structured_result.model_dump(mode="json"),
             "trace_id": trace_id,
+            "pipeline_diagnosis": pipeline_diagnosis,
             "human_review": {
                 "recommended": metrics["human_review_recommended"],
                 "reason": metrics["human_review_reason"],
@@ -1424,11 +1456,15 @@ class EvalService:
         }
         counts: dict[str, int] = {}
         examples: dict[str, list[str]] = {}
+        payload_by_key: dict[str, dict] = {}
         for result in results:
             key = EvalService._failure_mode_key(result)
             if key is None:
                 continue
             counts[key] = counts.get(key, 0) + 1
+            diagnosis = EvalService._failure_diagnosis_payload(result)
+            if diagnosis is not None and key not in payload_by_key:
+                payload_by_key[key] = diagnosis
             case_name = str((result.details_json or {}).get("case_name") or result.case_id)
             examples.setdefault(key, [])
             if case_name not in examples[key] and len(examples[key]) < 3:
@@ -1436,8 +1472,22 @@ class EvalService:
         return [
             EvalFailureModeRead(
                 key=key,
-                label=labels.get(key, key),
+                label=(
+                    str(payload_by_key.get(key, {}).get("reason_label"))
+                    if payload_by_key.get(key, {}).get("reason_label")
+                    else labels.get(key, key)
+                ),
                 count=count,
+                stage=(
+                    str(payload_by_key.get(key, {}).get("stage"))
+                    if payload_by_key.get(key, {}).get("stage")
+                    else None
+                ),
+                stage_label=(
+                    str(payload_by_key.get(key, {}).get("stage_label"))
+                    if payload_by_key.get(key, {}).get("stage_label")
+                    else None
+                ),
                 example_case_names=examples.get(key, []),
             )
             for key, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
@@ -1447,6 +1497,9 @@ class EvalService:
     def _failure_mode_key(result: EvalResult) -> str | None:
         if result.overall_pass:
             return None
+        diagnosis = EvalService._failure_diagnosis_payload(result)
+        if diagnosis and isinstance(diagnosis.get("reason_code"), str) and diagnosis.get("reason_code"):
+            return str(diagnosis["reason_code"])
         details = result.details_json or {}
         metric_breakdown = details.get("metric_breakdown") if isinstance(details, dict) else {}
         metric_breakdown = metric_breakdown if isinstance(metric_breakdown, dict) else {}
@@ -1464,6 +1517,12 @@ class EvalService:
         if EvalService._metric_score(faithfulness, result.answer_faithfulness) < 0.7:
             return "answer_faithfulness_failure"
         return "overall_failure"
+
+    @staticmethod
+    def _failure_diagnosis_payload(result: EvalResult) -> dict | None:
+        details = result.details_json or {}
+        payload = details.get("pipeline_diagnosis") if isinstance(details, dict) else None
+        return payload if isinstance(payload, dict) else None
 
     @staticmethod
     def _metric_score(payload: dict, fallback: float) -> float:

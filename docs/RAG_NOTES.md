@@ -1,6 +1,6 @@
 # 权限感知的 RAG 企业文档知识助手：技术链路说明
 
-本文档说明当前项目中 RAG 链路的实现方式，以及权限过滤、文档解析、切块、向量化、混合检索、citation、多步骤处理和拒答策略在链路中的位置。
+本文档说明当前项目中 RAG 链路的实现方式，以及权限过滤、文档解析、切块、向量化、混合检索、citation、多步骤处理、后台任务恢复、诊断和拒答策略在链路中的位置。
 
 ## 概述
 该 RAG 流程会先将文档整理为可检索、可引用、可追溯的片段，再基于当前用户有权限访问的证据生成回答。
@@ -35,11 +35,14 @@
    - 先根据当前用户的 `user / role / department / ACL` 算出可访问文档集合；旧版 `team_name` 仅作为兼容字段参与回退判断
    - lexical retrieval 和 vector retrieval 都只在可访问范围内执行
    - 两路结果先做 score fusion，再进入可配置 rerank provider，得到最终候选 chunk
+   - 简单问题会按保守规则跳过不必要的 query plan probe、LLM rewrite 或 evidence sweep
+   - debug / trace 会记录 query rewrite、lexical retrieval、vector retrieval、evidence sweep、rerank 等阶段耗时和跳过原因
 
 6. 引用式问答 / 结构化结果生成
    - 回答基于检索结果生成
    - 回答和 citation 分开返回
-   - 如果证据不足，系统会拒答，不继续拼凑答案
+   - 如果证据不足，系统会拒答，不输出无依据结论
+   - evidence audit 会抽取答案中的关键事实，标记支撑状态并关联最相关证据片段
    - 如果是待办、周报、FAQ 请求，则改走对应工作流链路
 
 ## 为什么权限过滤必须前置
@@ -87,7 +90,7 @@
 - 两路结合通常比单一路线更稳
 
 ## 为什么召回后还要 rerank
-混合召回解决的是“把相关 chunk 先找出来”，但不一定能保证最终排序最适合回答问题。
+混合召回解决的是“把相关 chunk 先找出来”，但不代表最终排序一定最适合回答问题。
 
 当前版本会在可访问候选集上增加一层 rerank provider。默认 heuristic 模式主要考虑：
 - query 和 chunk 的 token overlap
@@ -116,6 +119,17 @@ citation 会记录：
 - 后续 FAQ 沉淀
 - 调试与评测
 - 审计与可追踪性
+
+## 事实级证据审计
+citation 说明“答案引用了哪些来源”，事实级 evidence audit 进一步说明“答案中的关键事实分别由哪些证据支撑”。
+
+当前 evidence audit 会记录：
+- 关键事实文本
+- 支撑状态：完全支撑、部分支撑或待核实
+- 支撑分数和支撑引用
+- 支撑片段的文档标题、位置、rank 和 excerpt
+
+前端会在 Chat 和 trace detail 中展示事实覆盖率、各支撑状态数量和事实到引用的定位关系。展示层只呈现后端审计结果，不放宽事实支撑阈值。
 
 ## 多步骤处理与处理轨迹
 当前系统采用受控的多步骤处理流程来组织检索、版本对比和结构化结果生成。
@@ -148,6 +162,18 @@ citation 会记录：
 
 这套处理流程把中间步骤、执行结果和最终回答串成一条可追踪链路，便于前端展示、问题排查和回归验证。
 
+## 后台任务与恢复
+明显耗时较长或需要跨页面恢复的操作统一记录到 `operation_jobs`：
+
+- chat message submission
+- eval run
+- document diff summary generation
+- document ingestion
+
+每个 job 记录任务类型、状态、`client_request_id`、资源指向、请求快照、结果快照、失败原因和 ARQ job id。同一用户、同一任务类型、同一 `client_request_id` 会复用同一条 job，避免刷新、切页或并发重试造成重复提交。
+
+ARQ 队列按任务类型拆分为 chat、eval、ingest 和 diff，避免大型评测或入库任务长期挤占问答。前端通过 pending operation 记录和 `GET /api/v1/jobs/{job_id}` 恢复 queued / running / completed / failed 状态。
+
 ## 拒答与可靠性策略
 证据不足时，系统会通过多层可靠性约束控制回答范围：
 - 证据不足拒答：没有足够相关 chunk 时拒答
@@ -157,6 +183,16 @@ citation 会记录：
 
 目标是尽量减少“问 A 答 B”和“没有依据也给答案”的情况。
 
+## 权限诊断与审计
+权限过滤仍然前置在检索阶段。除此之外，当前链路会把权限相关失败原因显式记录下来：
+
+- `permission_refusal_reason_code`
+- `permission_refusal_reason`
+- `permission_probe_target_hint`
+- 可访问 / 不可访问目标数量
+
+当系统识别到疑似受限文档探测并触发早停时，会额外写入 `permission_denied_retrieval` 审计 trace。管理员也可以查看指定用户的可见文档范围，并在保存 ACL 前预估变更影响。
+
 ## Eval 与 Trace 的作用
 ### Eval
 内置评测关注以下指标：
@@ -164,6 +200,12 @@ citation 会记录：
 - citation accuracy
 - answer faithfulness
 - permission isolation correctness
+
+Benchmark 当前分为四层：
+- `smoke`：小规模冒烟回归
+- `full`：主发布门禁和完整质量回归
+- `hard`：跨文档、表格、时序、权限等难例回归
+- `latency`：性能预算和阶段耗时回归
 
 ### Trace
 每次问答链路会记录：
@@ -174,12 +216,17 @@ citation 会记录：
 - token
 - latency
 - error
+- 阶段耗时和 skip reason
+- pipeline diagnosis
+- permission refusal reason
+- evidence audit 摘要
 
 因此系统不仅输出结果，也支持回看以下信息：
 - 为什么答对
 - 为什么答错
 - 为什么拒答
 - 是否存在权限隔离问题
+- 失败发生在权限过滤、候选召回、候选选择、引用覆盖还是答案生成
 
 ## 总结
 这条 RAG 链路的关键点如下：
@@ -189,5 +236,7 @@ citation 会记录：
 3. PostgreSQL FTS + pgvector 的 hybrid retrieval，不依赖单一路径检索。
 4. 在安全候选集上增加可配置 rerank provider，提升最终进入回答阶段的排序稳定性。
 5. 权限过滤前置到检索链路中，避免无权限内容进入候选集和 prompt。
-6. 增加多步骤处理与轻量上下文复用，便于前端展示、链路追踪和回归验证。
-7. 回答结果带 citation，并配套 eval 和 trace，方便分析链路质量。
+6. 对简单问题加入 latency budget、跳过条件和阶段耗时记录，避免不必要重路径拖慢问答。
+7. 增加多步骤处理与轻量上下文复用，便于前端展示、链路追踪和回归验证。
+8. 长任务通过 `operation_jobs` 和拆分队列支持刷新、切页和并发重试后的恢复。
+9. 回答结果带 citation，并配套事实级 evidence audit、eval、trace 和 pipeline diagnosis，方便分析链路质量。

@@ -90,9 +90,50 @@ class ObservabilityService:
         self.langfuse_adapter.emit_trace({**payload, "trace_id": str(trace.id)})
         return trace
 
-    def list_traces(self, *, user_id: UUID | None = None, session_id: UUID | None = None, limit: int = 50) -> list[TraceLogRead]:
-        traces = self.trace_repository.list_traces(user_id=user_id, session_id=session_id, limit=limit)
+    def list_traces(
+        self,
+        *,
+        user_id: UUID | None = None,
+        session_id: UUID | None = None,
+        trace_type: str | None = None,
+        limit: int = 50,
+    ) -> list[TraceLogRead]:
+        traces = self.trace_repository.list_traces(
+            user_id=user_id,
+            session_id=session_id,
+            trace_type=trace_type,
+            limit=limit,
+        )
         return [TraceLogRead.model_validate(trace) for trace in traces]
+
+    def record_permission_denied_retrieval(
+        self,
+        *,
+        actor: User,
+        query_text: str,
+        retrieval_response: SearchResponse,
+        source: str,
+    ) -> TraceLog:
+        debug = retrieval_response.debug
+        return self.record_trace(
+            actor=actor,
+            chat_session=None,
+            user_message=None,
+            assistant_message=None,
+            query_text=query_text,
+            retrieval_response=retrieval_response,
+            selected_chunks=[],
+            trace_type="permission_denied_retrieval",
+            insufficient_evidence=True,
+            extra_metadata={
+                "source": source,
+                "permission_refusal_reason_code": debug.permission_refusal_reason_code,
+                "permission_refusal_reason": debug.permission_refusal_reason,
+                "permission_probe_target_hint": debug.permission_probe_target_hint,
+                "permission_probe_accessible_target_count": debug.permission_probe_accessible_target_count,
+                "permission_probe_inaccessible_target_count": debug.permission_probe_inaccessible_target_count,
+            },
+        )
 
     def get_trace(self, trace_id: UUID) -> TraceLogRead | None:
         trace = self.trace_repository.get_by_id(trace_id)

@@ -281,6 +281,11 @@ class RetrievalService:
                     permission_probe_target_hint=permission_probe_early_stop.target_hint,
                     permission_probe_accessible_target_count=permission_probe_early_stop.accessible_target_count,
                     permission_probe_inaccessible_target_count=permission_probe_early_stop.inaccessible_target_count,
+                    permission_refusal_reason_code="permission_probe_blocked_target",
+                    permission_refusal_reason=(
+                        "检测到当前用户在询问疑似受限文档，且目标文档不在该用户可访问范围内；"
+                        "系统已按权限过滤拒绝返回不可见内容。"
+                    ),
                 ),
             )
         if not accessible_document_ids:
@@ -320,6 +325,8 @@ class RetrievalService:
                     query_plan_probe_applied=probe_applied,
                     query_plan_probe_latency_ms=probe_latency_ms,
                     query_plan_probe_skipped_reason=probe_skip_reason,
+                    permission_refusal_reason_code="no_accessible_documents",
+                    permission_refusal_reason="当前用户没有任何可访问文档，检索不会返回企业知识库内容。",
                 ),
             )
         candidate_pool = self._candidate_pool_size(payload.top_k)
@@ -828,14 +835,19 @@ class RetrievalService:
             return None
         if not any(marker in normalized for marker in ("普通查看用户", "普通用户", "查看用户")):
             return None
-        if not any(marker in normalized for marker in ("能否", "是否可以", "能不能", "可否")):
+        modal_markers = ("能否", "是否可以", "能不能", "可否")
+        if not any(marker in normalized for marker in modal_markers):
             return None
         if not any(marker in normalized for marker in ("受限材料", "受限文件", "受限文档")):
             return None
 
-        match = PERMISSION_PROBE_TARGET_PATTERN.search(normalized)
-        if not match:
+        modal_positions = [(normalized.rfind(marker), marker) for marker in modal_markers]
+        modal_index, modal_marker = max(modal_positions, key=lambda item: item[0])
+        search_text = normalized[modal_index + len(modal_marker) :] if modal_index >= 0 else normalized
+        matches = list(PERMISSION_PROBE_TARGET_PATTERN.finditer(search_text))
+        if not matches:
             return None
+        match = matches[-1]
         target_hint = match.group("target")
         target_hint = re.sub(r"^(?:作为)?(?:普通查看用户|普通用户|查看用户)[，,。；;：:\s]*", "", target_hint)
         target_hint = target_hint.strip(" ，,。；;：:")

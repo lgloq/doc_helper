@@ -16,12 +16,21 @@ class TraceRepository:
         self.session.add(trace)
         return trace
 
-    def list_traces(self, *, user_id: UUID | None = None, session_id: UUID | None = None, limit: int = 50) -> list[TraceLog]:
+    def list_traces(
+        self,
+        *,
+        user_id: UUID | None = None,
+        session_id: UUID | None = None,
+        trace_type: str | None = None,
+        limit: int = 50,
+    ) -> list[TraceLog]:
         statement = select(TraceLog)
         if user_id is not None:
             statement = statement.where(TraceLog.user_id == user_id)
         if session_id is not None:
             statement = statement.where(TraceLog.session_id == session_id)
+        if trace_type is not None:
+            statement = statement.where(TraceLog.trace_type == trace_type)
         statement = statement.order_by(TraceLog.created_at.desc()).limit(limit)
         return list(self.session.scalars(statement).all())
 

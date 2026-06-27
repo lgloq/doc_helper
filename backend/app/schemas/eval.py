@@ -92,6 +92,8 @@ class EvalFailureModeRead(BaseModel):
     key: str
     label: str
     count: int
+    stage: str | None = None
+    stage_label: str | None = None
     example_case_names: list[str] = Field(default_factory=list)
 
 

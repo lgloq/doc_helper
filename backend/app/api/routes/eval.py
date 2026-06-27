@@ -9,8 +9,9 @@ from app.api.deps.auth import require_admin
 from app.db.session import get_db_session
 from app.models.user import User
 from app.schemas.eval import EvalDashboardRead, EvalDatasetRead, EvalRunDetailRead, EvalRunRead, EvalRunRequest
-from app.services.eval.async_service import AsyncEvalService
+from app.schemas.operation_job import OperationJobRead
 from app.services.eval.service import EvalService
+from app.services.jobs.service import OperationJobService
 
 router = APIRouter(prefix="/eval", tags=["eval"])
 
@@ -34,6 +35,7 @@ def get_eval_dashboard(
     service = EvalService(session)
     return service.get_dashboard(current_user, dataset_name, limit=limit)
 
+
 @router.post("/run", response_model=EvalRunDetailRead)
 def run_eval(
     payload: EvalRunRequest,
@@ -44,14 +46,14 @@ def run_eval(
     return service.run_eval(current_user, payload)
 
 
-@router.post("/run/async", response_model=EvalRunDetailRead)
+@router.post("/run/async", response_model=OperationJobRead)
 async def run_eval_async(
     payload: EvalRunRequest,
     current_user: User = Depends(require_admin),
     session: Session = Depends(get_db_session),
-) -> EvalRunDetailRead:
-    service = AsyncEvalService(session)
-    return await service.enqueue_eval(current_user, payload)
+) -> OperationJobRead:
+    service = OperationJobService(session)
+    return await service.enqueue_eval_run(current_user, payload)
 
 
 @router.get("/runs", response_model=list[EvalRunRead])

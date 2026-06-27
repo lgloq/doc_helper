@@ -3,6 +3,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type PropsWithChildren,
 } from "react";
@@ -22,6 +23,8 @@ interface AppContextValue {
   logout: () => void;
   refreshMe: () => Promise<void>;
   setSelectedSessionId: (sessionId: string | null) => void;
+  getPageCache: <T>(key: string) => T | null;
+  setPageCache: <T>(key: string, value: T | null) => void;
 }
 
 const AppContext = createContext<AppContextValue | undefined>(undefined);
@@ -33,10 +36,14 @@ export function AppProvider({ children }: PropsWithChildren) {
     localStorage.getItem(STORAGE_SESSION_KEY),
   );
   const [isBootstrapping, setIsBootstrapping] = useState(true);
+  const pageCacheRef = useRef(new Map<string, unknown>());
 
   useEffect(() => {
     if (!token) {
+      pageCacheRef.current.clear();
+      localStorage.removeItem(STORAGE_SESSION_KEY);
       setUser(null);
+      setSelectedSessionIdState(null);
       setIsBootstrapping(false);
       return;
     }
@@ -52,8 +59,11 @@ export function AppProvider({ children }: PropsWithChildren) {
       .catch(() => {
         if (isMounted) {
           localStorage.removeItem(STORAGE_TOKEN_KEY);
+          localStorage.removeItem(STORAGE_SESSION_KEY);
+          pageCacheRef.current.clear();
           setToken(null);
           setUser(null);
+          setSelectedSessionIdState(null);
         }
       })
       .finally(() => {
@@ -74,13 +84,17 @@ export function AppProvider({ children }: PropsWithChildren) {
       isBootstrapping,
       async login(email: string, password: string) {
         const response = await api.login(email, password);
+        pageCacheRef.current.clear();
         localStorage.setItem(STORAGE_TOKEN_KEY, response.access_token);
+        localStorage.removeItem(STORAGE_SESSION_KEY);
         setToken(response.access_token);
         setUser(response.user);
+        setSelectedSessionIdState(null);
       },
       logout() {
         localStorage.removeItem(STORAGE_TOKEN_KEY);
         localStorage.removeItem(STORAGE_SESSION_KEY);
+        pageCacheRef.current.clear();
         setToken(null);
         setUser(null);
         setSelectedSessionIdState(null);
@@ -100,6 +114,16 @@ export function AppProvider({ children }: PropsWithChildren) {
           localStorage.removeItem(STORAGE_SESSION_KEY);
         }
         setSelectedSessionIdState(sessionId);
+      },
+      getPageCache<T>(key: string) {
+        return (pageCacheRef.current.get(key) as T | undefined) ?? null;
+      },
+      setPageCache<T>(key: string, value: T | null) {
+        if (value === null) {
+          pageCacheRef.current.delete(key);
+        } else {
+          pageCacheRef.current.set(key, value);
+        }
       },
     }),
     [isBootstrapping, selectedSessionId, token, user],

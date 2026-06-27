@@ -4,6 +4,13 @@
 
 本文档记录当前中文企业文档 RAG 评测集、质量校验、指标结果和复现命令。该评测集用于验证本仓库的权限感知 RAG 链路，覆盖文档检索、证据召回、引用选择、答案支撑和权限隔离等关键环节。
 
+正式的 `smoke / full / hard / latency` 分层定义、case 规模和可信度规则见：
+
+```text
+docs/P4_BENCHMARK_LAYERS_AND_TRUST.md
+backend/data/benchmark_raw/zh_enterprise/v1_benchmark_layers.json
+```
+
 简版指标见：
 
 ```text
@@ -73,7 +80,7 @@ zh_enterprise_v1_seed
 
 测试问题基于已摄取文档中的 chunk 和 evidence marker 构建。每个 case 保留目标文档 title 和预期 evidence marker，并通过 manifest 校验确认来源文件、checksum 和证据定位仍然有效。
 
-这套构建方式保证评测集可复现，也便于在后续链路调整时定位指标变化原因。
+这套构建方式让评测集更易复现，也便于在后续链路调整时定位指标变化原因。
 
 相关脚本：
 

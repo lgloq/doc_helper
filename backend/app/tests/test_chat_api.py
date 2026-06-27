@@ -215,6 +215,7 @@ def test_chat_roundtrip_persists_history_and_targeted_citations(client: TestClie
     assert supported_claims
     assert supported_claims[0]["support_citations"][0]["rank"] == 1
     assert supported_claims[0]["support_citations"][0]["document_title"] == "客户事故响应指南"
+    assert "五分钟内建立事故沟通渠道" in supported_claims[0]["support_citations"][0]["evidence_excerpt"]
     steps = _agent_steps(payload)
     trace = _agent_run_trace(payload)
     assert metadata["router_decision"]["intent"] == "document_qa"

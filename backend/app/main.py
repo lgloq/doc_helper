@@ -24,18 +24,19 @@ async def _start_arq_worker(app: FastAPI) -> None:
     try:
         from arq.worker import create_worker
 
-        from app.workers.tasks import WorkerSettings
+        from app.workers.tasks import ChatWorkerSettings, DiffWorkerSettings, EvalWorkerSettings, IngestWorkerSettings
 
-        app.state.arq_worker = create_worker(WorkerSettings)
-        app.state.arq_worker_task = asyncio.create_task(app.state.arq_worker.async_run())
-        logger.info("ARQ Worker 已在 API 进程内启动")
+        worker_settings = [ChatWorkerSettings, DiffWorkerSettings, EvalWorkerSettings, IngestWorkerSettings]
+        app.state.arq_workers = [create_worker(settings) for settings in worker_settings]
+        app.state.arq_worker_tasks = [asyncio.create_task(worker.async_run()) for worker in app.state.arq_workers]
+        logger.info("ARQ Workers 已在 API 进程内启动: %s", ", ".join(settings.queue_name for settings in worker_settings))
     except Exception:
-        logger.exception("启动 ARQ Worker 失败")
+        logger.exception("启动 ARQ Workers 失败")
 
 
 async def _stop_arq_worker(app: FastAPI) -> None:
-    worker = getattr(app.state, "arq_worker", None)
-    if worker is not None:
+    workers = getattr(app.state, "arq_workers", [])
+    for worker in workers:
         await worker.close()
 
 

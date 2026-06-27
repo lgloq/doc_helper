@@ -6,21 +6,40 @@ import { PageHeader } from "../components/PageHeader";
 import { SelectField } from "../components/SelectField";
 import { StatusBadge } from "../components/StatusBadge";
 import { useAppContext } from "../context/AppContext";
-import { api } from "../lib/api";
+import { ApiError, api } from "../lib/api";
 import { formatDiffChangeType, formatIngestStatus, formatSummaryProvider } from "../lib/display";
 import { truncate } from "../lib/format";
+import {
+  createPendingDiffSummaryOperation,
+  listPendingDiffSummaryOperations,
+  removePendingDiffSummaryOperation,
+  setPendingOperationJob,
+  touchPendingDiffSummaryOperation,
+} from "../lib/pendingOperations";
+import type { PendingDiffSummaryOperation } from "../lib/pendingOperations";
 import type { DocumentDiffRead, DocumentDiffSummaryRead, DocumentRead, DocumentVersionRead } from "../types/api";
 
+interface VersionsPageCache {
+  documents: DocumentRead[];
+  documentId: string;
+  versions: DocumentVersionRead[];
+  fromVersionId: string;
+  toVersionId: string;
+  diff: DocumentDiffRead | null;
+  summary: DocumentDiffSummaryRead | null;
+}
+
 export function VersionsPage() {
-  const { token } = useAppContext();
+  const { token, getPageCache, setPageCache } = useAppContext();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [documents, setDocuments] = useState<DocumentRead[]>([]);
-  const [documentId, setDocumentId] = useState<string>("");
-  const [versions, setVersions] = useState<DocumentVersionRead[]>([]);
-  const [fromVersionId, setFromVersionId] = useState<string>("");
-  const [toVersionId, setToVersionId] = useState<string>("");
-  const [diff, setDiff] = useState<DocumentDiffRead | null>(null);
-  const [summary, setSummary] = useState<DocumentDiffSummaryRead | null>(null);
+  const cachedPage = getPageCache<VersionsPageCache>("versions");
+  const [documents, setDocuments] = useState<DocumentRead[]>(() => cachedPage?.documents ?? []);
+  const [documentId, setDocumentId] = useState<string>(() => cachedPage?.documentId ?? "");
+  const [versions, setVersions] = useState<DocumentVersionRead[]>(() => cachedPage?.versions ?? []);
+  const [fromVersionId, setFromVersionId] = useState<string>(() => cachedPage?.fromVersionId ?? "");
+  const [toVersionId, setToVersionId] = useState<string>(() => cachedPage?.toVersionId ?? "");
+  const [diff, setDiff] = useState<DocumentDiffRead | null>(() => cachedPage?.diff ?? null);
+  const [summary, setSummary] = useState<DocumentDiffSummaryRead | null>(() => cachedPage?.summary ?? null);
   const [isRawDiffCollapsed, setIsRawDiffCollapsed] = useState(false);
   const [isLoadingDiff, setIsLoadingDiff] = useState(false);
   const [isLoadingSummary, setIsLoadingSummary] = useState(false);
@@ -28,12 +47,25 @@ export function VersionsPage() {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isSummaryMenuOpen, setIsSummaryMenuOpen] = useState(false);
   const hasAutoLoadContext = useRef(false);
+  const didRestoreCachedSelection = useRef(Boolean(cachedPage));
   const summaryCacheRef = useRef<Record<string, DocumentDiffSummaryRead>>({});
   const summaryMenuRef = useRef<HTMLDivElement | null>(null);
   const requestedDocumentId = searchParams.get("documentId");
   const requestedFromVersionId = searchParams.get("fromVersionId");
   const requestedToVersionId = searchParams.get("toVersionId");
   const summaryKey = documentId && fromVersionId && toVersionId ? `${documentId}:${fromVersionId}:${toVersionId}` : "";
+
+  useEffect(() => {
+    setPageCache<VersionsPageCache>("versions", {
+      documents,
+      documentId,
+      versions,
+      fromVersionId,
+      toVersionId,
+      diff,
+      summary,
+    });
+  }, [diff, documentId, documents, fromVersionId, setPageCache, summary, toVersionId, versions]);
 
   function syncLocation(nextDocumentId: string, nextFromVersionId?: string, nextToVersionId?: string) {
     const params = new URLSearchParams(searchParams);
@@ -55,6 +87,87 @@ export function VersionsPage() {
     setSearchParams(params, { replace: true });
   }
 
+  function matchingPendingSummaryOperations(): PendingDiffSummaryOperation[] {
+    if (!documentId || !fromVersionId || !toVersionId) {
+      return [];
+    }
+    return listPendingDiffSummaryOperations(documentId).filter(
+      (operation) => operation.fromVersionId === fromVersionId && operation.toVersionId === toVersionId,
+    );
+  }
+
+  async function acceptPendingSummaryJob(operation: PendingDiffSummaryOperation, jobId: string, prefix: string) {
+    if (!token) {
+      return;
+    }
+    setPendingOperationJob(operation.id, jobId);
+    const job = await api.getJob(token, jobId);
+    if (job.status === "queued" || job.status === "running") {
+      touchPendingDiffSummaryOperation(operation.id, job.error_text ?? undefined);
+      setStatusMessage(`${prefix}：差异摘要仍在后台生成。`);
+      return;
+    }
+    if (job.status === "failed") {
+      removePendingDiffSummaryOperation(operation.id);
+      setStatusMessage(job.error_text ?? "差异摘要生成失败。");
+      return;
+    }
+
+    const nextSummary = job.result_payload as DocumentDiffSummaryRead | null;
+    if (nextSummary) {
+      const operationSummaryKey = `${operation.documentId}:${operation.fromVersionId}:${operation.toVersionId}`;
+      summaryCacheRef.current[operationSummaryKey] = nextSummary;
+      setSummary(nextSummary);
+      setStatusMessage(
+        nextSummary.cache_hit
+          ? `${prefix}：已恢复缓存摘要。`
+          : nextSummary.summary_provider === "deterministic_fallback"
+            ? `${prefix}：大模型摘要不可用，已回退为规则摘要。`
+            : `${prefix}：差异摘要已恢复。`,
+      );
+    } else {
+      setStatusMessage(`${prefix}：差异摘要已完成。`);
+    }
+    removePendingDiffSummaryOperation(operation.id);
+  }
+
+  async function recoverPendingSummaryJobs() {
+    if (!token) {
+      return;
+    }
+    const operations = matchingPendingSummaryOperations();
+    if (!operations.length) {
+      return;
+    }
+
+    for (const operation of operations) {
+      try {
+        if (operation.jobId) {
+          await acceptPendingSummaryJob(operation, operation.jobId, "已恢复差异摘要");
+          continue;
+        }
+        const job = await api.summarizeDocumentDiffAsync(
+          token,
+          operation.documentId,
+          operation.fromVersionId,
+          operation.toVersionId,
+          operation.forceRefresh,
+          operation.id,
+        );
+        await acceptPendingSummaryJob(operation, job.id, "已恢复差异摘要请求");
+      } catch (nextError) {
+        touchPendingDiffSummaryOperation(operation.id, nextError instanceof Error ? nextError.message : "恢复差异摘要失败。");
+        if (nextError instanceof ApiError && nextError.status === 0) {
+          setStatusMessage("差异摘要仍在后台生成，刷新后会继续恢复。");
+        } else {
+          removePendingDiffSummaryOperation(operation.id);
+          setStatusMessage(nextError instanceof Error ? nextError.message : "恢复差异摘要失败。");
+        }
+      }
+    }
+  }
+
+  const pendingSummaryCount = matchingPendingSummaryOperations().length;
 
   useEffect(() => {
     if (!token) {
@@ -65,10 +178,13 @@ export function VersionsPage() {
       .then((items) => {
         setDocuments(items);
         const firstDocumentId = items[0]?.id ?? "";
-        const nextDocumentId = requestedDocumentId && items.some((item) => item.id === requestedDocumentId)
-          ? requestedDocumentId
-          : firstDocumentId;
-        setDocumentId(nextDocumentId);
+        setDocumentId((current) =>
+          requestedDocumentId && items.some((item) => item.id === requestedDocumentId)
+            ? requestedDocumentId
+            : current && items.some((item) => item.id === current)
+              ? current
+              : firstDocumentId,
+        );
       })
       .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "加载文档列表失败。"));
   }, [requestedDocumentId, token]);
@@ -82,12 +198,19 @@ export function VersionsPage() {
       .listDocumentVersions(token, documentId)
       .then((items) => {
         setVersions(items);
-        const nextToVersionId = requestedToVersionId && items.some((version) => version.id === requestedToVersionId)
-          ? requestedToVersionId
-          : items[0]?.id ?? "";
-        const nextFromVersionId = requestedFromVersionId && items.some((version) => version.id === requestedFromVersionId)
-          ? requestedFromVersionId
-          : items.find((version) => version.id !== nextToVersionId)?.id ?? items[0]?.id ?? "";
+        const hasVersion = (versionId: string) => items.some((version) => version.id === versionId);
+        const nextToVersionId =
+          requestedToVersionId && items.some((version) => version.id === requestedToVersionId)
+            ? requestedToVersionId
+            : toVersionId && hasVersion(toVersionId)
+              ? toVersionId
+            : items[0]?.id ?? "";
+        const nextFromVersionId =
+          requestedFromVersionId && items.some((version) => version.id === requestedFromVersionId)
+            ? requestedFromVersionId
+            : fromVersionId && fromVersionId !== nextToVersionId && hasVersion(fromVersionId)
+              ? fromVersionId
+            : items.find((version) => version.id !== nextToVersionId)?.id ?? items[0]?.id ?? "";
         setFromVersionId(nextFromVersionId);
         setToVersionId(nextToVersionId);
       })
@@ -95,6 +218,10 @@ export function VersionsPage() {
   }, [documentId, requestedFromVersionId, requestedToVersionId, token]);
 
   useEffect(() => {
+    if (didRestoreCachedSelection.current) {
+      didRestoreCachedSelection.current = false;
+      return;
+    }
     setDiff(null);
     setIsSummaryMenuOpen(false);
     hasAutoLoadContext.current = false;
@@ -113,6 +240,23 @@ export function VersionsPage() {
     }
     syncLocation(documentId, fromVersionId || undefined, toVersionId || undefined);
   }, [documentId, fromVersionId, toVersionId]);
+
+  useEffect(() => {
+    if (!token || !documentId || !fromVersionId || !toVersionId) {
+      return;
+    }
+    void recoverPendingSummaryJobs();
+  }, [documentId, fromVersionId, toVersionId, token]);
+
+  useEffect(() => {
+    if (!token || pendingSummaryCount === 0) {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      void recoverPendingSummaryJobs();
+    }, 5000);
+    return () => window.clearInterval(intervalId);
+  }, [pendingSummaryCount, token, documentId, fromVersionId, toVersionId]);
 
   useEffect(() => {
     if (!isSummaryMenuOpen) {
@@ -165,6 +309,11 @@ export function VersionsPage() {
       setStatusMessage("请先选择文档和两个版本。");
       return;
     }
+    const existingPendingOperation = matchingPendingSummaryOperations()[0] ?? null;
+    if (existingPendingOperation) {
+      setStatusMessage("差异摘要仍在后台生成，刷新后会继续恢复。");
+      return;
+    }
     if (!forceRefresh && summaryKey && summaryCacheRef.current[summaryKey]) {
       setSummary(summaryCacheRef.current[summaryKey]);
       setStatusMessage("已恢复最近一次差异摘要。");
@@ -175,7 +324,13 @@ export function VersionsPage() {
     }
     setIsSummaryMenuOpen(false);
     setIsLoadingSummary(true);
-    setStatusMessage(forceRefresh ? "正在强制重新生成差异摘要..." : "正在生成差异摘要...");
+    setStatusMessage(forceRefresh ? "正在提交强制重算任务..." : "正在提交差异摘要任务...");
+    const operation = createPendingDiffSummaryOperation({
+      documentId,
+      fromVersionId,
+      toVersionId,
+      forceRefresh,
+    });
     try {
       const hasMatchingDiff =
         diff && diff.document_id === documentId && diff.from_version_id === fromVersionId && diff.to_version_id === toVersionId;
@@ -184,24 +339,24 @@ export function VersionsPage() {
         setDiff(nextDiff);
         setIsRawDiffCollapsed(false);
       }
-      const nextSummary = await api.summarizeDocumentDiff(token, documentId, fromVersionId, toVersionId, forceRefresh);
-      if (summaryKey) {
-        summaryCacheRef.current[summaryKey] = nextSummary;
-      }
-      setSummary(nextSummary);
-      setStatusMessage(
-        nextSummary.cache_hit
-          ? "已加载缓存摘要。"
-          : nextSummary.summary_provider === "deterministic_fallback"
-            ? forceRefresh
-              ? "已强制重新生成，但大模型摘要不可用，已回退为规则摘要。"
-              : "大模型摘要不可用，已自动回退为规则摘要。"
-            : forceRefresh
-              ? "已强制重新生成差异摘要。"
-              : "已生成差异摘要与影响提示。",
+      const job = await api.summarizeDocumentDiffAsync(
+        token,
+        documentId,
+        fromVersionId,
+        toVersionId,
+        forceRefresh,
+        operation.id,
       );
+      await acceptPendingSummaryJob(operation, job.id, forceRefresh ? "已提交强制重算任务" : "已提交差异摘要任务");
     } catch (nextError) {
-      setStatusMessage(nextError instanceof Error ? nextError.message : "生成差异摘要失败。");
+      const keepPendingOperation = nextError instanceof ApiError && nextError.status === 0;
+      if (keepPendingOperation) {
+        touchPendingDiffSummaryOperation(operation.id, nextError instanceof Error ? nextError.message : undefined);
+        setStatusMessage("差异摘要仍在后台生成，刷新后会自动恢复。");
+      } else {
+        removePendingDiffSummaryOperation(operation.id);
+        setStatusMessage(nextError instanceof Error ? nextError.message : "生成差异摘要失败。");
+      }
     } finally {
       setIsLoadingSummary(false);
     }
@@ -395,6 +550,4 @@ export function VersionsPage() {
     </div>
   );
 }
-
-
 

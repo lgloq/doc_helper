@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { ErrorNotice } from "../components/ErrorNotice";
+import { FactEvidencePanel } from "../components/FactEvidencePanel";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 import { useAppContext } from "../context/AppContext";
@@ -11,10 +12,19 @@ import {
   createPendingEvalOperation,
   listPendingEvalOperations,
   removePendingEvalOperation,
+  setPendingOperationJob,
   touchPendingEvalOperation,
 } from "../lib/pendingOperations";
 import type { PendingEvalOperation } from "../lib/pendingOperations";
-import type { EvalDashboardRead, EvalDatasetRead, EvalResultRowRead, EvalRunDetailRead, EvalRunRead, TraceLogRead } from "../types/api";
+import type {
+  AnswerEvidenceAuditRead,
+  EvalDashboardRead,
+  EvalDatasetRead,
+  EvalResultRowRead,
+  EvalRunDetailRead,
+  EvalRunRead,
+  TraceLogRead,
+} from "../types/api";
 
 const DEMO_EVAL_DATASET = "demo_access_matrix_eval";
 const DEFAULT_VISIBLE_RUNS = 12;
@@ -24,6 +34,18 @@ const DEFAULT_VISIBLE_TRACE_ITEMS = 3;
 type InsightsView = "eval" | "trace";
 type EvalCaseFilter = "all" | "answer_expected" | "refusal_expected";
 type EvalRunFilter = "latest_valid" | "connection_failures";
+
+interface InsightsPageCache {
+  runs: EvalRunRead[];
+  evalDatasets: EvalDatasetRead[];
+  evalDashboard: EvalDashboardRead | null;
+  selectedDatasetName: string;
+  selectedRun: EvalRunDetailRead | null;
+  selectedResultId: string | null;
+  traces: TraceLogRead[];
+  selectedTrace: TraceLogRead | null;
+  activeView: InsightsView;
+}
 
 function formatEvalDatasetName(value: string | null | undefined): string {
   if (value === "demo_access_matrix_eval") {
@@ -175,31 +197,36 @@ function runProgressText(run: EvalRunRead | EvalRunDetailRead): string {
   }
   return formatWorkflowStatus(run.status);
 }
-function evalRunClientRequestId(run: EvalRunRead | EvalRunDetailRead): string | null {
-  const value = runSummaryRecord(run)?.client_request_id;
-  return typeof value === "string" ? value : null;
-}
 
-function findEvalRunByClientRequestId(items: EvalRunRead[], clientRequestId: string): EvalRunRead | null {
-  return items.find((run) => evalRunClientRequestId(run) === clientRequestId) ?? null;
+function readTraceEvidenceAudit(metadata: Record<string, unknown> | null): AnswerEvidenceAuditRead | null {
+  const payload = metadata?.evidence_audit;
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const audit = payload as Record<string, unknown>;
+  if (typeof audit.claim_count !== "number" || !Array.isArray(audit.claims)) {
+    return null;
+  }
+  return payload as AnswerEvidenceAuditRead;
 }
 
 export function InsightsPage() {
-  const { token, user } = useAppContext();
-  const [runs, setRuns] = useState<EvalRunRead[]>([]);
-  const [evalDatasets, setEvalDatasets] = useState<EvalDatasetRead[]>([]);
-  const [evalDashboard, setEvalDashboard] = useState<EvalDashboardRead | null>(null);
-  const [selectedDatasetName, setSelectedDatasetName] = useState(DEMO_EVAL_DATASET);
+  const { token, user, getPageCache, setPageCache } = useAppContext();
+  const cachedPage = getPageCache<InsightsPageCache>("insights");
+  const [runs, setRuns] = useState<EvalRunRead[]>(() => cachedPage?.runs ?? []);
+  const [evalDatasets, setEvalDatasets] = useState<EvalDatasetRead[]>(() => cachedPage?.evalDatasets ?? []);
+  const [evalDashboard, setEvalDashboard] = useState<EvalDashboardRead | null>(() => cachedPage?.evalDashboard ?? null);
+  const [selectedDatasetName, setSelectedDatasetName] = useState(cachedPage?.selectedDatasetName ?? DEMO_EVAL_DATASET);
   const [evalTopK, setEvalTopK] = useState(5);
-  const [selectedRun, setSelectedRun] = useState<EvalRunDetailRead | null>(null);
-  const [selectedResultId, setSelectedResultId] = useState<string | null>(null);
-  const [traces, setTraces] = useState<TraceLogRead[]>([]);
-  const [selectedTrace, setSelectedTrace] = useState<TraceLogRead | null>(null);
+  const [selectedRun, setSelectedRun] = useState<EvalRunDetailRead | null>(() => cachedPage?.selectedRun ?? null);
+  const [selectedResultId, setSelectedResultId] = useState<string | null>(() => cachedPage?.selectedResultId ?? null);
+  const [traces, setTraces] = useState<TraceLogRead[]>(() => cachedPage?.traces ?? []);
+  const [selectedTrace, setSelectedTrace] = useState<TraceLogRead | null>(() => cachedPage?.selectedTrace ?? null);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isRunningEval, setIsRunningEval] = useState(false);
   const [pendingEvalOperations, setPendingEvalOperations] = useState<PendingEvalOperation[]>([]);
-  const [activeView, setActiveView] = useState<InsightsView>("eval");
+  const [activeView, setActiveView] = useState<InsightsView>(() => cachedPage?.activeView ?? "eval");
   const [caseFilter, setCaseFilter] = useState<EvalCaseFilter>("all");
   const [runFilter, setRunFilter] = useState<EvalRunFilter>("latest_valid");
   const [showAllRuns, setShowAllRuns] = useState(false);
@@ -208,6 +235,32 @@ export function InsightsPage() {
   const [showAllTraceCitations, setShowAllTraceCitations] = useState(false);
   const isAdmin = user?.role?.name === "admin";
   const evalRecoveryInFlightRef = useRef(false);
+  const didRestoreSelectedResult = useRef(Boolean(cachedPage?.selectedResultId));
+
+  useEffect(() => {
+    setPageCache<InsightsPageCache>("insights", {
+      runs,
+      evalDatasets,
+      evalDashboard,
+      selectedDatasetName,
+      selectedRun,
+      selectedResultId,
+      traces,
+      selectedTrace,
+      activeView,
+    });
+  }, [
+    activeView,
+    evalDashboard,
+    evalDatasets,
+    runs,
+    selectedDatasetName,
+    selectedResultId,
+    selectedRun,
+    selectedTrace,
+    setPageCache,
+    traces,
+  ]);
   async function refreshEvalOverview(datasetName: string, preferredRunId?: string) {
     if (!token || !isAdmin) {
       return;
@@ -222,7 +275,8 @@ export function InsightsPage() {
     setEvalDashboard(nextDashboard);
 
     const datasetRuns = nextRuns.filter((run) => run.dataset_name === datasetName);
-    const targetRun = preferredRunId ? nextRuns.find((run) => run.id === preferredRunId) : defaultEvalRun(datasetRuns);
+    const preferredRun = preferredRunId ? datasetRuns.find((run) => run.id === preferredRunId) : null;
+    const targetRun = preferredRun ?? defaultEvalRun(datasetRuns);
     if (targetRun) {
       setSelectedRun(await api.getEvalRun(token, targetRun.id));
     } else {
@@ -261,20 +315,43 @@ export function InsightsPage() {
     return `${prefix}：${formatEvalDatasetName(run.dataset_name)}，共运行 ${run.results.length} 条用例。`;
   }
 
-  async function acceptEvalRunResponse(operation: PendingEvalOperation, run: EvalRunDetailRead, prefix: string) {
-    if (run.status === "queued" || run.status === "running") {
-      touchPendingEvalOperation(operation.id);
-      setSelectedRun(run);
-      await refreshEvalOverview(run.dataset_name, run.id);
-      setActiveView("eval");
-      setStatusMessage(evalRunReturnedMessage(run, prefix));
+  async function acceptEvalJobResponse(operation: PendingEvalOperation, jobId: string, prefix: string) {
+    if (!token) {
       return;
     }
+
+    setPendingOperationJob(operation.id, jobId);
+    const job = await api.getJob(token, jobId);
+    if (job.status === "queued" || job.status === "running") {
+      touchPendingEvalOperation(operation.id, job.error_text ?? undefined);
+      await refreshEvalOverview(operation.datasetName, job.resource_id ?? undefined);
+      setActiveView("eval");
+      setStatusMessage(`${prefix}：${formatEvalDatasetName(operation.datasetName)}仍在后台处理。`);
+      return;
+    }
+
     removePendingEvalOperation(operation.id);
-    setSelectedRun(run);
-    await refreshEvalOverview(run.dataset_name, run.id);
+    let run: EvalRunDetailRead | null = null;
+    if (job.resource_id) {
+      try {
+        run = await api.getEvalRun(token, job.resource_id);
+      } catch {
+        run = null;
+      }
+    }
+    await refreshEvalOverview(run?.dataset_name ?? operation.datasetName, run?.id);
+    if (run) {
+      setSelectedRun(run);
+      setStatusMessage(evalRunReturnedMessage(run, prefix));
+    } else if (job.status === "failed") {
+      setStatusMessage(`${prefix}：${formatEvalDatasetName(operation.datasetName)}运行失败。`);
+      if (job.error_text) {
+        setError(job.error_text);
+      }
+    } else {
+      setStatusMessage(`${prefix}：${formatEvalDatasetName(operation.datasetName)}已完成。`);
+    }
     setActiveView("eval");
-    setStatusMessage(evalRunReturnedMessage(run, prefix));
   }
 
   async function recoverPendingEvalRuns() {
@@ -292,24 +369,21 @@ export function InsightsPage() {
     try {
       for (const operation of operations) {
         try {
-          const currentRuns = await api.listEvalRuns(token);
-          const existingRun = findEvalRunByClientRequestId(currentRuns, operation.id);
-          if (existingRun) {
-            const detail = await api.getEvalRun(token, existingRun.id);
-            await acceptEvalRunResponse(operation, detail, "已恢复评测结果");
+          if (operation.jobId) {
+            await acceptEvalJobResponse(operation, operation.jobId, "已恢复评测结果");
             continue;
           }
 
-          const run = await api.runEval(token, {
+          const job = await api.runEvalAsync(token, {
             dataset_name: operation.datasetName,
             top_k: operation.topK,
             seed_demo_cases: operation.seedDemoCases,
             client_request_id: operation.id,
           });
-          await acceptEvalRunResponse(operation, run, "已恢复评测请求");
+          await acceptEvalJobResponse(operation, job.id, "已恢复评测请求");
         } catch (nextError) {
           touchPendingEvalOperation(operation.id, nextError instanceof Error ? nextError.message : "恢复评测失败。");
-          if (nextError instanceof ApiError && (nextError.status === 0 || nextError.status === 409)) {
+          if (nextError instanceof ApiError && nextError.status === 0) {
             setStatusMessage(`评测仍在后台处理：${formatEvalDatasetName(operation.datasetName)}，刷新后会继续恢复。`);
           } else {
             setError(nextError instanceof Error ? nextError.message : "恢复评测失败。");
@@ -331,7 +405,13 @@ export function InsightsPage() {
       .listTraces(token)
       .then((items) => {
         setTraces(items);
-        setSelectedTrace(items[0] ?? null);
+        setSelectedTrace((current) => {
+          const refreshedTrace = current ? items.find((item) => item.id === current.id) : null;
+          if (refreshedTrace) {
+            return refreshedTrace;
+          }
+          return items[0] ?? null;
+        });
       })
       .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "加载追踪列表失败。"));
   }, [token]);
@@ -341,7 +421,7 @@ export function InsightsPage() {
       return;
     }
     syncPendingEvalOperations();
-    refreshEvalOverview(selectedDatasetName).catch((nextError) =>
+    refreshEvalOverview(selectedDatasetName, selectedRun?.id).catch((nextError) =>
       setError(nextError instanceof Error ? nextError.message : "加载评测记录失败。"),
     );
     recoverPendingEvalRuns().catch((nextError) =>
@@ -350,6 +430,10 @@ export function InsightsPage() {
   }, [isAdmin, token]);
 
   useEffect(() => {
+    if (didRestoreSelectedResult.current) {
+      didRestoreSelectedResult.current = false;
+      return;
+    }
     setSelectedResultId(selectedRun?.results[0]?.id ?? null);
     setCaseFilter("all");
   }, [selectedRun?.id]);
@@ -394,7 +478,7 @@ export function InsightsPage() {
     setIsRunningEval(true);
     setStatusMessage(`正在运行${formatEvalDatasetName(datasetName)}...`);
     try {
-      const run = await api.runEval(token, {
+      const job = await api.runEvalAsync(token, {
         dataset_name: datasetName,
         top_k: operation.topK,
         seed_demo_cases: operation.seedDemoCases,
@@ -402,9 +486,9 @@ export function InsightsPage() {
       });
 
       setError(null);
-      await acceptEvalRunResponse(operation, run, run.status === "completed" ? "评测完成" : "评测已返回");
+      await acceptEvalJobResponse(operation, job.id, "评测已提交");
     } catch (nextError) {
-      const keepPendingOperation = nextError instanceof ApiError && (nextError.status === 0 || nextError.status === 409);
+      const keepPendingOperation = nextError instanceof ApiError && nextError.status === 0;
       if (keepPendingOperation) {
         touchPendingEvalOperation(operation.id, nextError instanceof Error ? nextError.message : undefined);
         setStatusMessage(`评测仍在后台处理：${formatEvalDatasetName(datasetName)}，刷新后会自动恢复。`);
@@ -509,6 +593,8 @@ export function InsightsPage() {
   const retrievedChunks = asArray<Record<string, unknown>>(selectedTrace?.retrieved_chunks_json);
   const selectedCitations = asArray<Record<string, unknown>>(selectedTrace?.selected_citations_json);
   const selectedTraceMetadata = asRecord(selectedTrace?.trace_metadata);
+  const selectedTraceDiagnosis = asRecord(selectedTraceMetadata?.pipeline_diagnosis);
+  const selectedTraceEvidenceAudit = readTraceEvidenceAudit(selectedTraceMetadata);
   const selectedTraceRetrievalDebug = asRecord(selectedTraceMetadata?.retrieval_debug);
   const traceLexicalQueries = asStringList(selectedTraceRetrievalDebug?.lexical_queries);
   const traceRewriteStrategies = asStringList(selectedTraceRetrievalDebug?.query_rewrite_strategies);
@@ -516,6 +602,34 @@ export function InsightsPage() {
   const visibleSelectedCitations = showAllTraceCitations
     ? selectedCitations
     : selectedCitations.slice(0, DEFAULT_VISIBLE_TRACE_ITEMS);
+
+  function diagnosisTone(status: unknown): "neutral" | "success" | "warning" | "danger" | "info" {
+    if (status === "passed") {
+      return "success";
+    }
+    if (status === "failed") {
+      return "danger";
+    }
+    return "warning";
+  }
+
+  function renderPipelineDiagnosisCard(diagnosis: Record<string, unknown> | null, title = "失败定位") {
+    if (!diagnosis || typeof diagnosis.summary !== "string" || diagnosis.status === "passed") {
+      return null;
+    }
+    const stageLabel = typeof diagnosis.stage_label === "string" ? diagnosis.stage_label : String(diagnosis.stage ?? "-");
+    const reasonLabel = typeof diagnosis.reason_label === "string" ? diagnosis.reason_label : String(diagnosis.reason_code ?? "-");
+    return (
+      <div className="list-card">
+        <div className="list-card-topline">
+          <strong>{title}</strong>
+          <StatusBadge tone={diagnosisTone(diagnosis.status)}>{stageLabel}</StatusBadge>
+        </div>
+        <p>{diagnosis.summary}</p>
+        <p className="muted">{reasonLabel}</p>
+      </div>
+    );
+  }
 
   function renderSummaryCard(label: string, value: string, helper?: string) {
     return (
@@ -619,7 +733,7 @@ export function InsightsPage() {
               <div className="eval-failure-row" key={mode.key}>
                 <div>
                   <strong>{mode.label}</strong>
-                  <p className="muted">{mode.example_case_names.length ? mode.example_case_names.join("、") : "暂无样例"}</p>
+                  <p className="muted">{mode.stage_label ? `${mode.stage_label} · ` : ""}{mode.example_case_names.length ? mode.example_case_names.join("、") : "暂无样例"}</p>
                 </div>
                 <StatusBadge tone="warning">{mode.count}</StatusBadge>
               </div>
@@ -671,6 +785,7 @@ export function InsightsPage() {
     const citationBreakdown = asRecord(metricBreakdownRecord?.citation);
     const faithfulnessBreakdown = asRecord(metricBreakdownRecord?.faithfulness);
     const humanReview = asRecord(details.human_review);
+    const pipelineDiagnosis = asRecord(details.pipeline_diagnosis);
     const annotationSource =
       caseAnnotations?.source === "demo_annotations"
         ? "演示标注"
@@ -708,6 +823,8 @@ export function InsightsPage() {
           </div>
           {typeof humanReview?.reason === "string" && humanReview.reason ? <p className="muted">{humanReview.reason}</p> : null}
         </div>
+
+        {renderPipelineDiagnosisCard(pipelineDiagnosis)}
 
         <div className="list-card">
           <div className="list-card-topline">
@@ -1121,6 +1238,11 @@ export function InsightsPage() {
                   <span>输出 Token：{selectedTrace.completion_tokens ?? "-"}</span>
                 </div>
                 {selectedTrace.error_text ? <ErrorNotice message={selectedTrace.error_text} /> : null}
+
+                {renderPipelineDiagnosisCard(selectedTraceDiagnosis, "追踪诊断")}
+                {selectedTraceEvidenceAudit && selectedTraceEvidenceAudit.claim_count > 0 ? (
+                  <FactEvidencePanel audit={selectedTraceEvidenceAudit} title="事实级证据" />
+                ) : null}
 
                 {selectedTraceRetrievalDebug ? (
                   <div className="list-card">

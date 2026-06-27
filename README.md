@@ -29,11 +29,14 @@
 - 权限感知检索：无权限文档不会进入候选集
 - 候选重排：混合召回后的安全候选会进入 rerank 阶段，默认使用本地 heuristic，也可配置 LLM 或 Qwen rerank provider
 - 引用式问答：回答与引用来源分开返回
+- 事实级证据审计：展示答案关键事实、支撑状态和对应证据片段
 - 多步骤处理与轨迹回看：前端可展开查看每一步处理过程和最终结果
 - 轻量上下文复用：保留最近多轮消息，并复用上一轮目标文档、工具、结果类型与 observation 摘要
 - 版本对比：支持原始 diff、差异摘要和影响提示
 - 结构化结果生成：支持待办、周报草稿、FAQ 草稿生成
-- 评测与链路追踪：支持效果验证与 trace 记录
+- 长任务恢复：chat、eval、文档入库和 diff 摘要支持后台 job 与刷新 / 切页后恢复
+- 评测与链路追踪：支持效果验证、阶段耗时、pipeline diagnosis 与 trace 记录
+- 权限审计：支持查看用户可见范围、ACL 影响分析和疑似越权检索审计
 - 用户与部门管理：支持管理员维护用户、分配角色、调整启停状态，并通过树状视图管理多级部门
 
 ## 主要功能
@@ -52,12 +55,13 @@
   - 周报草稿生成
   - FAQ 草稿沉淀
 - 文档 diff 当前提供 unified diff、变更摘要和影响提示
+- chat、eval、文档入库和 diff 摘要支持异步 job，按任务类型拆分 ARQ 队列
 - 当前评测指标包括：
   - retrieval hit rate
   - citation accuracy
   - answer faithfulness
   - permission isolation correctness
-- 链路记录当前保留 trace、召回 chunk、selected citation、延迟、token 和错误信息
+- 链路记录当前保留 trace、召回 chunk、selected citation、阶段耗时、pipeline diagnosis、token 和错误信息
 - 提供一套 React 前端用于串联文档、问答、版本、评测与追踪页面
 
 ## 设计重点
@@ -69,7 +73,8 @@
 - 多轮追问可复用上一轮目标文档、上一轮工具、结果类型和 observation 摘要，但不引入长期 memory 或额外状态表
 - 会话结果可以继续派生成待办、周报草稿和 FAQ 草稿
 - 版本对比同时保留原始 diff、摘要和影响提示
-- 评测与 trace 数据落库，便于复现问题和回看链路
+- 长任务状态通过 operation job 记录，前端可在刷新或切页后恢复 queued / running / completed / failed 状态
+- 评测与 trace 数据落库，便于复现问题、回看链路和定位失败阶段
 
 ## 系统架构
 ```mermaid
@@ -144,14 +149,16 @@ docker-compose.yml
 - 基于上下文的多步骤处理、处理轨迹与轻量上下文复用
 - 待办提取 / 周报草稿 / FAQ 草稿
 - 文档版本上传、版本对比与摘要
-- Eval 服务、固定评测报告、权限隔离回归和前端评测控制台
+- 后台 job 与按类型拆分的 ARQ worker
+- Eval 服务、固定评测报告、benchmark 分层、权限隔离回归和前端评测控制台
 - Observability trace 与简单 dashboard API
+- 权限审计接口、ACL 影响分析和用户可见范围查看
 - React 前端整合页面
 
 ## 当前未实现
 - 企业级 SSO / LDAP / OAuth 接入
 - 多租户隔离与跨组织策略管理
-- 异步任务的生产级监控、重试策略和运维治理
+- 跨队列任务的更完整监控、重试策略、告警和运维治理
 - 低清扫描、旋转拍照、复杂合并单元格、复杂跨页表格和图片型复杂版面的稳定结构化
 - 复杂 Excel、多 sheet XLSX 和合并单元格表格解析
 - Slack / 飞书 / 邮件等外部协作集成
@@ -164,7 +171,7 @@ docker-compose.yml
 - 仓库包含 chat、search、ACL、version、结构化结果、eval、observability 等后端测试用例
 - 已覆盖管理员用户维护、角色权限、部门 ACL、文档 ACL 和权限隔离回归验证
 - 当前后端测试已覆盖多工具串联、版本对比后停止、未知工具拒绝、`max_steps` 生效、无权限追问拒答与证据不足阻断结构化生成等场景
-- 检索调试信息会记录 `pre_rerank_count / post_rerank_count / rerank_strategy`，便于回看召回后重排阶段
+- 检索调试信息会记录 `pre_rerank_count / post_rerank_count / rerank_strategy`、阶段耗时和 skip reason，便于回看召回后重排阶段
 - 当前中文企业文档 RAG 证据包见 [`docs/ZH_ENTERPRISE_RAG_BENCHMARK_EVIDENCE_PACK.md`](docs/ZH_ENTERPRISE_RAG_BENCHMARK_EVIDENCE_PACK.md)，指标摘要见 [`docs/RAG_BENCHMARK_METRICS_SUMMARY.md`](docs/RAG_BENCHMARK_METRICS_SUMMARY.md)。导入脚本支持本地 manifest、FinanceBench、BEIR、ConcurrentQA 和格式覆盖入口；Insights 页面支持选择评测集、运行 Top-K 评测、查看历史趋势和失败原因分布。
 
 ## 候选重排 Provider
@@ -308,7 +315,11 @@ npm run dev
 - `GET /api/v1/documents/{id}/acl`
 - `GET /api/v1/documents/{id}/access-debug`
 - `POST /api/v1/documents/{id}/ingest`
+- `POST /api/v1/documents/{id}/ingest/async`
 - `GET /api/v1/documents/{id}/chunks`
+- `GET /api/v1/permissions/users/{user_id}/scope`
+- `POST /api/v1/permissions/documents/{document_id}/acl/impact`
+- `GET /api/v1/permissions/audit/traces`
 
 ### 用户与部门
 - `GET /api/v1/users`
@@ -326,6 +337,10 @@ npm run dev
 - `GET /api/v1/chat/sessions`
 - `GET /api/v1/chat/sessions/{id}`
 - `POST /api/v1/chat/sessions/{id}/messages`
+- `POST /api/v1/chat/sessions/{id}/messages/async`
+
+### 后台任务
+- `GET /api/v1/jobs/{job_id}`
 
 ### 任务流转
 - `POST /api/v1/tasks/extract`
@@ -338,9 +353,11 @@ npm run dev
 ### 版本差异
 - `GET /api/v1/documents/{id}/diff?from_version=&to_version=`
 - `POST /api/v1/documents/{id}/diff/summary`
+- `POST /api/v1/documents/{id}/diff/summary/async`
 
 ### Eval 与 Observability
 - `POST /api/v1/eval/run`
+- `POST /api/v1/eval/run/async`
 - `GET /api/v1/eval/runs`
 - `GET /api/v1/eval/runs/{id}`
 - `GET /api/v1/observability/traces`
@@ -383,7 +400,7 @@ JWT_SECRET_KEY=replace-with-a-long-random-secret
 - `OPENAI_BASE_URL` 可用于把 embedding 请求映射到 OpenRouter 等兼容 OpenAI embeddings 的服务
 - `OPENAI_API_KEY` 在这套组合里填写 OpenRouter key
 - 当前仓库已验证可通过 OpenRouter 的 embeddings 接口生成 1536 维向量
-- 若 embedding 请求失败，系统会自动回退到 deterministic embedding，保证摄取和演示链路不中断
+- 若 embedding 请求失败，系统会自动回退到 deterministic embedding，让本地摄取和演示链路仍可继续运行
 
 ## 文档说明
 - 项目概览：[`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md)

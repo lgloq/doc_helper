@@ -18,13 +18,16 @@ import type {
   FAQEntryRead,
   FAQGenerateResponse,
   IngestionResultRead,
+  OperationJobRead,
+  PermissionACLImpactRead,
   TaskExtractResponse,
   TaskItemRead,
   TokenResponse,
-  UserCreatePayload,
   TraceLogRead,
-  UserUpdatePayload,
+  UserCreatePayload,
   UserRead,
+  UserUpdatePayload,
+  UserVisibleScopeRead,
   WeeklyReportDraftRead,
   WeeklyReportGenerateResponse,
 } from "../types/api";
@@ -99,8 +102,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   const contentType = response.headers.get("content-type") ?? "";
   const responseText = response.status === 204 ? "" : await response.text();
-  const payload =
-    responseText && contentType.includes("application/json") ? JSON.parse(responseText) : responseText;
+  const payload = responseText && contentType.includes("application/json") ? JSON.parse(responseText) : responseText;
 
   if (!response.ok) {
     const detail =
@@ -157,6 +159,13 @@ export const api = {
       body: versionId ? { version_id: versionId } : {},
     });
   },
+  ingestDocumentAsync(token: string, documentId: string, versionId?: string, clientRequestId?: string | null) {
+    return request<OperationJobRead>(`/api/v1/documents/${documentId}/ingest/async`, {
+      method: "POST",
+      token,
+      body: { version_id: versionId ?? undefined, client_request_id: clientRequestId ?? undefined },
+    });
+  },
   listDocumentVersions(token: string, documentId: string) {
     return request<DocumentVersionRead[]>(`/api/v1/documents/${documentId}/versions`, { token });
   },
@@ -195,6 +204,35 @@ export const api = {
     return request<DocumentAccessDebugRead>(
       `/api/v1/documents/${documentId}/access-debug?user_id=${encodeURIComponent(userId)}`,
       { token },
+    );
+  },
+  getUserVisibleScope(token: string, userId: string, limit = 50) {
+    return request<UserVisibleScopeRead>(
+      `/api/v1/permissions/users/${userId}/scope?limit=${encodeURIComponent(String(limit))}`,
+      { token },
+    );
+  },
+  analyzeDocumentAclImpact(
+    token: string,
+    documentId: string,
+    payload: {
+      principal_type: string;
+      can_view: boolean;
+      can_manage: boolean;
+      department_id?: string;
+      team_name?: string;
+      role_name?: string;
+      user_id?: string;
+    },
+    previewLimit = 30,
+  ) {
+    return request<PermissionACLImpactRead>(
+      `/api/v1/permissions/documents/${documentId}/acl/impact?preview_limit=${encodeURIComponent(String(previewLimit))}`,
+      {
+        method: "POST",
+        token,
+        body: payload,
+      },
     );
   },
   listDepartments(token: string) {
@@ -278,6 +316,25 @@ export const api = {
       body: { from_version_id: fromVersionId, to_version_id: toVersionId, force_refresh: forceRefresh },
     });
   },
+  summarizeDocumentDiffAsync(
+    token: string,
+    documentId: string,
+    fromVersionId: string,
+    toVersionId: string,
+    forceRefresh = false,
+    clientRequestId?: string | null,
+  ) {
+    return request<OperationJobRead>(`/api/v1/documents/${documentId}/diff/summary/async`, {
+      method: "POST",
+      token,
+      body: {
+        from_version_id: fromVersionId,
+        to_version_id: toVersionId,
+        force_refresh: forceRefresh,
+        client_request_id: clientRequestId ?? undefined,
+      },
+    });
+  },
   createChatSession(token: string, title?: string) {
     return request<ChatSessionRead>("/api/v1/chat/sessions", {
       method: "POST",
@@ -299,6 +356,14 @@ export const api = {
   },
   sendChatMessage(token: string, sessionId: string, content: string, topK = 5, clientRequestId?: string | null) {
     return request<ChatMessageCreateResponse>(`/api/v1/chat/sessions/${sessionId}/messages`, {
+      method: "POST",
+      token,
+      body: { content, top_k: topK, client_request_id: clientRequestId ?? undefined },
+      timeoutMs: CHAT_REQUEST_TIMEOUT_MS,
+    });
+  },
+  sendChatMessageAsync(token: string, sessionId: string, content: string, topK = 5, clientRequestId?: string | null) {
+    return request<OperationJobRead>(`/api/v1/chat/sessions/${sessionId}/messages/async`, {
       method: "POST",
       token,
       body: { content, top_k: topK, client_request_id: clientRequestId ?? undefined },
@@ -349,7 +414,23 @@ export const api = {
     token: string,
     payload?: { dataset_name?: string; top_k?: number; seed_demo_cases?: boolean; client_request_id?: string },
   ) {
-    return request<EvalRunDetailRead>("/api/v1/eval/run/async", {
+    return request<EvalRunDetailRead>("/api/v1/eval/run", {
+      method: "POST",
+      token,
+      body: {
+        dataset_name: payload?.dataset_name ?? "demo_permission_eval",
+        top_k: payload?.top_k ?? 5,
+        seed_demo_cases: payload?.seed_demo_cases ?? true,
+        client_request_id: payload?.client_request_id ?? undefined,
+      },
+      timeoutMs: EVAL_REQUEST_TIMEOUT_MS,
+    });
+  },
+  runEvalAsync(
+    token: string,
+    payload?: { dataset_name?: string; top_k?: number; seed_demo_cases?: boolean; client_request_id?: string },
+  ) {
+    return request<OperationJobRead>("/api/v1/eval/run/async", {
       method: "POST",
       token,
       body: {
@@ -367,9 +448,26 @@ export const api = {
   getEvalRun(token: string, runId: string) {
     return request<EvalRunDetailRead>(`/api/v1/eval/runs/${runId}`, { token });
   },
-  listTraces(token: string, sessionId?: string) {
-    const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
-    return request<TraceLogRead[]>(`/api/v1/observability/traces${query}`, { token });
+  getJob(token: string, jobId: string) {
+    return request<OperationJobRead>(`/api/v1/jobs/${jobId}`, { token });
+  },
+  listTraces(token: string, sessionId?: string, traceType?: string) {
+    const params = new URLSearchParams();
+    if (sessionId) {
+      params.set("session_id", sessionId);
+    }
+    if (traceType) {
+      params.set("trace_type", traceType);
+    }
+    const query = params.toString();
+    return request<TraceLogRead[]>(`/api/v1/observability/traces${query ? `?${query}` : ""}`, { token });
+  },
+  listPermissionAuditTraces(token: string, userId?: string | null, limit = 50) {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (userId) {
+      params.set("user_id", userId);
+    }
+    return request<TraceLogRead[]>(`/api/v1/permissions/audit/traces?${params.toString()}`, { token });
   },
   getTrace(token: string, traceId: string) {
     return request<TraceLogRead>(`/api/v1/observability/traces/${traceId}`, { token });

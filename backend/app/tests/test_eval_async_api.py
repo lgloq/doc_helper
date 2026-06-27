@@ -10,10 +10,13 @@ from sqlalchemy.orm import Session
 from app.core.security import hash_password
 from app.models.eval import EvalCase, EvalResult, EvalRun
 from app.models.enums import RoleName
+from app.models.operation_job import OperationJob
 from app.models.role import Role
 from app.models.user import User
 from app.schemas.eval import EvalRunRequest
 from app.services.eval.service import EvalService
+from app.services.jobs.service import JOB_TYPE_EVAL_RUN, OperationJobService
+from app.workers.settings import ARQ_QUEUE_EVAL
 
 
 def _create_user(db_session: Session, role: Role, email: str, password: str) -> User:
@@ -59,12 +62,12 @@ def _seed_admin_and_case(db_session: Session) -> User:
     return admin
 
 
-def test_async_eval_returns_queued_run_and_reuses_client_request_id(client: TestClient, db_session: Session) -> None:
+def test_async_eval_returns_operation_job_and_reuses_client_request_id(client: TestClient, db_session: Session) -> None:
     _seed_admin_and_case(db_session)
     admin_token = _login(client, "admin@example.com", "admin-pass")
     fake_job = FakeJob()
 
-    with patch("app.services.eval.async_service.create_pool", new_callable=AsyncMock) as mock_pool:
+    with patch("app.services.jobs.service.create_pool", new_callable=AsyncMock) as mock_pool:
         mock_redis = AsyncMock()
         mock_redis.enqueue_job = AsyncMock(return_value=fake_job)
         mock_redis.aclose = AsyncMock()
@@ -84,17 +87,74 @@ def test_async_eval_returns_queued_run_and_reuses_client_request_id(client: Test
     first_payload = first.json()
     second_payload = second.json()
     assert first_payload["id"] == second_payload["id"]
+    assert first_payload["job_type"] == "eval_run"
     assert first_payload["status"] == "queued"
-    assert first_payload["results"] == []
-    assert first_payload["summary_json"]["client_request_id"] == "eval-async-request-1"
-    assert first_payload["summary_json"]["client_request_status"] == "queued"
-    assert first_payload["summary_json"]["requested_top_k"] == 4
-    assert len(first_payload["summary_json"]["selected_case_ids"]) == 1
-    assert first_payload["summary_json"]["job_id"] == fake_job.job_id
+    assert first_payload["client_request_id"] == "eval-async-request-1"
+    assert first_payload["arq_job_id"] == fake_job.job_id
+    assert first_payload["resource_type"] == "eval_run"
+    assert first_payload["resource_id"] == second_payload["resource_id"]
+    assert first_payload["request_payload"]["dataset_name"] == "async_eval_dataset"
+    assert first_payload["request_payload"]["top_k"] == 4
+    assert first_payload["request_payload"]["client_request_id"] == "eval-async-request-1"
+    assert first_payload["request_payload"]["case_ids"] == []
     assert mock_redis.enqueue_job.await_count == 1
+    assert mock_redis.enqueue_job.await_args.kwargs["_queue_name"] == ARQ_QUEUE_EVAL
 
     runs = db_session.query(EvalRun).filter(EvalRun.dataset_name == "async_eval_dataset").all()
     assert len(runs) == 1
+    assert runs[0].status == "queued"
+    assert runs[0].total_cases == 1
+    assert runs[0].summary_json["client_request_id"] == "eval-async-request-1"
+    assert runs[0].summary_json["client_request_status"] == "queued"
+
+
+def test_async_eval_raced_existing_job_discards_duplicate_queued_run(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+) -> None:
+    admin = _seed_admin_and_case(db_session)
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    existing_job = OperationJob(
+        job_type=JOB_TYPE_EVAL_RUN,
+        status="queued",
+        user_id=admin.id,
+        client_request_id="eval-race-request-1",
+        resource_type="eval_run",
+        resource_id=str(uuid4()),
+        request_payload={
+            "dataset_name": "async_eval_dataset",
+            "case_ids": [],
+            "top_k": 4,
+            "seed_demo_cases": False,
+            "client_request_id": "eval-race-request-1",
+            "run_id": str(uuid4()),
+        },
+    )
+    db_session.add(existing_job)
+    db_session.commit()
+    db_session.refresh(existing_job)
+
+    monkeypatch.setattr(OperationJobService, "_find_existing_job", lambda *args, **kwargs: None)
+    monkeypatch.setattr(OperationJobService, "_create_job", lambda *args, **kwargs: (existing_job, False))
+
+    with patch("app.services.jobs.service.create_pool", new_callable=AsyncMock) as mock_pool:
+        response = client.post(
+            "/api/v1/eval/run/async",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={
+                "dataset_name": "async_eval_dataset",
+                "top_k": 4,
+                "seed_demo_cases": False,
+                "client_request_id": "eval-race-request-1",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == str(existing_job.id)
+    mock_pool.assert_not_awaited()
+    runs = db_session.query(EvalRun).filter(EvalRun.dataset_name == "async_eval_dataset").all()
+    assert runs == []
 
 
 def test_execute_queued_eval_run_completes_selected_cases(db_session: Session, monkeypatch) -> None:
@@ -146,11 +206,12 @@ def test_execute_queued_eval_run_completes_selected_cases(db_session: Session, m
     assert len(completed.results) == 1
     assert completed.results[0].overall_pass is True
 
+
 def test_async_eval_enqueue_failure_marks_run_failed(client: TestClient, db_session: Session) -> None:
     _seed_admin_and_case(db_session)
     admin_token = _login(client, "admin@example.com", "admin-pass")
 
-    with patch("app.services.eval.async_service.create_pool", new_callable=AsyncMock) as mock_pool:
+    with patch("app.services.jobs.service.create_pool", new_callable=AsyncMock) as mock_pool:
         mock_pool.side_effect = RuntimeError("redis unavailable")
         response = client.post(
             "/api/v1/eval/run/async",

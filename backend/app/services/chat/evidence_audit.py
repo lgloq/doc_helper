@@ -8,6 +8,26 @@ from typing import Any
 
 SUPPORTED_THRESHOLD = 0.75
 PARTIAL_THRESHOLD = 0.5
+NUMBERED_LIST_INTRO_RE = re.compile(
+    r"^[^。！？!?；;\n]{2,220}[:：]\s*"
+    r"(?P<marker>"
+    r"(?:[（(]?\d{1,2}[）)]\s*)|"
+    r"(?:\d{1,2}[、)]\s*)|"
+    r"(?:\d{1,2}[.．](?!\d)\s*)|"
+    r"(?:[（(]?[一二三四五六七八九十]+[）)、.．]\s*)"
+    r")"
+    r"(?P<body>.+)$"
+)
+STRUCTURED_KEY_PREFIX_MODIFIERS = (
+    "正式",
+    "最终",
+    "实际",
+    "对应",
+    "相关",
+    "当前",
+    "本次",
+    "该",
+)
 
 
 def build_evidence_audit(answer_text: str, selected_chunks: list[Any]) -> dict:
@@ -46,6 +66,7 @@ def build_evidence_audit(answer_text: str, selected_chunks: list[Any]) -> dict:
                             "document_title": payload["document_title"],
                             "version_number": payload["version_number"],
                             "location": payload["location"],
+                            "evidence_excerpt": _select_support_excerpt(claim["text"], payload["snippet_text"]),
                         }
                     ],
                 }
@@ -144,6 +165,7 @@ def _strip_citation_markers(text: str) -> str:
 
 def _clean_claim_candidate(text: str) -> str:
     cleaned = text.strip(" \t\r\n，,。；;：:")
+    cleaned = _strip_numbered_list_intro(cleaned)
     cleaned = re.sub(r"^根据当前可访问文档中的证据[，,]?", "", cleaned)
     cleaned = re.sub(r"^当前可访问文档中的证据[，,]?", "", cleaned)
     cleaned = re.sub(r"^《[^》]{1,120}》(?:里|中)?", "", cleaned)
@@ -157,6 +179,13 @@ def _clean_claim_candidate(text: str) -> str:
     cleaned = re.sub(r"^(?:第一|第二|第三|第四|第五|第六|第七|第八|其一|其二|其三|一是|二是|三是)[，,:：]?", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ，,。；;：:")
     return cleaned
+
+
+def _strip_numbered_list_intro(text: str) -> str:
+    match = NUMBERED_LIST_INTRO_RE.match(text)
+    if not match:
+        return text
+    return match.group("body").strip(" \t\r\n，,。；;：:")
 
 
 def _looks_like_factual_claim(text: str) -> bool:
@@ -231,6 +260,15 @@ def _evidence_payloads(chunks: list[Any]) -> list[dict]:
         document_id = _read_attr(chunk, "document_id")
         document_title = _read_attr(chunk, "document_title")
         version_number = _read_attr(chunk, "version_number")
+        content = _read_attr(chunk, "content")
+        preview = _read_attr(chunk, "preview")
+        snippet_text = (
+            str(content).strip()
+            if isinstance(content, str) and content.strip()
+            else str(preview).strip()
+            if isinstance(preview, str) and preview.strip()
+            else ""
+        )
         payloads.append(
             {
                 "rank": index,
@@ -240,6 +278,7 @@ def _evidence_payloads(chunks: list[Any]) -> list[dict]:
                 "version_number": version_number,
                 "location": _location_label(chunk),
                 "text": " ".join(parts),
+                "snippet_text": snippet_text,
             }
         )
     return payloads
@@ -262,6 +301,38 @@ def _location_label(chunk: Any) -> str | None:
     if chunk_index is not None:
         return f"分块 {chunk_index}"
     return None
+
+
+def _select_support_excerpt(claim_text: str, evidence_text: str, max_length: int = 220) -> str | None:
+    cleaned = re.sub(r"\s+", " ", evidence_text or "").strip()
+    if not cleaned:
+        return None
+
+    units = _extract_table_row_evidence_units(cleaned)
+    if not units:
+        units = [
+            unit.strip()
+            for unit in re.split(r"(?<=[。！？!?；;])\s+|\n+", cleaned)
+            if unit.strip()
+        ]
+    if not units:
+        units = [cleaned]
+
+    best_unit = units[0]
+    best_score = -1.0
+    for unit in units:
+        score = _score_claim_against_evidence(claim_text, unit)["score"]
+        if score > best_score:
+            best_score = score
+            best_unit = unit
+    return _truncate_excerpt(best_unit, max_length)
+
+
+def _truncate_excerpt(text: str, max_length: int) -> str:
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    if len(cleaned) <= max_length:
+        return cleaned
+    return f"{cleaned[: max_length - 1].rstrip()}..."
 
 
 def _score_claim_against_evidence(claim_text: str, evidence_text: str) -> dict:
@@ -379,8 +450,12 @@ def _score_structured_claim_support(claim_text: str, evidence_text: str) -> tupl
         best_pair_score = 0.0
         claim_key_tokens = _extract_support_tokens(claim_key)
         claim_value_tokens = _extract_support_tokens(claim_value)
+        claim_key_canonical = _canonical_structured_key(claim_key)
         for evidence_key, evidence_value in evidence_pairs:
             key_score = _token_recall(claim_key_tokens, _extract_support_tokens(evidence_key))
+            evidence_key_canonical = _canonical_structured_key(evidence_key)
+            if claim_key_canonical and claim_key_canonical == evidence_key_canonical:
+                key_score = 1.0
             value_norm = _normalize_match_text(claim_value)
             evidence_value_norm = _normalize_match_text(evidence_value)
             if value_norm and value_norm in evidence_value_norm:
@@ -395,6 +470,19 @@ def _score_structured_claim_support(claim_text: str, evidence_text: str) -> tupl
 
     score = sum(pair_scores) / len(pair_scores)
     return _clamp_score(score), [f"structured_pair_support={_round_score(score)}"]
+
+
+def _canonical_structured_key(text: str) -> str:
+    normalized = _normalize_match_text(text)
+    changed = True
+    while changed:
+        changed = False
+        for modifier in STRUCTURED_KEY_PREFIX_MODIFIERS:
+            if normalized.startswith(modifier) and len(normalized) > len(modifier) + 1:
+                normalized = normalized[len(modifier) :]
+                changed = True
+                break
+    return normalized
 
 
 def _extract_key_value_pairs(text: str) -> list[tuple[str, str]]:

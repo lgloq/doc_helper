@@ -11,6 +11,7 @@ from app.core.security import hash_password
 from app.models.enums import RoleName
 from app.models.role import Role
 from app.models.user import User
+from app.workers.settings import ARQ_QUEUE_INGEST
 
 
 def _create_user(db_session: Session, role: Role, email: str, password: str) -> User:
@@ -32,28 +33,11 @@ def _login(client: TestClient, email: str, password: str) -> str:
     return response.json()["access_token"]
 
 
-class FakeRedis:
-    """模拟 Redis 客户端，用于测试 ARQ 任务提交。"""
-
-    def __init__(self):
-        self.jobs: dict[str, str] = {}
-
-    async def set(self, key: str, value: str, ex: int | None = None):
-        self.jobs[key] = value
-
-    async def get(self, key: str) -> str | None:
-        return self.jobs.get(key)
-
-    async def aclose(self):
-        pass
-
-
 class FakeJob:
     job_id: str = "test-job-" + uuid4().hex[:8]
 
 
-def test_async_ingest_returns_immediately(client: TestClient, db_session: Session) -> None:
-    """异步入库接口应立即返回任务信息，不阻塞等待。"""
+def test_async_ingest_returns_operation_job_and_reuses_client_request_id(client: TestClient, db_session: Session) -> None:
     admin_role = Role(name=RoleName.ADMIN, description="Admin")
     db_session.add(admin_role)
     db_session.flush()
@@ -72,32 +56,42 @@ def test_async_ingest_returns_immediately(client: TestClient, db_session: Sessio
     document_id = upload_response.json()["document"]["id"]
     version_id = upload_response.json()["version"]["id"]
 
-    fake_redis = FakeRedis()
     fake_job = FakeJob()
+    payload = {"version_id": version_id, "client_request_id": "ingest-request-1"}
 
-    with patch("app.services.ingestion.async_service.create_pool", new_callable=AsyncMock) as mock_pool:
+    with patch("app.services.jobs.service.create_pool", new_callable=AsyncMock) as mock_pool:
         mock_redis = AsyncMock()
-        mock_redis.set = fake_redis.set
-        mock_redis.get = fake_redis.get
-        mock_redis.aclose = fake_redis.aclose
         mock_redis.enqueue_job = AsyncMock(return_value=fake_job)
+        mock_redis.aclose = AsyncMock()
         mock_pool.return_value = mock_redis
 
-        response = client.post(
+        first = client.post(
             f"/api/v1/documents/{document_id}/ingest/async",
             headers={"Authorization": f"Bearer {admin_token}"},
-            json={"version_id": version_id},
+            json=payload,
+        )
+        second = client.post(
+            f"/api/v1/documents/{document_id}/ingest/async",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json=payload,
         )
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["document_id"] == document_id
-    assert payload["document_version_id"] == version_id
-    assert payload["job_id"] == fake_job.job_id
-    assert payload["ingest_status"] == "processing"
-    assert "异步" in payload["message"]
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_payload = first.json()
+    second_payload = second.json()
+    assert first_payload["id"] == second_payload["id"]
+    assert first_payload["job_type"] == "document_ingest"
+    assert first_payload["status"] == "queued"
+    assert first_payload["client_request_id"] == "ingest-request-1"
+    assert first_payload["resource_type"] == "document_version"
+    assert first_payload["resource_id"] == version_id
+    assert first_payload["arq_job_id"] == fake_job.job_id
+    assert first_payload["request_payload"]["document_id"] == document_id
+    assert first_payload["request_payload"]["document_version_id"] == version_id
+    assert mock_redis.enqueue_job.await_count == 1
+    assert mock_redis.enqueue_job.await_args.kwargs["_queue_name"] == ARQ_QUEUE_INGEST
 
-    # 验证版本状态已更新为 PROCESSING
     versions_response = client.get(
         f"/api/v1/documents/{document_id}/versions",
         headers={"Authorization": f"Bearer {admin_token}"},
@@ -107,7 +101,6 @@ def test_async_ingest_returns_immediately(client: TestClient, db_session: Sessio
 
 
 def test_async_ingest_requires_admin(client: TestClient, db_session: Session) -> None:
-    """非管理员用户应无法提交异步入库任务。"""
     admin_role = Role(name=RoleName.ADMIN, description="Admin")
     viewer_role = Role(name=RoleName.VIEWER, description="Viewer")
     db_session.add_all([admin_role, viewer_role])
@@ -117,8 +110,6 @@ def test_async_ingest_requires_admin(client: TestClient, db_session: Session) ->
     db_session.commit()
 
     viewer_token = _login(client, "viewer@example.com", "viewer-pass")
-
-    # 先用 admin 上传文档
     admin_token = _login(client, "admin@example.com", "admin-pass")
     upload_response = client.post(
         "/api/v1/documents/upload",
@@ -128,7 +119,6 @@ def test_async_ingest_requires_admin(client: TestClient, db_session: Session) ->
     )
     document_id = upload_response.json()["document"]["id"]
 
-    # viewer 尝试异步入库
     response = client.post(
         f"/api/v1/documents/{document_id}/ingest/async",
         headers={"Authorization": f"Bearer {viewer_token}"},
@@ -137,7 +127,6 @@ def test_async_ingest_requires_admin(client: TestClient, db_session: Session) ->
 
 
 def test_async_ingest_rejects_duplicate_processing(client: TestClient, db_session: Session) -> None:
-    """同一版本不应被重复提交异步任务。"""
     admin_role = Role(name=RoleName.ADMIN, description="Admin")
     db_session.add(admin_role)
     db_session.flush()
@@ -155,18 +144,14 @@ def test_async_ingest_rejects_duplicate_processing(client: TestClient, db_sessio
     document_id = upload_response.json()["document"]["id"]
     version_id = upload_response.json()["version"]["id"]
 
-    fake_redis = FakeRedis()
     fake_job = FakeJob()
 
-    with patch("app.services.ingestion.async_service.create_pool", new_callable=AsyncMock) as mock_pool:
+    with patch("app.services.jobs.service.create_pool", new_callable=AsyncMock) as mock_pool:
         mock_redis = AsyncMock()
-        mock_redis.set = fake_redis.set
-        mock_redis.get = fake_redis.get
-        mock_redis.aclose = fake_redis.aclose
         mock_redis.enqueue_job = AsyncMock(return_value=fake_job)
+        mock_redis.aclose = AsyncMock()
         mock_pool.return_value = mock_redis
 
-        # 第一次提交应成功
         first = client.post(
             f"/api/v1/documents/{document_id}/ingest/async",
             headers={"Authorization": f"Bearer {admin_token}"},
@@ -174,7 +159,6 @@ def test_async_ingest_rejects_duplicate_processing(client: TestClient, db_sessio
         )
         assert first.status_code == 200
 
-        # 第二次提交应被拒绝（版本状态已经是 PROCESSING）
         second = client.post(
             f"/api/v1/documents/{document_id}/ingest/async",
             headers={"Authorization": f"Bearer {admin_token}"},
@@ -188,7 +172,6 @@ def test_async_ingest_restores_version_status_when_enqueue_fails(
     client: TestClient,
     db_session: Session,
 ) -> None:
-    """任务提交失败时应恢复版本状态，避免卡在 processing。"""
     admin_role = Role(name=RoleName.ADMIN, description="Admin")
     db_session.add(admin_role)
     db_session.flush()
@@ -207,7 +190,7 @@ def test_async_ingest_restores_version_status_when_enqueue_fails(
     document_id = upload_response.json()["document"]["id"]
     version_id = upload_response.json()["version"]["id"]
 
-    with patch("app.services.ingestion.async_service.create_pool", new_callable=AsyncMock) as mock_pool:
+    with patch("app.services.jobs.service.create_pool", new_callable=AsyncMock) as mock_pool:
         mock_pool.side_effect = RuntimeError("redis unavailable")
         response = client.post(
             f"/api/v1/documents/{document_id}/ingest/async",

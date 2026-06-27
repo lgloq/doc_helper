@@ -82,7 +82,7 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    container_name: eka-worker
+    container_name: eka-worker-chat
     env_file:
       - ./backend/.env
     depends_on:
@@ -96,6 +96,13 @@ services:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/enterprise_knowledge_assistant
       REDIS_URL: redis://redis:6379/0
       DATA_DIR: /app/backend/data
+      RETRIEVAL_CJK_PYTHON_FALLBACK_MODE: ${RETRIEVAL_CJK_PYTHON_FALLBACK_MODE:-off}
+      RETRIEVAL_CJK_LEXICAL_CACHE_ENABLED: ${RETRIEVAL_CJK_LEXICAL_CACHE_ENABLED:-false}
+      RETRIEVAL_VECTOR_SKIP_WHEN_KEYWORD_HITS_ENABLED: ${RETRIEVAL_VECTOR_SKIP_WHEN_KEYWORD_HITS_ENABLED:-true}
+      RETRIEVAL_VECTOR_SKIP_MIN_KEYWORD_HITS: ${RETRIEVAL_VECTOR_SKIP_MIN_KEYWORD_HITS:-4}
+      RETRIEVAL_VECTOR_IVFFLAT_PROBES: ${RETRIEVAL_VECTOR_IVFFLAT_PROBES:-50}
+      RETRIEVAL_INDEXED_SPARSE_ENABLED: ${RETRIEVAL_INDEXED_SPARSE_ENABLED:-true}
+      RETRIEVAL_CJK_SQL_SPARSE_ENABLED: ${RETRIEVAL_CJK_SQL_SPARSE_ENABLED:-false}
       ENABLE_OCR: "false"
       OCR_LANG: chi_sim+eng
       OCR_MIN_TEXT_CHARS: "40"
@@ -106,7 +113,121 @@ services:
       - ./backend:/app/backend
       - ./scripts:/app/scripts
     command: >
-      python -m arq app.workers.tasks.WorkerSettings
+      python -m arq app.workers.tasks.ChatWorkerSettings
+    working_dir: /app/backend
+
+  worker-eval:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: eka-worker-eval
+    env_file:
+      - ./backend/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: development
+      LOG_LEVEL: INFO
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/enterprise_knowledge_assistant
+      REDIS_URL: redis://redis:6379/0
+      DATA_DIR: /app/backend/data
+      RETRIEVAL_CJK_PYTHON_FALLBACK_MODE: ${RETRIEVAL_CJK_PYTHON_FALLBACK_MODE:-off}
+      RETRIEVAL_CJK_LEXICAL_CACHE_ENABLED: ${RETRIEVAL_CJK_LEXICAL_CACHE_ENABLED:-false}
+      RETRIEVAL_VECTOR_SKIP_WHEN_KEYWORD_HITS_ENABLED: ${RETRIEVAL_VECTOR_SKIP_WHEN_KEYWORD_HITS_ENABLED:-true}
+      RETRIEVAL_VECTOR_SKIP_MIN_KEYWORD_HITS: ${RETRIEVAL_VECTOR_SKIP_MIN_KEYWORD_HITS:-4}
+      RETRIEVAL_VECTOR_IVFFLAT_PROBES: ${RETRIEVAL_VECTOR_IVFFLAT_PROBES:-50}
+      RETRIEVAL_INDEXED_SPARSE_ENABLED: ${RETRIEVAL_INDEXED_SPARSE_ENABLED:-true}
+      RETRIEVAL_CJK_SQL_SPARSE_ENABLED: ${RETRIEVAL_CJK_SQL_SPARSE_ENABLED:-false}
+      ENABLE_OCR: "false"
+      OCR_LANG: chi_sim+eng
+      OCR_MIN_TEXT_CHARS: "40"
+      OCR_IMAGE_DPI: "200"
+      OCR_MAX_PAGES: "30"
+      OCR_MAX_IMAGE_PIXELS: "25000000"
+    volumes:
+      - ./backend:/app/backend
+      - ./scripts:/app/scripts
+    command: >
+      python -m arq app.workers.tasks.EvalWorkerSettings
+    working_dir: /app/backend
+
+  worker-ingest:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: eka-worker-ingest
+    env_file:
+      - ./backend/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: development
+      LOG_LEVEL: INFO
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/enterprise_knowledge_assistant
+      REDIS_URL: redis://redis:6379/0
+      DATA_DIR: /app/backend/data
+      RETRIEVAL_CJK_PYTHON_FALLBACK_MODE: ${RETRIEVAL_CJK_PYTHON_FALLBACK_MODE:-off}
+      RETRIEVAL_CJK_LEXICAL_CACHE_ENABLED: ${RETRIEVAL_CJK_LEXICAL_CACHE_ENABLED:-false}
+      RETRIEVAL_VECTOR_SKIP_WHEN_KEYWORD_HITS_ENABLED: ${RETRIEVAL_VECTOR_SKIP_WHEN_KEYWORD_HITS_ENABLED:-true}
+      RETRIEVAL_VECTOR_SKIP_MIN_KEYWORD_HITS: ${RETRIEVAL_VECTOR_SKIP_MIN_KEYWORD_HITS:-4}
+      RETRIEVAL_VECTOR_IVFFLAT_PROBES: ${RETRIEVAL_VECTOR_IVFFLAT_PROBES:-50}
+      RETRIEVAL_INDEXED_SPARSE_ENABLED: ${RETRIEVAL_INDEXED_SPARSE_ENABLED:-true}
+      RETRIEVAL_CJK_SQL_SPARSE_ENABLED: ${RETRIEVAL_CJK_SQL_SPARSE_ENABLED:-false}
+      ENABLE_OCR: "false"
+      OCR_LANG: chi_sim+eng
+      OCR_MIN_TEXT_CHARS: "40"
+      OCR_IMAGE_DPI: "200"
+      OCR_MAX_PAGES: "30"
+      OCR_MAX_IMAGE_PIXELS: "25000000"
+    volumes:
+      - ./backend:/app/backend
+      - ./scripts:/app/scripts
+    command: >
+      python -m arq app.workers.tasks.IngestWorkerSettings
+    working_dir: /app/backend
+
+  worker-diff:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: eka-worker-diff
+    env_file:
+      - ./backend/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: development
+      LOG_LEVEL: INFO
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/enterprise_knowledge_assistant
+      REDIS_URL: redis://redis:6379/0
+      DATA_DIR: /app/backend/data
+      RETRIEVAL_CJK_PYTHON_FALLBACK_MODE: ${RETRIEVAL_CJK_PYTHON_FALLBACK_MODE:-off}
+      RETRIEVAL_CJK_LEXICAL_CACHE_ENABLED: ${RETRIEVAL_CJK_LEXICAL_CACHE_ENABLED:-false}
+      RETRIEVAL_VECTOR_SKIP_WHEN_KEYWORD_HITS_ENABLED: ${RETRIEVAL_VECTOR_SKIP_WHEN_KEYWORD_HITS_ENABLED:-true}
+      RETRIEVAL_VECTOR_SKIP_MIN_KEYWORD_HITS: ${RETRIEVAL_VECTOR_SKIP_MIN_KEYWORD_HITS:-4}
+      RETRIEVAL_VECTOR_IVFFLAT_PROBES: ${RETRIEVAL_VECTOR_IVFFLAT_PROBES:-50}
+      RETRIEVAL_INDEXED_SPARSE_ENABLED: ${RETRIEVAL_INDEXED_SPARSE_ENABLED:-true}
+      RETRIEVAL_CJK_SQL_SPARSE_ENABLED: ${RETRIEVAL_CJK_SQL_SPARSE_ENABLED:-false}
+      ENABLE_OCR: "false"
+      OCR_LANG: chi_sim+eng
+      OCR_MIN_TEXT_CHARS: "40"
+      OCR_IMAGE_DPI: "200"
+      OCR_MAX_PAGES: "30"
+      OCR_MAX_IMAGE_PIXELS: "25000000"
+    volumes:
+      - ./backend:/app/backend
+      - ./scripts:/app/scripts
+    command: >
+      python -m arq app.workers.tasks.DiffWorkerSettings
     working_dir: /app/backend
 
   frontend:

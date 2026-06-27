@@ -19,6 +19,7 @@ router = APIRouter(prefix="/observability", tags=["observability"])
 def list_traces(
     user_id: UUID | None = Query(default=None),
     session_id: UUID | None = Query(default=None),
+    trace_type: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_db_session),
@@ -29,7 +30,7 @@ def list_traces(
 
     service = ObservabilityService(session)
     effective_user_id = user_id if is_admin else current_user.id
-    return service.list_traces(user_id=effective_user_id, session_id=session_id, limit=limit)
+    return service.list_traces(user_id=effective_user_id, session_id=session_id, trace_type=trace_type, limit=limit)
 
 
 @router.get("/traces/{trace_id}", response_model=TraceLogRead)

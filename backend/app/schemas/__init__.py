@@ -37,6 +37,14 @@ from app.schemas.llm import (
     WorkflowGenerationResult,
 )
 from app.schemas.observability import TraceLogRead
+from app.schemas.permission import (
+    PermissionACLImpactRead,
+    PermissionImpactUserRead,
+    PermissionScopeDocumentRead,
+    PermissionScopeSummaryRead,
+    ProposedACLRead,
+    UserVisibleScopeRead,
+)
 from app.schemas.role import RoleRead
 from app.schemas.search import SearchDebugInfo, SearchRequest, SearchResponse, SearchResultChunk, SearchScoreBreakdown
 from app.schemas.user import UserRead
@@ -106,6 +114,12 @@ __all__ = [
     "EvalFailureModeRead",
     "EvalDashboardRead",
     "TraceLogRead",
+    "PermissionACLImpactRead",
+    "PermissionImpactUserRead",
+    "PermissionScopeDocumentRead",
+    "PermissionScopeSummaryRead",
+    "ProposedACLRead",
+    "UserVisibleScopeRead",
     "RouterAccessibleDocument",
     "RouterDecision",
     "RouterDecisionResult",

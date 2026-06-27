@@ -4,6 +4,12 @@ from arq.connections import RedisSettings
 
 from app.core.config import get_settings
 
+ARQ_QUEUE_DEFAULT = "arq:queue"
+ARQ_QUEUE_CHAT = "arq:queue:chat"
+ARQ_QUEUE_DIFF = "arq:queue:diff"
+ARQ_QUEUE_EVAL = "arq:queue:eval"
+ARQ_QUEUE_INGEST = "arq:queue:ingest"
+
 
 def get_arq_redis_settings() -> RedisSettings:
     """从全局配置派生 ARQ 所需的 Redis 连接参数。"""

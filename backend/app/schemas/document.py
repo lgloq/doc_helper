@@ -37,12 +37,14 @@ class DocumentVersionDetailRead(DocumentVersionRead):
 
 class DocumentIngestRequest(BaseModel):
     version_id: UUID | None = None
+    client_request_id: str | None = Field(default=None, min_length=8, max_length=80)
 
 
 class DocumentDiffRequest(BaseModel):
     from_version_id: UUID
     to_version_id: UUID
     force_refresh: bool = False
+    client_request_id: str | None = Field(default=None, min_length=8, max_length=80)
 
 
 class DocumentDiffChangeRead(BaseModel):
@@ -155,12 +157,6 @@ class IngestionResultRead(BaseModel):
     page_count: int | None = None
 
 
-class AsyncIngestResponse(BaseModel):
-    document_id: UUID
-    document_version_id: UUID
-    job_id: str
-    ingest_status: IngestStatus
-    message: str
 
 
 class DocumentAccessCheckRead(BaseModel):

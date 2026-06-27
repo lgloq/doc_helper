@@ -339,6 +339,7 @@ def build_failure_summary(report: dict[str, Any]) -> dict[str, Any]:
     case_type_counts: Counter[str] = Counter()
     failure_reasons: Counter[str] = Counter()
     failure_modes: Counter[str] = Counter()
+    failure_stages: Counter[str] = Counter()
     for item in results:
         details = item.get("details_json") or {}
         case_type_counts[case_type_key(item)] += 1
@@ -346,6 +347,9 @@ def build_failure_summary(report: dict[str, Any]) -> dict[str, Any]:
             continue
         reason = details.get("human_review", {}).get("reason") or "unknown"
         failure_reasons[reason] += 1
+        diagnosis = details.get("pipeline_diagnosis") or {}
+        if isinstance(diagnosis, dict) and diagnosis.get("stage") and diagnosis.get("stage") != "passed":
+            failure_stages[str(diagnosis.get("stage"))] += 1
         failure_modes[classify_failure(details, item)] += 1
 
     return {
@@ -355,6 +359,7 @@ def build_failure_summary(report: dict[str, Any]) -> dict[str, Any]:
         "case_type_counts": dict(case_type_counts),
         "failure_reason_counts": dict(failure_reasons),
         "failure_mode_counts": dict(failure_modes),
+        "failure_stage_counts": dict(failure_stages),
     }
 
 
@@ -394,12 +399,16 @@ def extract_failure_cases(report: dict[str, Any]) -> list[dict[str, Any]]:
                 },
                 "answer_excerpt": details.get("answer_excerpt"),
                 "trace_id": details.get("trace_id"),
+                "pipeline_diagnosis": details.get("pipeline_diagnosis"),
             }
         )
     return failures
 
 
 def classify_failure(details: dict[str, Any], result: dict[str, Any]) -> str:
+    diagnosis = details.get("pipeline_diagnosis") or {}
+    if isinstance(diagnosis, dict) and diagnosis.get("reason_code"):
+        return str(diagnosis["reason_code"])
     metric_breakdown = details.get("metric_breakdown") or {}
     permission = metric_breakdown.get("permission_isolation") or {}
     retrieval = metric_breakdown.get("retrieval") or {}
@@ -425,7 +434,7 @@ def summary_text(report: dict[str, Any]) -> str:
     lines = [
         f"dataset={report.get('dataset_name')} status={report.get('status')} total={summary.get('total_cases', 0)} pass={summary.get('pass_count', 0)}",
         f"retrieval={summary.get('retrieval_hit_rate_avg', 0)} citation={summary.get('citation_accuracy_avg', 0)} faithfulness={summary.get('answer_faithfulness_avg', 0)} permission={summary.get('permission_isolation_pass_rate', 0)}",
-        f"failures={failure_summary.get('failed_cases', 0)} modes={failure_summary.get('failure_mode_counts', {})}",
+        f"failures={failure_summary.get('failed_cases', 0)} modes={failure_summary.get('failure_mode_counts', {})} stages={failure_summary.get('failure_stage_counts', {})}",
     ]
     return "\n".join(lines)
 

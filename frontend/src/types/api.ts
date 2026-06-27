@@ -239,6 +239,12 @@ export interface SearchDebugInfo {
   query_plan_probe_applied?: boolean;
   query_plan_probe_latency_ms?: number | null;
   query_plan_probe_skipped_reason?: string | null;
+  permission_probe_early_stop_applied?: boolean;
+  permission_probe_target_hint?: string | null;
+  permission_probe_accessible_target_count?: number;
+  permission_probe_inaccessible_target_count?: number;
+  permission_refusal_reason_code?: string | null;
+  permission_refusal_reason?: string | null;
 }
 
 export interface AgentStepRead {
@@ -296,6 +302,7 @@ export interface AnswerSupportCitationRead {
   document_title: string | null;
   version_number: number | null;
   location: string | null;
+  evidence_excerpt?: string | null;
 }
 
 export interface AnswerClaimSupportRead {
@@ -514,6 +521,8 @@ export interface EvalFailureModeRead {
   key: string;
   label: string;
   count: number;
+  stage?: string | null;
+  stage_label?: string | null;
   example_case_names: string[];
 }
 
@@ -523,6 +532,25 @@ export interface EvalDashboardRead {
   trend: EvalTrendPointRead[];
   failure_modes: EvalFailureModeRead[];
   latest_completed_run: EvalRunRead | null;
+}
+export interface OperationJobRead {
+  id: string;
+  job_type: string;
+  status: string;
+  user_id: string;
+  client_request_id: string | null;
+  arq_job_id: string | null;
+  resource_type: string | null;
+  resource_id: string | null;
+  request_payload: Record<string, unknown>;
+  result_payload: Record<string, unknown> | null;
+  error_text: string | null;
+  retry_count: number;
+  queued_at: string;
+  running_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 export interface DocumentAccessCheckRead {
   source: string;
@@ -574,6 +602,85 @@ export interface DocumentAccessDebugRead {
   evaluated_document: DocumentAccessDebugDocumentRead;
   department_context: DocumentAccessDepartmentContextRead;
   checks: DocumentAccessCheckRead[];
+}
+
+export interface PermissionScopeSummaryRead {
+  admin_count: number;
+  owner_count: number;
+  acl_count: number;
+  public_acl_count: number;
+  user_acl_count: number;
+  role_acl_count: number;
+  department_acl_count: number;
+}
+
+export interface PermissionScopeDocumentRead {
+  id: string;
+  title: string;
+  status: DocumentStatus;
+  owner_user_id: string;
+  current_version_id: string | null;
+  can_manage: boolean;
+  reason: string;
+  matched_rule: DocumentAccessMatchedRuleRead | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UserVisibleScopeRead {
+  evaluated_user: DocumentAccessDebugUserRead;
+  department_context: DocumentAccessDepartmentContextRead;
+  visible_document_count: number;
+  manageable_document_count: number;
+  returned_document_count: number;
+  limit: number;
+  permission_summary: PermissionScopeSummaryRead;
+  visible_documents: PermissionScopeDocumentRead[];
+}
+
+export interface ProposedACLRead {
+  principal_type: PrincipalType;
+  user_id: string | null;
+  user_email: string | null;
+  user_full_name: string | null;
+  role_id: string | null;
+  role_name: RoleName | null;
+  team_name: string | null;
+  department_id: string | null;
+  department_path: string | null;
+  can_view: boolean;
+  can_manage: boolean;
+}
+
+export interface PermissionImpactUserRead {
+  id: string;
+  email: string;
+  full_name: string;
+  role_name: string | null;
+  department_id: string | null;
+  department_path: string | null;
+  before_can_view: boolean;
+  after_can_view: boolean;
+  before_can_manage: boolean;
+  after_can_manage: boolean;
+  impact: string;
+  reason: string;
+  matched_rule: DocumentAccessMatchedRuleRead | null;
+}
+
+export interface PermissionACLImpactRead {
+  document_id: string;
+  document_title: string;
+  existing_acl_id: string | null;
+  operation: string;
+  proposed_acl: ProposedACLRead;
+  affected_user_count: number;
+  newly_visible_user_count: number;
+  no_longer_visible_user_count: number;
+  newly_manageable_user_count: number;
+  no_longer_manageable_user_count: number;
+  preview_user_count: number;
+  users_preview: PermissionImpactUserRead[];
 }
 
 export interface TraceLogRead {

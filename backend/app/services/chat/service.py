@@ -23,6 +23,7 @@ from app.schemas.chat import (
     ChatSessionRead,
 )
 from app.schemas.search import SearchDebugInfo
+from app.services.diagnostics import build_trace_pipeline_diagnosis
 from app.services.chat.evidence_audit import build_evidence_audit
 from app.services.llm.orchestrator import CopilotOrchestrator, CopilotRunResult
 from app.services.observability.service import ObservabilityService
@@ -90,7 +91,7 @@ class ChatService:
     def preview_answer(self, actor: User, question: str, top_k: int = 5) -> PreparedChatAnswer:
         return self._prepare_answer(actor, question, top_k, existing_messages=[], session_id=None)
 
-    def create_message(self, actor: User, session_id: UUID, payload: ChatMessageCreate) -> ChatMessageCreateResponse:
+    def create_message(self, actor: User, session_id: UUID, payload: ChatMessageCreate, allow_inflight_client_request: bool = False) -> ChatMessageCreateResponse:
         chat_session = self._get_session_or_404(actor, session_id, include_messages=True)
         existing_messages = list(chat_session.messages)
         client_request_id = self._normalize_client_request_id(payload.client_request_id)
@@ -109,7 +110,7 @@ class ChatService:
                         status_code=status.HTTP_409_CONFLICT,
                         detail="client_request_id 已用于另一条问题。",
                     )
-                if not self._is_stale_processing_request(user_message):
+                if not self._is_stale_processing_request(user_message) and not allow_inflight_client_request:
                     raise HTTPException(
                         status_code=status.HTTP_409_CONFLICT,
                         detail="该问题仍在处理中，请稍后刷新会话查看结果。",
@@ -175,6 +176,13 @@ class ChatService:
 
         assistant_result = prepared.answer_result
         evidence_audit = build_evidence_audit(assistant_result.answer, prepared.selected_chunks)
+        pipeline_diagnosis = build_trace_pipeline_diagnosis(
+            retrieval_debug=prepared.retrieval_response.debug,
+            selected_citation_count=len(prepared.selected_chunks),
+            evidence_audit=evidence_audit,
+            error_text=self._extract_trace_error(prepared),
+            insufficient_evidence=assistant_result.insufficient_evidence,
+        )
         latency_breakdown = self._build_latency_breakdown(prepared, request_latency_ms)
         assistant_metadata = {
             "answer_provider": assistant_result.provider_name,
@@ -190,6 +198,7 @@ class ChatService:
             "agent_steps": [item.model_dump(mode="json") for item in prepared.agent_steps],
             "agent_run_trace": prepared.agent_run_trace.model_dump(mode="json") if prepared.agent_run_trace else None,
             "evidence_audit": evidence_audit,
+            "pipeline_diagnosis": pipeline_diagnosis,
             "latency_breakdown": latency_breakdown,
             "raw_payload": assistant_result.raw_payload,
         }
@@ -257,10 +266,23 @@ class ChatService:
                     "structured_result": prepared.structured_result.model_dump(mode="json"),
                     "agent_steps": [item.model_dump(mode="json") for item in prepared.agent_steps],
                     "agent_run_trace": prepared.agent_run_trace.model_dump(mode="json") if prepared.agent_run_trace else None,
+                    "evidence_audit": evidence_audit,
+                    "pipeline_diagnosis": pipeline_diagnosis,
                 },
             )
         except Exception:
             pass
+
+        if prepared.retrieval_response.debug.permission_probe_early_stop_applied:
+            try:
+                self.observability_service.record_permission_denied_retrieval(
+                    actor=actor,
+                    query_text=payload.content,
+                    retrieval_response=prepared.retrieval_response,
+                    source="chat_api",
+                )
+            except Exception:
+                pass
 
         assistant_citations = [self._serialize_citation(item) for item in hydrated_assistant_message.citations]
         return ChatMessageCreateResponse(

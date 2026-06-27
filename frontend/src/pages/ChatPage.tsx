@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { CitationList } from "../components/CitationList";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { ExecutionTrace } from "../components/ExecutionTrace";
+import { FactEvidencePanel } from "../components/FactEvidencePanel";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 import { useAppContext } from "../context/AppContext";
@@ -14,6 +15,7 @@ import {
   createPendingChatOperation,
   listPendingChatOperations,
   removePendingChatOperation,
+  setPendingOperationJob,
   touchPendingChatOperation,
 } from "../lib/pendingOperations";
 import type {
@@ -29,26 +31,46 @@ import type {
 } from "../types/api";
 
 const GENERIC_SESSION_TITLES = new Set(["新会话", "New Chat"]);
+const CHAT_PENDING_RECOVERY_INTERVAL_MS = 1200;
+
+interface ChatPageCache {
+  sessions: ChatSessionRead[];
+  activeSession: ChatSessionDetailRead | null;
+  selectedCitation: ChatCitationRead | null;
+}
 
 export function ChatPage() {
-  const { token, selectedSessionId, setSelectedSessionId } = useAppContext();
-  const [sessions, setSessions] = useState<ChatSessionRead[]>([]);
-  const [activeSession, setActiveSession] = useState<ChatSessionDetailRead | null>(null);
+  const { token, selectedSessionId, setSelectedSessionId, getPageCache, setPageCache } = useAppContext();
+  const cachedPage = getPageCache<ChatPageCache>("chat");
+  const [sessions, setSessions] = useState<ChatSessionRead[]>(() => cachedPage?.sessions ?? []);
+  const [activeSession, setActiveSession] = useState<ChatSessionDetailRead | null>(() => cachedPage?.activeSession ?? null);
   const [messageDraft, setMessageDraft] = useState("");
   const [pendingSubmission, setPendingSubmission] = useState<{ sessionId: string; content: string; clientRequestId: string } | null>(null);
-  const [selectedCitation, setSelectedCitation] = useState<ChatCitationRead | null>(null);
+  const [pendingChatOperationCount, setPendingChatOperationCount] = useState(0);
+  const [selectedCitation, setSelectedCitation] = useState<ChatCitationRead | null>(() => cachedPage?.selectedCitation ?? null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [creatingSession, setCreatingSession] = useState(false);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [artifactMessage, setArtifactMessage] = useState<string | null>(null);
+  const [sourceSnippetHighlighted, setSourceSnippetHighlighted] = useState(false);
   const threadRef = useRef<HTMLDivElement | null>(null);
+  const sourceSnippetRef = useRef<HTMLElement | null>(null);
   const sessionButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const sourceSnippetHighlightTimeoutRef = useRef<number | null>(null);
   const selectedSessionIdRef = useRef<string | null>(selectedSessionId);
   const sessionListRequestRef = useRef(0);
   const sessionDetailRequestRef = useRef(0);
   selectedSessionIdRef.current = selectedSessionId;
+
+  useEffect(() => {
+    setPageCache<ChatPageCache>("chat", {
+      sessions,
+      activeSession,
+      selectedCitation,
+    });
+  }, [activeSession, selectedCitation, sessions, setPageCache]);
 
   const loadSessions = useCallback(
     async (preferredSessionId?: string | null) => {
@@ -80,47 +102,66 @@ export function ChatPage() {
       return;
     }
     const operations = listPendingChatOperations();
+    setPendingChatOperationCount(operations.length);
     if (!operations.length) {
       return;
     }
 
+    let shouldRefreshSessions = false;
     for (const operation of operations) {
       try {
-        const beforeSession = await api.getChatSession(token, operation.sessionId);
-        if (chatSessionHasCompletedClientRequest(beforeSession, operation.id)) {
-          removePendingChatOperation(operation.id);
-          if (selectedSessionIdRef.current === operation.sessionId) {
-            setActiveSession(beforeSession);
-          }
-          continue;
-        }
-
         if (selectedSessionIdRef.current === operation.sessionId) {
           setPendingSubmission({
             sessionId: operation.sessionId,
             content: operation.content,
             clientRequestId: operation.id,
           });
-          setActiveSession(beforeSession);
         }
 
-        try {
-          await api.sendChatMessage(token, operation.sessionId, operation.content, operation.topK, operation.id);
-        } catch (nextError) {
-          if (nextError instanceof ApiError && nextError.status === 409) {
-            touchPendingChatOperation(operation.id, nextError.message);
+        let jobId = operation.jobId ?? null;
+        if (!jobId) {
+          const submittedJob = await api.sendChatMessageAsync(
+            token,
+            operation.sessionId,
+            operation.content,
+            operation.topK,
+            operation.id,
+          );
+          jobId = submittedJob.id;
+          setPendingOperationJob(operation.id, submittedJob.id);
+          if (submittedJob.status === "queued" || submittedJob.status === "running") {
+            touchPendingChatOperation(operation.id);
             continue;
           }
-          throw nextError;
         }
 
-        const afterSession = await api.getChatSession(token, operation.sessionId);
-        if (chatSessionHasCompletedClientRequest(afterSession, operation.id)) {
+        if (!jobId) {
+          continue;
+        }
+
+        const job = await api.getJob(token, jobId);
+        if (job.status === "queued" || job.status === "running") {
+          touchPendingChatOperation(operation.id, job.error_text ?? undefined);
+          continue;
+        }
+        if (job.status === "failed") {
           removePendingChatOperation(operation.id);
+          shouldRefreshSessions = true;
           setPendingSubmission((current) => (current?.clientRequestId === operation.id ? null : current));
           if (selectedSessionIdRef.current === operation.sessionId) {
-            setActiveSession(afterSession);
-            const latestCitation = [...afterSession.messages]
+            setError(job.error_text ?? "后台问答任务失败。");
+          }
+          continue;
+        }
+
+        const session = await api.getChatSession(token, operation.sessionId);
+        if (chatSessionHasCompletedClientRequest(session, operation.id)) {
+          removePendingChatOperation(operation.id);
+          shouldRefreshSessions = true;
+          setPendingSubmission((current) => (current?.clientRequestId === operation.id ? null : current));
+          if (selectedSessionIdRef.current === operation.sessionId) {
+            setActiveSession(session);
+            const latestCitation = [...session.messages]
               .reverse()
               .flatMap((message) => message.citations)[0] ?? null;
             setSelectedCitation(latestCitation);
@@ -129,11 +170,18 @@ export function ChatPage() {
           touchPendingChatOperation(operation.id);
         }
       } catch (nextError) {
-        touchPendingChatOperation(operation.id, nextError instanceof Error ? nextError.message : "恢复请求失败。");
+        const nextMessage = nextError instanceof Error ? nextError.message : "恢复请求失败。";
+        touchPendingChatOperation(operation.id, nextMessage);
+        if (selectedSessionIdRef.current === operation.sessionId && !(nextError instanceof ApiError && nextError.status === 0)) {
+          setError(nextMessage);
+        }
       }
     }
 
-    await loadSessions(selectedSessionIdRef.current);
+    if (shouldRefreshSessions) {
+      await loadSessions(selectedSessionIdRef.current);
+    }
+    setPendingChatOperationCount(listPendingChatOperations().length);
   }, [loadSessions, token]);
 
   useEffect(() => {
@@ -141,10 +189,20 @@ export function ChatPage() {
   }, [recoverPendingChatRequests]);
 
   useEffect(() => {
+    if (!token || pendingChatOperationCount === 0) {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      void recoverPendingChatRequests();
+    }, CHAT_PENDING_RECOVERY_INTERVAL_MS);
+    return () => window.clearInterval(intervalId);
+  }, [pendingChatOperationCount, recoverPendingChatRequests, token]);
+
+  useEffect(() => {
     if (!token) {
       return;
     }
-    setLoading(true);
+    setLoading(sessions.length === 0);
     loadSessions()
       .then((items) => {
         if (items && !items.length) {
@@ -164,7 +222,6 @@ export function ChatPage() {
     let cancelled = false;
     const sessionId = selectedSessionId;
     const requestId = ++sessionDetailRequestRef.current;
-    setSelectedCitation(null);
     api
       .getChatSession(token, sessionId)
       .then((session) => {
@@ -197,6 +254,30 @@ export function ChatPage() {
     });
     return () => window.cancelAnimationFrame(nextFrame);
   }, [selectedSessionId, sessions]);
+
+  useEffect(() => {
+    return () => {
+      if (sourceSnippetHighlightTimeoutRef.current !== null) {
+        window.clearTimeout(sourceSnippetHighlightTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const handleSelectCitation = useCallback((citation: ChatCitationRead) => {
+    setSelectedCitation(citation);
+    if (sourceSnippetHighlightTimeoutRef.current !== null) {
+      window.clearTimeout(sourceSnippetHighlightTimeoutRef.current);
+    }
+    setSourceSnippetHighlighted(false);
+    window.requestAnimationFrame(() => {
+      sourceSnippetRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      setSourceSnippetHighlighted(true);
+      sourceSnippetHighlightTimeoutRef.current = window.setTimeout(() => {
+        setSourceSnippetHighlighted(false);
+        sourceSnippetHighlightTimeoutRef.current = null;
+      }, 1200);
+    });
+  }, []);
 
   useEffect(() => {
     const hasPendingInActiveSession = Boolean(
@@ -252,6 +333,7 @@ export function ChatPage() {
     const outgoingContent = messageDraft.trim();
     const targetSessionId = selectedSessionId;
     const pendingOperation = createPendingChatOperation({ sessionId: targetSessionId, content: outgoingContent, topK: 5 });
+    setPendingChatOperationCount(listPendingChatOperations().length);
     let keepPendingOperation = false;
     setMessageDraft("");
     setPendingSubmission({ sessionId: targetSessionId, content: outgoingContent, clientRequestId: pendingOperation.id });
@@ -259,30 +341,45 @@ export function ChatPage() {
     setSending(true);
     setError(null);
     try {
-      await api.sendChatMessage(token, targetSessionId, outgoingContent, 5, pendingOperation.id);
+      const submittedJob = await api.sendChatMessageAsync(token, targetSessionId, outgoingContent, 5, pendingOperation.id);
+      setPendingOperationJob(pendingOperation.id, submittedJob.id);
       const refreshedSession = await api.getChatSession(token, targetSessionId);
-      removePendingChatOperation(pendingOperation.id);
-      setActiveSession((current) => {
-        if (selectedSessionIdRef.current !== targetSessionId) {
-          return current;
+      if (chatSessionHasCompletedClientRequest(refreshedSession, pendingOperation.id)) {
+        removePendingChatOperation(pendingOperation.id);
+        setPendingChatOperationCount(listPendingChatOperations().length);
+        setActiveSession((current) => {
+          if (selectedSessionIdRef.current !== targetSessionId) {
+            return current;
+          }
+          return refreshedSession;
+        });
+        if (selectedSessionIdRef.current === targetSessionId) {
+          const latestCitation =
+            [...refreshedSession.messages]
+              .reverse()
+              .flatMap((message) => message.citations)[0] ?? null;
+          setSelectedCitation(latestCitation);
         }
-        return refreshedSession;
-      });
-      if (selectedSessionIdRef.current === targetSessionId) {
-        const latestCitation =
-          [...refreshedSession.messages]
-            .reverse()
-            .flatMap((message) => message.citations)[0] ?? null;
-        setSelectedCitation(latestCitation);
+        await loadSessions(targetSessionId);
+      } else {
+        keepPendingOperation = submittedJob.status === "queued" || submittedJob.status === "running";
+        touchPendingChatOperation(pendingOperation.id);
+        setPendingChatOperationCount(listPendingChatOperations().length);
+        setActiveSession((current) => {
+          if (selectedSessionIdRef.current !== targetSessionId) {
+            return current;
+          }
+          return refreshedSession;
+        });
       }
-      await loadSessions(targetSessionId);
     } catch (nextError) {
-      keepPendingOperation = nextError instanceof ApiError && (nextError.status === 0 || nextError.status === 409);
+      keepPendingOperation = nextError instanceof ApiError && nextError.status === 0;
       if (keepPendingOperation) {
         touchPendingChatOperation(pendingOperation.id, nextError instanceof Error ? nextError.message : undefined);
-        setError("请求仍在后台处理，刷新或切换页面后会自动恢复结果。");
+        setPendingChatOperationCount(listPendingChatOperations().length);
       } else {
         removePendingChatOperation(pendingOperation.id);
+        setPendingChatOperationCount(listPendingChatOperations().length);
         setMessageDraft(outgoingContent);
         setError(nextError instanceof Error ? nextError.message : "发送问题失败。");
       }
@@ -376,12 +473,13 @@ export function ChatPage() {
       pendingDraftContent,
   );
   const visibleCitations = resolveVisibleCitations(
-    activeSession,
+    activeSession && activeSession.id === selectedSessionId ? activeSession : null,
     selectedCitation,
     pendingSessionId,
     selectedSessionId,
   );
-  const displayCitation = selectedCitation ?? visibleCitations[0] ?? null;
+  const displayCitation =
+    visibleCitations.find((citation) => selectedCitation && citation.id === selectedCitation.id) ?? visibleCitations[0] ?? null;
   const showPending = Boolean(
     pendingDraftContent && (pendingMatchesSelectedSession || pendingMatchesActiveSession || pendingFallbackForFreshSession),
   );
@@ -469,7 +567,7 @@ export function ChatPage() {
                   <MessageBubble
                     key={message.id}
                     message={message}
-                    onSelectCitation={(citation) => setSelectedCitation(citation)}
+                    onSelectCitation={handleSelectCitation}
                   />
                 ))}
                 {showPending && !pendingUserAlreadyVisible ? (
@@ -528,11 +626,11 @@ export function ChatPage() {
         <div className="stack chat-side-panel">
           <CitationList
             citations={visibleCitations}
-            onSelect={(citation) => setSelectedCitation(citation as ChatCitationRead)}
+            onSelect={(citation) => handleSelectCitation(citation as ChatCitationRead)}
             selectedCitationId={displayCitation?.id}
             title="引用来源"
           />
-          <section className="panel stack">
+          <section className={`panel stack source-snippet-panel ${sourceSnippetHighlighted ? "is-highlighted" : ""}`} ref={sourceSnippetRef}>
             <div className="panel-header">
               <div className="panel-heading">
                 <h3>来源片段</h3>
@@ -573,6 +671,16 @@ interface MessageDebugInfo {
   targetDocument: string | null;
   refusalReason: string | null;
   artifactType: string | null;
+}
+
+interface PipelineDiagnosisInfo {
+  status: string;
+  stage: string;
+  stage_label: string;
+  reason_code: string;
+  reason_label: string;
+  summary: string;
+  signals: Record<string, unknown>;
 }
 
 function resolveVisibleCitations(
@@ -691,6 +799,32 @@ function chatSessionHasCompletedClientRequest(session: ChatSessionDetailRead, cl
     (message) => message.role === "assistant" && messageClientRequestId(message) === clientRequestId,
   );
 }
+function readPipelineDiagnosis(message: ChatMessageRead): PipelineDiagnosisInfo | null {
+  const metadata = message.message_metadata;
+  if (!metadata || typeof metadata !== "object") {
+    return null;
+  }
+  const payload = (metadata as Record<string, unknown>).pipeline_diagnosis;
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const record = payload as Record<string, unknown>;
+  if (typeof record.stage !== "string" || typeof record.summary !== "string") {
+    return null;
+  }
+  return payload as PipelineDiagnosisInfo;
+}
+
+function pipelineDiagnosisTone(status: string): "neutral" | "success" | "warning" | "danger" | "info" {
+  if (status === "passed") {
+    return "success";
+  }
+  if (status === "failed") {
+    return "danger";
+  }
+  return "warning";
+}
+
 function readEvidenceAudit(message: ChatMessageRead): AnswerEvidenceAuditRead | null {
   const metadata = message.message_metadata;
   if (!metadata || typeof metadata !== "object") {
@@ -705,59 +839,6 @@ function readEvidenceAudit(message: ChatMessageRead): AnswerEvidenceAuditRead | 
     return null;
   }
   return audit as AnswerEvidenceAuditRead;
-}
-
-function evidenceAuditTone(status: string): "neutral" | "success" | "warning" | "danger" | "info" {
-  if (status === "supported") {
-    return "success";
-  }
-  if (status === "partial") {
-    return "warning";
-  }
-  if (status === "needs_review") {
-    return "danger";
-  }
-  return "neutral";
-}
-
-function evidenceAuditLabel(status: string): string {
-  if (status === "supported") {
-    return "已支撑";
-  }
-  if (status === "partial") {
-    return "部分支撑";
-  }
-  if (status === "needs_review") {
-    return "待核实";
-  }
-  return "未抽取";
-}
-
-function claimSupportTone(status: string): "neutral" | "success" | "warning" | "danger" | "info" {
-  if (status === "supported") {
-    return "success";
-  }
-  if (status === "partial") {
-    return "warning";
-  }
-  return "danger";
-}
-
-function claimSupportLabel(status: string): string {
-  if (status === "supported") {
-    return "已支撑";
-  }
-  if (status === "partial") {
-    return "部分支撑";
-  }
-  return "待核实";
-}
-
-function evidenceScoreText(value: number | null): string {
-  if (typeof value !== "number") {
-    return "-";
-  }
-  return `${Math.round(value * 100)}%`;
 }
 
 function resolveSupportCitation(
@@ -826,79 +907,6 @@ function buildCitationDocumentLink(citation: ChatCitationRead): string {
   return `/documents?${params.toString()}`;
 }
 
-interface EvidenceAuditPanelProps {
-  audit: AnswerEvidenceAuditRead;
-  citations: ChatCitationRead[];
-  onSelectCitation: (citation: ChatCitationRead) => void;
-}
-
-function EvidenceAuditPanel({ audit, citations, onSelectCitation }: EvidenceAuditPanelProps) {
-  const [showDetails, setShowDetails] = useState(false);
-  const reviewClaims = audit.claims.filter((claim) => claim.support_status !== "supported");
-  const visibleClaims = showDetails ? audit.claims : reviewClaims.slice(0, 4);
-  const hasHiddenReviewClaims = !showDetails && reviewClaims.length > visibleClaims.length;
-  const shouldShowClaimList = showDetails || reviewClaims.length > 0;
-  const detailLabel = showDetails ? "收起明细" : reviewClaims.length ? "查看全部" : "查看明细";
-
-  return (
-    <div className="evidence-audit">
-      <div className="evidence-audit-summary">
-        <div>
-          <strong>证据核验</strong>
-          <span>
-            已支撑 {audit.supported_count}/{audit.claim_count} · {evidenceScoreText(audit.score)}
-          </span>
-        </div>
-        <div className="evidence-audit-actions">
-          <StatusBadge tone={evidenceAuditTone(audit.status)}>{evidenceAuditLabel(audit.status)}</StatusBadge>
-          <button className="evidence-audit-toggle" onClick={() => setShowDetails((current) => !current)} type="button">
-            {detailLabel}
-          </button>
-        </div>
-      </div>
-      {shouldShowClaimList ? (
-        <div className="evidence-claim-list">
-          {visibleClaims.map((claim) => {
-            const linkedCitations = claim.support_citations
-              .map((support) => resolveSupportCitation(support, citations))
-              .filter((citation): citation is ChatCitationRead => Boolean(citation));
-            return (
-              <div className="evidence-claim" key={`${claim.index}-${claim.text}`}>
-                <div className="evidence-claim-topline">
-                  <span>事实 {claim.index}</span>
-                  <StatusBadge tone={claimSupportTone(claim.support_status)}>
-                    {claimSupportLabel(claim.support_status)} · {evidenceScoreText(claim.support_score)}
-                  </StatusBadge>
-                </div>
-                <p className="evidence-claim-text">{claim.text}</p>
-                <div className="evidence-claim-citations">
-                  {linkedCitations.length ? (
-                    linkedCitations.map((citation) => (
-                      <button
-                        className="evidence-citation-link"
-                        key={citation.id}
-                        onClick={() => onSelectCitation(citation)}
-                        type="button"
-                      >
-                        引用 {citation.rank} · {citation.document_title}
-                      </button>
-                    ))
-                  ) : (
-                    <span className="muted">未关联引用</span>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-          {hasHiddenReviewClaims ? <p className="evidence-audit-note">还有 {reviewClaims.length - visibleClaims.length} 条待核验证据，展开后查看。</p> : null}
-        </div>
-      ) : (
-        <p className="evidence-audit-note">答案中的事实均已关联引用，明细已收起。</p>
-      )}
-    </div>
-  );
-}
-
 interface MessageBubbleProps {
   message: ChatMessageRead;
   onSelectCitation: (citation: ChatCitationRead) => void;
@@ -912,6 +920,7 @@ function MessageBubble({ message, onSelectCitation }: MessageBubbleProps) {
   const retrievalDebug = message.role === "assistant" ? readRetrievalDebug(message) : null;
   const originalSearchQuery = message.role === "assistant" ? readOriginalSearchQuery(message) : null;
   const evidenceAudit = message.role === "assistant" ? readEvidenceAudit(message) : null;
+  const pipelineDiagnosis = message.role === "assistant" ? readPipelineDiagnosis(message) : null;
   return (
     <article className={`message-bubble ${tone}`}>
       <div className="message-meta">
@@ -925,7 +934,26 @@ function MessageBubble({ message, onSelectCitation }: MessageBubbleProps) {
       </div>
       <p>{message.content}</p>
       {evidenceAudit && evidenceAudit.claim_count > 0 ? (
-        <EvidenceAuditPanel audit={evidenceAudit} citations={message.citations} onSelectCitation={onSelectCitation} />
+        <FactEvidencePanel
+          audit={evidenceAudit}
+          title="事实级证据"
+          onSelectCitation={(support) => {
+            const citation = resolveSupportCitation(support, message.citations);
+            if (citation) {
+              onSelectCitation(citation);
+            }
+          }}
+        />
+      ) : null}
+      {pipelineDiagnosis && pipelineDiagnosis.stage !== "passed" ? (
+        <div className="info-block">
+          <div className="list-card-topline">
+            <strong>关键诊断</strong>
+            <StatusBadge tone={pipelineDiagnosisTone(pipelineDiagnosis.status)}>{pipelineDiagnosis.stage_label}</StatusBadge>
+          </div>
+          <p>{pipelineDiagnosis.summary}</p>
+          <p className="muted">{pipelineDiagnosis.reason_label}</p>
+        </div>
       ) : null}
       {debugInfo ? (
         <div className="metadata-grid muted">
@@ -955,7 +983,4 @@ function MessageBubble({ message, onSelectCitation }: MessageBubbleProps) {
     </article>
   );
 }
-
-
-
 

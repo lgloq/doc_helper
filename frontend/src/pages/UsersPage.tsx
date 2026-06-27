@@ -8,8 +8,9 @@ import { SelectField } from "../components/SelectField";
 import { StatusBadge } from "../components/StatusBadge";
 import { useAppContext } from "../context/AppContext";
 import { api } from "../lib/api";
-import { formatRoleName } from "../lib/display";
-import type { DepartmentRead, RoleName, UserRead } from "../types/api";
+import { formatDocumentStatus, formatRoleName } from "../lib/display";
+import { formatDateTime } from "../lib/format";
+import type { DepartmentRead, RoleName, UserRead, UserVisibleScopeRead } from "../types/api";
 
 interface UserDraft {
   email: string;
@@ -31,6 +32,17 @@ interface DepartmentOverviewStats {
   activeCount: number;
   inactiveCount: number;
   roleCounts: Record<RoleName, number>;
+}
+
+interface UsersPageCache {
+  users: UserRead[];
+  departments: DepartmentRead[];
+  activeTab: UsersPageTab;
+  managedUserId: string | null;
+  userFormMode: UserFormMode;
+  userDraft: UserDraft;
+  overviewSelectedId: string | null;
+  selectedManageDepartmentId: string | null;
 }
 
 type UsersPageTab = "manage" | "overview" | "departments";
@@ -256,26 +268,34 @@ function OrgOverviewNode({
 }
 
 export function UsersPage() {
-  const { token, user, refreshMe } = useAppContext();
+  const { token, user, refreshMe, getPageCache, setPageCache } = useAppContext();
   const navigate = useNavigate();
+  const cachedPage = getPageCache<UsersPageCache>("users");
 
-  const [users, setUsers] = useState<UserRead[]>([]);
-  const [departments, setDepartments] = useState<DepartmentRead[]>([]);
+  const [users, setUsers] = useState<UserRead[]>(() => cachedPage?.users ?? []);
+  const [departments, setDepartments] = useState<DepartmentRead[]>(() => cachedPage?.departments ?? []);
   const [departmentSaving, setDepartmentSaving] = useState(false);
   const [userSaving, setUserSaving] = useState(false);
   const [userDeleting, setUserDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<UsersPageTab>("manage");
+  const [activeTab, setActiveTab] = useState<UsersPageTab>(() => cachedPage?.activeTab ?? "manage");
   const [userSearch, setUserSearch] = useState("");
   const [userStatusFilter, setUserStatusFilter] = useState<UserStatusFilter>("all");
-  const [managedUserId, setManagedUserId] = useState<string | null>(null);
-  const [userFormMode, setUserFormMode] = useState<UserFormMode>("create");
-  const [userDraft, setUserDraft] = useState<UserDraft>(() => createEmptyUserDraft());
-  const [overviewSelectedId, setOverviewSelectedId] = useState<string | null>(UNASSIGNED_SELECTION);
+  const [managedUserId, setManagedUserId] = useState<string | null>(() => cachedPage?.managedUserId ?? null);
+  const [userFormMode, setUserFormMode] = useState<UserFormMode>(() => cachedPage?.userFormMode ?? "create");
+  const [userDraft, setUserDraft] = useState<UserDraft>(() => cachedPage?.userDraft ?? createEmptyUserDraft());
+  const [userScope, setUserScope] = useState<UserVisibleScopeRead | null>(null);
+  const [userScopeLoading, setUserScopeLoading] = useState(false);
+  const [userScopeError, setUserScopeError] = useState<string | null>(null);
+  const [overviewSelectedId, setOverviewSelectedId] = useState<string | null>(
+    () => cachedPage?.overviewSelectedId ?? UNASSIGNED_SELECTION,
+  );
   const [overviewQuery, setOverviewQuery] = useState("");
   const [overviewExpanded, setOverviewExpanded] = useState<Set<string>>(new Set());
-  const [selectedManageDepartmentId, setSelectedManageDepartmentId] = useState<string | null>(null);
+  const [selectedManageDepartmentId, setSelectedManageDepartmentId] = useState<string | null>(
+    () => cachedPage?.selectedManageDepartmentId ?? null,
+  );
   const [departmentFormMode, setDepartmentFormMode] = useState<DepartmentFormMode>("detail");
   const [departmentNameDraft, setDepartmentNameDraft] = useState("");
   const [departmentParentDraft, setDepartmentParentDraft] = useState<string | null>(null);
@@ -416,6 +436,29 @@ export function UsersPage() {
   }, [userSearch, userStatusFilter, users]);
 
   useEffect(() => {
+    setPageCache<UsersPageCache>("users", {
+      users,
+      departments,
+      activeTab,
+      managedUserId,
+      userFormMode,
+      userDraft,
+      overviewSelectedId,
+      selectedManageDepartmentId,
+    });
+  }, [
+    activeTab,
+    departments,
+    managedUserId,
+    overviewSelectedId,
+    selectedManageDepartmentId,
+    setPageCache,
+    userDraft,
+    userFormMode,
+    users,
+  ]);
+
+  useEffect(() => {
     if (!isAdmin) {
       navigate("/documents", { replace: true });
     }
@@ -461,6 +504,40 @@ export function UsersPage() {
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    if (!token || userFormMode !== "edit" || !selectedManagedUser) {
+      setUserScope(null);
+      setUserScopeError(null);
+      setUserScopeLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setUserScopeLoading(true);
+    setUserScopeError(null);
+    api
+      .getUserVisibleScope(token, selectedManagedUser.id, 12)
+      .then((scope) => {
+        if (!cancelled) {
+          setUserScope(scope);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setUserScope(null);
+          setUserScopeError(err instanceof Error ? err.message : "加载用户可见范围失败");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setUserScopeLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedManagedUser, token, userFormMode]);
 
   const clearFeedback = () => {
     setError(null);
@@ -897,6 +974,50 @@ export function UsersPage() {
                 <strong>{formatRoleName(userDraft.role_name)}</strong>
               </div>
             </div>
+
+            {userFormMode === "edit" ? (
+              <div className="info-block permission-scope-panel">
+                <div className="list-card-topline">
+                  <strong>可见文档范围</strong>
+                  {userScopeLoading ? <StatusBadge tone="neutral">加载中</StatusBadge> : null}
+                  {userScope ? <StatusBadge tone="info">{userScope.visible_document_count} 份可见</StatusBadge> : null}
+                </div>
+                {userScopeError ? <p className="muted">{userScopeError}</p> : null}
+                {userScope ? (
+                  <>
+                    <div className="metadata-grid permission-scope-stats">
+                      <span>可管理：{userScope.manageable_document_count}</span>
+                      <span>所有者命中：{userScope.permission_summary.owner_count}</span>
+                      <span>ACL 命中：{userScope.permission_summary.acl_count}</span>
+                      <span>公开：{userScope.permission_summary.public_acl_count}</span>
+                      <span>部门：{userScope.permission_summary.department_acl_count}</span>
+                      <span>角色：{userScope.permission_summary.role_acl_count}</span>
+                      <span>指定用户：{userScope.permission_summary.user_acl_count}</span>
+                    </div>
+                    <div className="permission-scope-documents">
+                      {userScope.visible_documents.length === 0 ? (
+                        <p className="muted">该用户暂无可见文档。</p>
+                      ) : null}
+                      {userScope.visible_documents.map((document) => (
+                        <div className="list-card compact-list-card" key={document.id}>
+                          <div className="list-card-topline">
+                            <strong>{document.title}</strong>
+                            <StatusBadge tone={document.can_manage ? "warning" : "neutral"}>
+                              {document.can_manage ? "可管理" : "可查看"}
+                            </StatusBadge>
+                          </div>
+                          <p className="muted">
+                            {formatDocumentStatus(document.status)} · {document.reason} · {formatDateTime(document.updated_at)}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : !userScopeLoading && !userScopeError ? (
+                  <p className="muted">选择用户后查看该用户可访问的企业文档范围。</p>
+                ) : null}
+              </div>
+            ) : null}
 
             <DepartmentTreeSelect
               className="user-form-department-tree"

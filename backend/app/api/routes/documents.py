@@ -10,7 +10,6 @@ from app.db.session import get_db_session
 from app.models.enums import DocumentStatus
 from app.models.user import User
 from app.schemas.document import (
-    AsyncIngestResponse,
     ChunkRead,
     DocumentAccessDebugRead,
     DocumentACLCreate,
@@ -26,10 +25,11 @@ from app.schemas.document import (
     DocumentVersionRead,
     IngestionResultRead,
 )
+from app.schemas.operation_job import OperationJobRead
 from app.services.diff.service import DocumentDiffService
 from app.services.documents.service import DocumentService
-from app.services.ingestion.async_service import AsyncIngestionService
 from app.services.ingestion.service import DocumentIngestionService
+from app.services.jobs.service import OperationJobService
 from app.services.permissions.service import PermissionFilterBuilder
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -122,6 +122,17 @@ def summarize_document_diff(
     return service.summarize_diff(current_user, document_id, payload)
 
 
+@router.post("/{document_id}/diff/summary/async", response_model=OperationJobRead)
+async def summarize_document_diff_async(
+    document_id: UUID,
+    payload: DocumentDiffRequest,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_db_session),
+) -> OperationJobRead:
+    service = OperationJobService(session)
+    return await service.enqueue_document_diff_summary(current_user, document_id, payload)
+
+
 @router.get("/{document_id}", response_model=DocumentRead)
 def get_document(
     document_id: UUID,
@@ -143,18 +154,15 @@ def ingest_document(
     return service.ingest_document(current_user, document_id, payload)
 
 
-@router.post("/{document_id}/ingest/async", response_model=AsyncIngestResponse)
+@router.post("/{document_id}/ingest/async", response_model=OperationJobRead)
 async def ingest_document_async(
     document_id: UUID,
     payload: DocumentIngestRequest | None = None,
     current_user: User = Depends(require_admin),
     session: Session = Depends(get_db_session),
-) -> AsyncIngestResponse:
-    """异步入库：提交后台任务后立即返回，通过轮询版本状态获取进度。"""
-    service = AsyncIngestionService(session)
-    version_id = payload.version_id if payload else None
-    result = await service.enqueue_ingest(current_user, document_id, version_id)
-    return AsyncIngestResponse.model_validate(result)
+) -> OperationJobRead:
+    service = OperationJobService(session)
+    return await service.enqueue_document_ingest(current_user, document_id, payload)
 
 
 @router.get("/{document_id}/chunks", response_model=list[ChunkRead])

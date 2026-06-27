@@ -404,4 +404,69 @@ def test_evidence_audit_links_answer_claims_to_selected_citations() -> None:
     assert audit["claims"][0]["support_score"] == 1.0
     assert audit["claims"][0]["support_citations"][0]["rank"] == 1
     assert audit["claims"][0]["support_citations"][0]["document_title"] == "客户事故响应指南"
+    assert "五分钟内建立事故沟通渠道" in audit["claims"][0]["support_citations"][0]["evidence_excerpt"]
     assert audit["claims"][1]["support_status"] == "unsupported"
+
+
+def test_evidence_audit_strips_document_intro_from_first_numbered_claim() -> None:
+    chunk = _chunk(
+        content=(
+            "十三、附录：v2 最小发布检查清单 "
+            "1. 确认发布负责人、变更窗口和事故指挥人。"
+            "2. 在预发环境验证部署产物，并确认监控告警已生效。"
+        ),
+        document_title="平台发布手册",
+    )
+
+    audit = build_evidence_audit(
+        "平台发布检查清单要求（v2最小发布检查清单）如下："
+        " 1. 确认发布负责人、变更窗口和事故指挥人。"
+        " 2. 在预发环境验证部署产物，并确认监控告警已生效。",
+        [chunk],
+    )
+
+    assert audit["claim_count"] == 2
+    assert audit["supported_count"] == 2
+    assert audit["partial_count"] == 0
+    assert audit["claims"][0]["text"] == "确认发布负责人、变更窗口和事故指挥人"
+    assert audit["claims"][0]["support_status"] == "supported"
+    assert audit["claims"][0]["support_score"] == 1.0
+
+
+def test_evidence_audit_does_not_treat_decimal_after_colon_as_list_marker() -> None:
+    chunk = _chunk(
+        content="费用阈值为：1.5万元以内，超过后必须提交复核。",
+        document_title="费用审批规范",
+    )
+
+    audit = build_evidence_audit(
+        "费用阈值为：1.5万元以内，超过后必须提交复核。",
+        [chunk],
+    )
+
+    assert audit["claim_count"] == 1
+    assert audit["claims"][0]["text"] == "费用阈值为：1.5万元以内，超过后必须提交复核"
+    assert audit["claims"][0]["support_status"] == "supported"
+    assert audit["claims"][0]["support_score"] == 1.0
+
+
+def test_evidence_audit_normalizes_structured_key_prefix_modifiers() -> None:
+    chunk = _chunk(
+        content=(
+            "Table row: 数据导出审批与脱敏矩阵. 数据范围=包含客户手机号; "
+            "审批人=管理员; 处理时限=2 个工作日; 脱敏要求=保留前三位和后四位."
+        ),
+        document_title="运营审批与客户响应规范",
+    )
+
+    audit = build_evidence_audit(
+        "正式审批人为管理员。处理时限为2 个工作日。脱敏要求为保留前三位和后四位。",
+        [chunk],
+    )
+
+    assert audit["claim_count"] == 3
+    assert audit["supported_count"] == 3
+    assert audit["partial_count"] == 0
+    assert audit["claims"][0]["text"] == "正式审批人为管理员"
+    assert audit["claims"][0]["support_status"] == "supported"
+    assert audit["claims"][0]["support_score"] == 1.0

@@ -113,6 +113,8 @@ class SearchDebugInfo(BaseModel):
     permission_probe_target_hint: str | None = None
     permission_probe_accessible_target_count: int = 0
     permission_probe_inaccessible_target_count: int = 0
+    permission_refusal_reason_code: str | None = None
+    permission_refusal_reason: str | None = None
 
 
 class SearchResponse(BaseModel):

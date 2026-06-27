@@ -11,6 +11,7 @@ from app.models import (
     EvalRun,
     FAQEntry,
     MessageCitation,
+    OperationJob,
     Role,
     TaskItem,
     TraceLog,
@@ -38,4 +39,5 @@ __all__ = [
     "EvalRun",
     "EvalResult",
     "TraceLog",
+    "OperationJob",
 ]

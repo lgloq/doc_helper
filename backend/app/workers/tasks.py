@@ -17,17 +17,24 @@ from app.core.config import get_settings
 from app.models.chunk import Chunk
 from app.models.enums import IngestStatus
 from app.repositories.document_repository import ChunkRepository, DocumentRepository
-from app.services.ingestion.chunking import SemanticChunker
 from app.services.eval.service import EvalService
+from app.services.ingestion.chunking import SemanticChunker
 from app.services.ingestion.embeddings import EmbeddingProviderFactory
 from app.services.ingestion.file_storage import LocalDocumentStorage
 from app.services.ingestion.parsers import DocumentParser
 from app.services.ingestion.search_index import build_lexical_search_text
-from app.workers.settings import get_arq_redis_settings
+from app.services.jobs.service import OperationJobService
+from app.workers.settings import (
+    ARQ_QUEUE_CHAT,
+    ARQ_QUEUE_DEFAULT,
+    ARQ_QUEUE_DIFF,
+    ARQ_QUEUE_EVAL,
+    ARQ_QUEUE_INGEST,
+    get_arq_redis_settings,
+)
 
 logger = logging.getLogger(__name__)
 
-# Worker 进程级数据库连接（进程启动时初始化）
 _engine = None
 _SessionLocal: sessionmaker | None = None
 
@@ -55,7 +62,7 @@ async def shutdown(ctx: dict[str, Any]) -> None:
 
 
 async def run_ingest_document(ctx: dict[str, Any], document_id: str, version_id: str) -> dict[str, Any]:
-    """在后台执行文档解析 → 切片 → embedding 全流程。"""
+    """兼容旧任务名：在后台执行文档解析 → 切片 → embedding 全流程。"""
     logger.info("开始异步入库: document=%s version=%s", document_id, version_id)
 
     doc_uuid = UUID(document_id)
@@ -83,9 +90,7 @@ async def run_ingest_document(ctx: dict[str, Any], document_id: str, version_id:
 
         parsed_document = parser.parse(storage.resolve_path(version.storage_path))
         chunk_payloads = chunker.chunk_document(parsed_document)
-        embeddings = (
-            embedding_provider.embed_texts([chunk.content for chunk in chunk_payloads]) if chunk_payloads else []
-        )
+        embeddings = embedding_provider.embed_texts([chunk.content for chunk in chunk_payloads]) if chunk_payloads else []
 
         chunk_models = [
             Chunk(
@@ -152,8 +157,29 @@ async def run_ingest_document(ctx: dict[str, Any], document_id: str, version_id:
     finally:
         session.close()
 
+
+async def run_operation_job(ctx: dict[str, Any], job_id: str) -> dict[str, Any]:
+    """统一后台 job 入口。"""
+    logger.info("开始统一后台任务: job_id=%s", job_id)
+    session = _get_session()
+    try:
+        service = OperationJobService(session)
+        detail = await service.execute_job(UUID(job_id))
+        logger.info("统一后台任务完成: job_id=%s status=%s", job_id, detail.status)
+        return {
+            "status": detail.status,
+            "job_id": str(detail.id),
+            "job_type": detail.job_type,
+        }
+    except Exception as exc:
+        logger.exception("统一后台任务失败: job_id=%s", job_id)
+        return {"status": "failed", "job_id": job_id, "error": str(exc)}
+    finally:
+        session.close()
+
+
 async def run_eval_run(ctx: dict[str, Any], run_id: str) -> dict[str, Any]:
-    """在后台执行已创建的评测 run。"""
+    """兼容旧任务名：在后台执行已创建的评测 run。"""
     logger.info("开始异步评测: run_id=%s", run_id)
     session = _get_session()
     try:
@@ -178,9 +204,42 @@ async def run_eval_run(ctx: dict[str, Any], run_id: str) -> dict[str, Any]:
     finally:
         session.close()
 
-# ARQ Worker 配置
+
 class WorkerSettings:
-    functions = [run_ingest_document, run_eval_run]
+    queue_name = ARQ_QUEUE_DEFAULT
+    functions = [run_operation_job, run_ingest_document, run_eval_run]
+    redis_settings = get_arq_redis_settings()
+    on_startup = startup
+    on_shutdown = shutdown
+
+
+class ChatWorkerSettings(WorkerSettings):
+    queue_name = ARQ_QUEUE_CHAT
+    functions = [run_operation_job]
+    redis_settings = get_arq_redis_settings()
+    on_startup = startup
+    on_shutdown = shutdown
+
+
+class DiffWorkerSettings(WorkerSettings):
+    queue_name = ARQ_QUEUE_DIFF
+    functions = [run_operation_job]
+    redis_settings = get_arq_redis_settings()
+    on_startup = startup
+    on_shutdown = shutdown
+
+
+class EvalWorkerSettings(WorkerSettings):
+    queue_name = ARQ_QUEUE_EVAL
+    functions = [run_operation_job]
+    redis_settings = get_arq_redis_settings()
+    on_startup = startup
+    on_shutdown = shutdown
+
+
+class IngestWorkerSettings(WorkerSettings):
+    queue_name = ARQ_QUEUE_INGEST
+    functions = [run_operation_job, run_ingest_document]
     redis_settings = get_arq_redis_settings()
     on_startup = startup
     on_shutdown = shutdown

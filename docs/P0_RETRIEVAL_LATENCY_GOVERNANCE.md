@@ -1,4 +1,4 @@
-# P0 Retrieval Latency Governance
+# P0 检索时延治理
 
 日期：2026-06-24
 

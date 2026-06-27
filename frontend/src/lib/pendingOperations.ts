@@ -1,26 +1,44 @@
-export interface PendingChatOperation {
+export interface PendingOperationBase {
   id: string;
+  createdAt: number;
+  updatedAt: number;
+  jobId?: string;
+  lastError?: string;
+}
+
+export interface PendingChatOperation extends PendingOperationBase {
   type: "chat_message";
   sessionId: string;
   content: string;
   topK: number;
-  createdAt: number;
-  updatedAt: number;
-  lastError?: string;
 }
 
-export interface PendingEvalOperation {
-  id: string;
+export interface PendingEvalOperation extends PendingOperationBase {
   type: "eval_run";
   datasetName: string;
   topK: number;
   seedDemoCases: boolean;
-  createdAt: number;
-  updatedAt: number;
-  lastError?: string;
 }
 
-type PendingOperation = PendingChatOperation | PendingEvalOperation;
+export interface PendingDiffSummaryOperation extends PendingOperationBase {
+  type: "document_diff_summary";
+  documentId: string;
+  fromVersionId: string;
+  toVersionId: string;
+  forceRefresh: boolean;
+}
+
+export interface PendingDocumentIngestOperation extends PendingOperationBase {
+  type: "document_ingest";
+  documentId: string;
+  versionId: string;
+}
+
+type PendingOperation =
+  | PendingChatOperation
+  | PendingEvalOperation
+  | PendingDiffSummaryOperation
+  | PendingDocumentIngestOperation;
 
 const STORAGE_KEY = "eka_pending_operations_v1";
 
@@ -45,42 +63,73 @@ function writePendingOperations(items: PendingOperation[]) {
 }
 
 function isPendingOperation(value: unknown): value is PendingOperation {
-  return isPendingChatOperation(value) || isPendingEvalOperation(value);
+  return (
+    isPendingChatOperation(value) ||
+    isPendingEvalOperation(value) ||
+    isPendingDiffSummaryOperation(value) ||
+    isPendingDocumentIngestOperation(value)
+  );
+}
+
+function isPendingBaseOperation(value: unknown): value is PendingOperationBase {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const item = value as Partial<PendingOperationBase>;
+  return typeof item.id === "string" && typeof item.createdAt === "number" && typeof item.updatedAt === "number";
 }
 
 function isPendingChatOperation(value: unknown): value is PendingChatOperation {
-  if (!value || typeof value !== "object") {
+  if (!isPendingBaseOperation(value) || (value as Partial<PendingChatOperation>).type !== "chat_message") {
     return false;
   }
   const item = value as Partial<PendingChatOperation>;
-  return (
-    item.type === "chat_message" &&
-    typeof item.id === "string" &&
-    typeof item.sessionId === "string" &&
-    typeof item.content === "string" &&
-    typeof item.topK === "number"
-  );
+  return typeof item.sessionId === "string" && typeof item.content === "string" && typeof item.topK === "number";
 }
 
 function isPendingEvalOperation(value: unknown): value is PendingEvalOperation {
-  if (!value || typeof value !== "object") {
+  if (!isPendingBaseOperation(value) || (value as Partial<PendingEvalOperation>).type !== "eval_run") {
     return false;
   }
   const item = value as Partial<PendingEvalOperation>;
+  return typeof item.datasetName === "string" && typeof item.topK === "number" && typeof item.seedDemoCases === "boolean";
+}
+
+function isPendingDiffSummaryOperation(value: unknown): value is PendingDiffSummaryOperation {
+  if (!isPendingBaseOperation(value) || (value as Partial<PendingDiffSummaryOperation>).type !== "document_diff_summary") {
+    return false;
+  }
+  const item = value as Partial<PendingDiffSummaryOperation>;
   return (
-    item.type === "eval_run" &&
-    typeof item.id === "string" &&
-    typeof item.datasetName === "string" &&
-    typeof item.topK === "number" &&
-    typeof item.seedDemoCases === "boolean"
+    typeof item.documentId === "string" &&
+    typeof item.fromVersionId === "string" &&
+    typeof item.toVersionId === "string" &&
+    typeof item.forceRefresh === "boolean"
   );
 }
 
-function createOperationId(prefix: "chat" | "eval"): string {
+function isPendingDocumentIngestOperation(value: unknown): value is PendingDocumentIngestOperation {
+  if (!isPendingBaseOperation(value) || (value as Partial<PendingDocumentIngestOperation>).type !== "document_ingest") {
+    return false;
+  }
+  const item = value as Partial<PendingDocumentIngestOperation>;
+  return typeof item.documentId === "string" && typeof item.versionId === "string";
+}
+
+function createOperationId(prefix: "chat" | "eval" | "diff" | "ingest"): string {
   if (typeof window.crypto?.randomUUID === "function") {
     return `${prefix}-${window.crypto.randomUUID()}`;
   }
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function upsertPendingOperation(operation: PendingOperation) {
+  writePendingOperations([...readPendingOperations().filter((item) => item.id !== operation.id), operation]);
+}
+
+function updatePendingOperation(operationId: string, updater: (item: PendingOperation) => PendingOperation) {
+  const items = readPendingOperations();
+  writePendingOperations(items.map((item) => (item.id === operationId ? updater(item) : item)));
 }
 
 export function createPendingChatOperation(input: { sessionId: string; content: string; topK: number }): PendingChatOperation {
@@ -94,7 +143,7 @@ export function createPendingChatOperation(input: { sessionId: string; content: 
     createdAt: now,
     updatedAt: now,
   };
-  writePendingOperations([...readPendingOperations().filter((item) => item.id !== operation.id), operation]);
+  upsertPendingOperation(operation);
   return operation;
 }
 
@@ -125,12 +174,7 @@ export function createPendingEvalOperation(input: {
     createdAt: now,
     updatedAt: now,
   };
-  writePendingOperations([
-    ...readPendingOperations().filter(
-      (item) => item.id !== operation.id && !(item.type === "eval_run" && item.datasetName === operation.datasetName),
-    ),
-    operation,
-  ]);
+  upsertPendingOperation(operation);
   return operation;
 }
 
@@ -148,13 +192,84 @@ export function removePendingEvalOperation(operationId: string) {
   removePendingOperation(operationId);
 }
 
-function touchPendingOperation(operationId: string, lastError?: string) {
-  const items = readPendingOperations();
-  writePendingOperations(
-    items.map((item) =>
-      item.id === operationId ? { ...item, updatedAt: Date.now(), lastError: lastError ?? item.lastError } : item,
-    ),
+export function createPendingDiffSummaryOperation(input: {
+  documentId: string;
+  fromVersionId: string;
+  toVersionId: string;
+  forceRefresh: boolean;
+}): PendingDiffSummaryOperation {
+  const now = Date.now();
+  const operation: PendingDiffSummaryOperation = {
+    id: createOperationId("diff"),
+    type: "document_diff_summary",
+    documentId: input.documentId,
+    fromVersionId: input.fromVersionId,
+    toVersionId: input.toVersionId,
+    forceRefresh: input.forceRefresh,
+    createdAt: now,
+    updatedAt: now,
+  };
+  upsertPendingOperation(operation);
+  return operation;
+}
+
+export function listPendingDiffSummaryOperations(documentId?: string): PendingDiffSummaryOperation[] {
+  return readPendingOperations().filter(
+    (item): item is PendingDiffSummaryOperation =>
+      item.type === "document_diff_summary" && (!documentId || item.documentId === documentId),
   );
+}
+
+export function touchPendingDiffSummaryOperation(operationId: string, lastError?: string) {
+  touchPendingOperation(operationId, lastError);
+}
+
+export function removePendingDiffSummaryOperation(operationId: string) {
+  removePendingOperation(operationId);
+}
+
+export function createPendingDocumentIngestOperation(input: {
+  documentId: string;
+  versionId: string;
+}): PendingDocumentIngestOperation {
+  const now = Date.now();
+  const operation: PendingDocumentIngestOperation = {
+    id: createOperationId("ingest"),
+    type: "document_ingest",
+    documentId: input.documentId,
+    versionId: input.versionId,
+    createdAt: now,
+    updatedAt: now,
+  };
+  upsertPendingOperation(operation);
+  return operation;
+}
+
+export function listPendingDocumentIngestOperations(documentId?: string): PendingDocumentIngestOperation[] {
+  return readPendingOperations().filter(
+    (item): item is PendingDocumentIngestOperation =>
+      item.type === "document_ingest" && (!documentId || item.documentId === documentId),
+  );
+}
+
+export function touchPendingDocumentIngestOperation(operationId: string, lastError?: string) {
+  touchPendingOperation(operationId, lastError);
+}
+
+export function removePendingDocumentIngestOperation(operationId: string) {
+  removePendingOperation(operationId);
+}
+
+export function setPendingOperationJob(operationId: string, jobId: string) {
+  updatePendingOperation(operationId, (item) => ({ ...item, jobId, updatedAt: Date.now() }));
+}
+
+function touchPendingOperation(operationId: string, lastError?: string) {
+  updatePendingOperation(operationId, (item) => ({
+    ...item,
+    updatedAt: Date.now(),
+    lastError: lastError ?? item.lastError,
+  }));
 }
 
 function removePendingOperation(operationId: string) {

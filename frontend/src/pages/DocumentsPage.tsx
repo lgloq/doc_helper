@@ -15,8 +15,16 @@ import {
   formatPrincipalType,
   formatRoleName,
 } from "../lib/display";
-import { api } from "../lib/api";
+import { ApiError, api } from "../lib/api";
 import { formatBytes, formatDateTime, truncate } from "../lib/format";
+import {
+  createPendingDocumentIngestOperation,
+  listPendingDocumentIngestOperations,
+  removePendingDocumentIngestOperation,
+  setPendingOperationJob,
+  touchPendingDocumentIngestOperation,
+} from "../lib/pendingOperations";
+import type { PendingDocumentIngestOperation } from "../lib/pendingOperations";
 import { canManageDocumentLibrary } from "../lib/permissions";
 import type {
   ChunkRead,
@@ -26,6 +34,7 @@ import type {
   DocumentRead,
   DocumentVersionRead,
   IngestionResultRead,
+  PermissionACLImpactRead,
   PrincipalType,
   RoleName,
   UserRead,
@@ -78,18 +87,55 @@ const ACL_GROUP_LABELS: Record<PrincipalType, string> = {
   public: "公开",
 };
 
+function formatAclImpactOperation(value: string): string {
+  const labels: Record<string, string> = {
+    create: "新增授权",
+    update: "更新授权",
+    revoke: "撤销授权",
+    unchanged: "无权限变化",
+    noop: "无现有授权",
+  };
+  return labels[value] ?? value;
+}
+
+interface DocumentsPageCache {
+  documents: DocumentRead[];
+  departments: DepartmentRead[];
+  selectedDocumentId: string | null;
+  selectedDocument: DocumentRead | null;
+  versions: DocumentVersionRead[];
+  selectedVersionId: string | null;
+  selectedVersionDetail: DocumentVersionRead | null;
+  aclEntries: DocumentACLRead[];
+  chunks: ChunkRead[];
+}
+
+function formatAclUserImpact(value: string): string {
+  const labels: Record<string, string> = {
+    newly_visible: "新增可见",
+    no_longer_visible: "不再可见",
+    newly_manageable: "新增管理",
+    no_longer_manageable: "移除管理",
+    changed: "权限变化",
+  };
+  return labels[value] ?? value;
+}
+
 export function DocumentsPage() {
-  const { token, user } = useAppContext();
+  const { token, user, getPageCache, setPageCache } = useAppContext();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [documents, setDocuments] = useState<DocumentRead[]>([]);
-  const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
-  const [selectedDocument, setSelectedDocument] = useState<DocumentRead | null>(null);
-  const [versions, setVersions] = useState<DocumentVersionRead[]>([]);
-  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
-  const [selectedVersionDetail, setSelectedVersionDetail] = useState<DocumentVersionRead | null>(null);
-  const [aclEntries, setAclEntries] = useState<DocumentACLRead[]>([]);
-  const [departments, setDepartments] = useState<DepartmentRead[]>([]);
-  const [chunks, setChunks] = useState<ChunkRead[]>([]);
+  const cachedPage = getPageCache<DocumentsPageCache>("documents");
+  const [documents, setDocuments] = useState<DocumentRead[]>(() => cachedPage?.documents ?? []);
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(() => cachedPage?.selectedDocumentId ?? null);
+  const [selectedDocument, setSelectedDocument] = useState<DocumentRead | null>(() => cachedPage?.selectedDocument ?? null);
+  const [versions, setVersions] = useState<DocumentVersionRead[]>(() => cachedPage?.versions ?? []);
+  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(() => cachedPage?.selectedVersionId ?? null);
+  const [selectedVersionDetail, setSelectedVersionDetail] = useState<DocumentVersionRead | null>(
+    () => cachedPage?.selectedVersionDetail ?? null,
+  );
+  const [aclEntries, setAclEntries] = useState<DocumentACLRead[]>(() => cachedPage?.aclEntries ?? []);
+  const [departments, setDepartments] = useState<DepartmentRead[]>(() => cachedPage?.departments ?? []);
+  const [chunks, setChunks] = useState<ChunkRead[]>(() => cachedPage?.chunks ?? []);
   const [loading, setLoading] = useState(false);
   const [isDocumentListCollapsed, setIsDocumentListCollapsed] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -101,11 +147,15 @@ export function DocumentsPage() {
   const [aclForm, setAclForm] = useState<AclFormState>(defaultAclForm);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [latestIngestion, setLatestIngestion] = useState<IngestionResultRead | null>(null);
+  const [pendingIngestOperations, setPendingIngestOperations] = useState<PendingDocumentIngestOperation[]>([]);
   const [showDebugPanel, setShowDebugPanel] = useState(false);
   const [aclUsers, setAclUsers] = useState<UserRead[]>([]);
   const [aclUsersLoading, setAclUsersLoading] = useState(false);
   const [aclUserSearch, setAclUserSearch] = useState("");
   const [collapsedAclGroups, setCollapsedAclGroups] = useState<Set<PrincipalType>>(new Set());
+  const [aclImpact, setAclImpact] = useState<PermissionACLImpactRead | null>(null);
+  const [aclImpactLoading, setAclImpactLoading] = useState(false);
+  const [aclImpactError, setAclImpactError] = useState<string | null>(null);
   const aclEditorRef = useRef<HTMLFormElement | null>(null);
   const canManageLibrary = canManageDocumentLibrary(user);
   const showPermissionsPanel = canManageLibrary;
@@ -123,10 +173,35 @@ export function DocumentsPage() {
   const requestedChunkId = searchParams.get("chunkId");
 
   useEffect(() => {
+    setPageCache<DocumentsPageCache>("documents", {
+      documents,
+      departments,
+      selectedDocumentId,
+      selectedDocument,
+      versions,
+      selectedVersionId,
+      selectedVersionDetail,
+      aclEntries,
+      chunks,
+    });
+  }, [
+    aclEntries,
+    chunks,
+    departments,
+    documents,
+    selectedDocument,
+    selectedDocumentId,
+    selectedVersionDetail,
+    selectedVersionId,
+    setPageCache,
+    versions,
+  ]);
+
+  useEffect(() => {
     if (!token) {
       return;
     }
-    setLoading(true);
+    setLoading(documents.length === 0);
     setError(null);
     Promise.all([
       api.listDocuments(token),
@@ -327,7 +402,115 @@ export function DocumentsPage() {
     setSelectedVersionId(preferredVersionId ?? document.current_version_id ?? nextVersions[0]?.id ?? null);
   }
 
+  function syncPendingIngestOperations(nextDocumentId: string | null = selectedDocumentId) {
+    setPendingIngestOperations(listPendingDocumentIngestOperations(nextDocumentId ?? undefined));
+  }
 
+  async function acceptPendingIngestJob(operation: PendingDocumentIngestOperation, jobId: string, prefix: string) {
+    if (!token) {
+      return;
+    }
+    setPendingOperationJob(operation.id, jobId);
+    updateDocumentLocation(operation.documentId, operation.versionId, null);
+    await refreshSelectedDocument(operation.documentId, operation.versionId);
+    const job = await api.getJob(token, jobId);
+    if (job.status === "queued" || job.status === "running") {
+      touchPendingDocumentIngestOperation(operation.id, job.error_text ?? undefined);
+      setActionMessage(`${prefix}，入库仍在后台处理。`);
+      syncPendingIngestOperations(operation.documentId);
+      return;
+    }
+    if (job.status === "failed") {
+      removePendingDocumentIngestOperation(operation.id);
+      await refreshSelectedDocument(operation.documentId, operation.versionId);
+      setActionMessage(job.error_text ?? "入库失败。");
+      syncPendingIngestOperations(operation.documentId);
+      return;
+    }
+
+    const ingestion = job.result_payload as IngestionResultRead | null;
+    if (ingestion) {
+      setLatestIngestion(ingestion);
+      setActionMessage(`${prefix}，入库完成，共生成 ${ingestion.chunk_count} 个分块。`);
+    } else {
+      setActionMessage(`${prefix}，入库完成。`);
+    }
+    removePendingDocumentIngestOperation(operation.id);
+    await refreshSelectedDocument(operation.documentId, operation.versionId);
+    syncPendingIngestOperations(operation.documentId);
+  }
+
+  async function recoverPendingIngestJobs(documentId: string | null = selectedDocumentId) {
+    if (!token || !documentId) {
+      return;
+    }
+    const operations = listPendingDocumentIngestOperations(documentId);
+    setPendingIngestOperations(operations);
+    if (!operations.length) {
+      return;
+    }
+
+    for (const operation of operations) {
+      try {
+        if (operation.jobId) {
+          await acceptPendingIngestJob(operation, operation.jobId, "已恢复入库任务");
+          continue;
+        }
+        const job = await api.ingestDocumentAsync(token, operation.documentId, operation.versionId, operation.id);
+        await acceptPendingIngestJob(operation, job.id, "已恢复入库任务");
+      } catch (nextError) {
+        touchPendingDocumentIngestOperation(operation.id, nextError instanceof Error ? nextError.message : "恢复入库失败。");
+        if (nextError instanceof ApiError && nextError.status === 0) {
+          setActionMessage("入库仍在后台处理，刷新后会继续恢复。");
+        } else {
+          removePendingDocumentIngestOperation(operation.id);
+          setActionMessage(nextError instanceof Error ? nextError.message : "恢复入库失败。");
+        }
+        syncPendingIngestOperations(documentId);
+      }
+    }
+  }
+
+  async function submitIngestJob(documentId: string, versionId: string, prefix: string) {
+    if (!token) {
+      return;
+    }
+    const operation = createPendingDocumentIngestOperation({ documentId, versionId });
+    syncPendingIngestOperations(documentId);
+    try {
+      const job = await api.ingestDocumentAsync(token, documentId, versionId, operation.id);
+      await acceptPendingIngestJob(operation, job.id, prefix);
+    } catch (nextError) {
+      await refreshSelectedDocument(documentId, versionId);
+      const keepPendingOperation = nextError instanceof ApiError && nextError.status === 0;
+      if (keepPendingOperation) {
+        touchPendingDocumentIngestOperation(operation.id, nextError instanceof Error ? nextError.message : undefined);
+        setActionMessage(`${prefix}，入库仍在后台处理，刷新后会自动恢复。`);
+      } else {
+        removePendingDocumentIngestOperation(operation.id);
+        setActionMessage(nextError instanceof Error ? nextError.message : "提交入库任务失败。");
+      }
+      syncPendingIngestOperations(documentId);
+    }
+  }
+
+  useEffect(() => {
+    syncPendingIngestOperations(selectedDocumentId);
+    if (!token || !selectedDocumentId) {
+      return;
+    }
+    void recoverPendingIngestJobs(selectedDocumentId);
+  }, [selectedDocumentId, token]);
+
+  useEffect(() => {
+    if (!token || !selectedDocumentId || pendingIngestOperations.length === 0) {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      void recoverPendingIngestJobs(selectedDocumentId);
+    }, 5000);
+    return () => window.clearInterval(intervalId);
+  }, [pendingIngestOperations.length, selectedDocumentId, token]);
   function updateDocumentLocation(documentId: string, versionId?: string | null, chunkId?: string | null) {
     const nextParams = new URLSearchParams(searchParams);
     nextParams.set("documentId", documentId);
@@ -422,6 +605,8 @@ export function DocumentsPage() {
   function selectAclEntryForEditing(entry: DocumentACLRead) {
     setAclForm(createAclFormFromEntry(entry));
     setActionMessage(null);
+    setAclImpact(null);
+    setAclImpactError(null);
     window.requestAnimationFrame(() => {
       aclEditorRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
     });
@@ -429,6 +614,8 @@ export function DocumentsPage() {
 
   function updateAclForm(next: AclFormState) {
     const matchingEntry = findMatchingAclEntry(next);
+    setAclImpact(null);
+    setAclImpactError(null);
     setAclForm(
       matchingEntry
         ? {
@@ -438,6 +625,34 @@ export function DocumentsPage() {
           }
         : next,
     );
+  }
+
+  function buildAclPayload(form: AclFormState) {
+    return {
+      principal_type: form.principal_type,
+      can_view: form.can_view,
+      can_manage: form.can_manage,
+      department_id: form.principal_type === "team" && form.department_id ? form.department_id : undefined,
+      role_name: form.principal_type === "role" ? form.role_name : undefined,
+      user_id: form.principal_type === "user" && form.user_id ? form.user_id : undefined,
+    };
+  }
+
+  async function handleAclImpactPreview() {
+    if (!token || !selectedDocument || !canSubmitAcl) {
+      return;
+    }
+    setAclImpactLoading(true);
+    setAclImpactError(null);
+    try {
+      const impact = await api.analyzeDocumentAclImpact(token, selectedDocument.id, buildAclPayload(aclForm), 20);
+      setAclImpact(impact);
+    } catch (nextError) {
+      setAclImpact(null);
+      setAclImpactError(nextError instanceof Error ? nextError.message : "分析权限影响失败。");
+    } finally {
+      setAclImpactLoading(false);
+    }
   }
 
   async function handleAclDelete(entry: DocumentACLRead) {
@@ -457,6 +672,8 @@ export function DocumentsPage() {
       if (findMatchingAclEntry(aclForm)?.id === entry.id) {
         setAclForm(defaultAclForm);
         setAclUserSearch("");
+        setAclImpact(null);
+        setAclImpactError(null);
       }
       setActionMessage("文档权限已撤销。");
     } catch (nextError) {
@@ -489,23 +706,20 @@ export function DocumentsPage() {
         description: String(form.get("description") || "").trim() || undefined,
         status: uploadStatus,
       });
-      const ingestion = await api.ingestDocument(token, response.document.id, response.version.id);
-      setLatestIngestion(ingestion);
       const nextDocuments = await api.listDocuments(token);
       setDocuments(nextDocuments);
       setSelectedDocumentId(response.document.id);
       updateDocumentLocation(response.document.id, response.version.id, null);
       await refreshSelectedDocument(response.document.id, response.version.id);
+      await submitIngestJob(response.document.id, response.version.id, `已上传文档《${response.document.title}》`);
       formElement.reset();
       setUploadStatus("active");
-      setActionMessage(`已完成上传并入库：${response.document.title}`);
     } catch (nextError) {
       setUploadError(nextError instanceof Error ? nextError.message : "上传失败，请稍后重试。");
     } finally {
       setUploading(false);
     }
   }
-
   async function handleVersionUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!token || !selectedDocument) {
@@ -523,19 +737,16 @@ export function DocumentsPage() {
     setActionMessage(null);
     try {
       const response = await api.uploadDocumentVersion(token, selectedDocument.id, file);
-      const ingestion = await api.ingestDocument(token, selectedDocument.id, response.version.id);
-      setLatestIngestion(ingestion);
       updateDocumentLocation(selectedDocument.id, response.version.id, null);
       await refreshSelectedDocument(selectedDocument.id, response.version.id);
+      await submitIngestJob(selectedDocument.id, response.version.id, `已上传新版本 v${response.version.version_number}`);
       formElement.reset();
-      setActionMessage(`已上传新版本 v${response.version.version_number}，并完成重新入库。`);
     } catch (nextError) {
       setActionMessage(nextError instanceof Error ? nextError.message : "上传新版本失败。");
     } finally {
       setVersionUploading(false);
     }
   }
-
   async function handleAclSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!token || !selectedDocument) {
@@ -548,17 +759,12 @@ export function DocumentsPage() {
       if (matchingAclEntry) {
         await api.deleteDocumentAcl(token, selectedDocument.id, matchingAclEntry.id);
       } else {
-        await api.upsertDocumentAcl(token, selectedDocument.id, {
-          principal_type: aclForm.principal_type,
-          can_view: aclForm.can_view,
-          can_manage: aclForm.can_manage,
-          department_id: aclForm.principal_type === "team" && aclForm.department_id ? aclForm.department_id : undefined,
-          role_name: aclForm.principal_type === "role" ? aclForm.role_name : undefined,
-          user_id: aclForm.principal_type === "user" && aclForm.user_id ? aclForm.user_id : undefined,
-        });
+        await api.upsertDocumentAcl(token, selectedDocument.id, buildAclPayload(aclForm));
       }
       setAclForm(defaultAclForm);
       setAclUserSearch("");
+      setAclImpact(null);
+      setAclImpactError(null);
       await refreshSelectedDocument(selectedDocument.id);
       setActionMessage(shouldRevokeAcl ? "文档权限已撤销。" : "文档访问控制已更新。");
     } catch (nextError) {
@@ -570,12 +776,15 @@ export function DocumentsPage() {
     if (!token || !selectedDocument) {
       return;
     }
+    const targetVersionId = versionId ?? selectedVersionId ?? selectedDocument.current_version_id ?? null;
+    if (!targetVersionId) {
+      setActionMessage("请先选择要重新入库的版本。");
+      return;
+    }
     try {
-      const ingestion = await api.ingestDocument(token, selectedDocument.id, versionId);
-      setLatestIngestion(ingestion);
-      updateDocumentLocation(selectedDocument.id, versionId ?? selectedVersionId ?? selectedDocument.current_version_id ?? null, null);
-      await refreshSelectedDocument(selectedDocument.id, versionId ?? selectedVersionId ?? selectedDocument.current_version_id ?? null);
-      setActionMessage(`入库完成，共生成 ${ingestion.chunk_count} 个分块。`);
+      updateDocumentLocation(selectedDocument.id, targetVersionId, null);
+      await refreshSelectedDocument(selectedDocument.id, targetVersionId);
+      await submitIngestJob(selectedDocument.id, targetVersionId, `已提交《${selectedDocument.title}》重新入库任务`);
     } catch (nextError) {
       setActionMessage(nextError instanceof Error ? nextError.message : "重新入库失败。");
     }
@@ -986,7 +1195,11 @@ export function DocumentsPage() {
                     <label className="inline-checkbox">
                       <input
                         checked={aclForm.can_view}
-                        onChange={(event) => setAclForm((current) => ({ ...current, can_view: event.target.checked }))}
+                        onChange={(event) => {
+                          setAclImpact(null);
+                          setAclImpactError(null);
+                          setAclForm((current) => ({ ...current, can_view: event.target.checked }));
+                        }}
                         type="checkbox"
                       />
                       <span>可查看</span>
@@ -994,14 +1207,62 @@ export function DocumentsPage() {
                     <label className="inline-checkbox">
                       <input
                         checked={aclForm.can_manage}
-                        onChange={(event) => setAclForm((current) => ({ ...current, can_manage: event.target.checked }))}
+                        onChange={(event) => {
+                          setAclImpact(null);
+                          setAclImpactError(null);
+                          setAclForm((current) => ({ ...current, can_manage: event.target.checked }));
+                        }}
                         type="checkbox"
                       />
                       <span>可管理</span>
                     </label>
-                    <button className="primary-button" disabled={!canSubmitAcl} type="submit">
-                      保存权限
-                    </button>
+                    <div className="inline-actions">
+                      <button
+                        className="secondary-button"
+                        disabled={!canSubmitAcl || aclImpactLoading}
+                        onClick={handleAclImpactPreview}
+                        type="button"
+                      >
+                        {aclImpactLoading ? "分析中..." : "分析影响"}
+                      </button>
+                      <button className="primary-button" disabled={!canSubmitAcl} type="submit">
+                        保存权限
+                      </button>
+                    </div>
+                    {aclImpactError ? <p className="muted">{aclImpactError}</p> : null}
+                    {aclImpact ? (
+                      <div className="info-block acl-impact-panel">
+                        <div className="list-card-topline">
+                          <strong>{formatAclImpactOperation(aclImpact.operation)}</strong>
+                          <StatusBadge tone={aclImpact.affected_user_count > 0 ? "warning" : "success"}>
+                            影响 {aclImpact.affected_user_count} 人
+                          </StatusBadge>
+                        </div>
+                        <div className="metadata-grid">
+                          <span>新增可见：{aclImpact.newly_visible_user_count}</span>
+                          <span>移除可见：{aclImpact.no_longer_visible_user_count}</span>
+                          <span>新增管理：{aclImpact.newly_manageable_user_count}</span>
+                          <span>移除管理：{aclImpact.no_longer_manageable_user_count}</span>
+                        </div>
+                        {aclImpact.users_preview.length ? (
+                          <div className="acl-impact-users">
+                            {aclImpact.users_preview.map((item) => (
+                              <div className="list-card compact-list-card" key={item.id}>
+                                <div className="list-card-topline">
+                                  <strong>{item.full_name}</strong>
+                                  <StatusBadge tone="info">{formatAclUserImpact(item.impact)}</StatusBadge>
+                                </div>
+                                <p className="muted">
+                                  {item.email} · {item.department_path ?? "未设置部门"} · {item.reason}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="muted">本次 ACL 设置不会改变任何启用用户的可见或管理权限。</p>
+                        )}
+                      </div>
+                    ) : null}
                   </form>
                 ) : null}
               </>

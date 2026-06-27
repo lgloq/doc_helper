@@ -10,19 +10,40 @@ import { formatConfidence, formatPriority, formatWorkflowStatus } from "../lib/d
 import { formatDateTime } from "../lib/format";
 import type { FAQEntryRead, SourceCitationRead, TaskItemRead, WeeklyReportDraftRead } from "../types/api";
 
+interface ArtifactsPageCache {
+  tasks: TaskItemRead[];
+  reports: WeeklyReportDraftRead[];
+  faqs: FAQEntryRead[];
+  sourceSessionId: string;
+  selectedSources: SourceCitationRead[];
+}
+
 export function ArtifactsPage() {
-  const { token, selectedSessionId } = useAppContext();
-  const [tasks, setTasks] = useState<TaskItemRead[]>([]);
-  const [reports, setReports] = useState<WeeklyReportDraftRead[]>([]);
-  const [faqs, setFaqs] = useState<FAQEntryRead[]>([]);
-  const [sourceSessionId, setSourceSessionId] = useState(selectedSessionId ?? "");
-  const [selectedSources, setSelectedSources] = useState<SourceCitationRead[]>([]);
+  const { token, selectedSessionId, getPageCache, setPageCache } = useAppContext();
+  const cachedPage = getPageCache<ArtifactsPageCache>("artifacts");
+  const [tasks, setTasks] = useState<TaskItemRead[]>(() => cachedPage?.tasks ?? []);
+  const [reports, setReports] = useState<WeeklyReportDraftRead[]>(() => cachedPage?.reports ?? []);
+  const [faqs, setFaqs] = useState<FAQEntryRead[]>(() => cachedPage?.faqs ?? []);
+  const [sourceSessionId, setSourceSessionId] = useState(cachedPage?.sourceSessionId ?? selectedSessionId ?? "");
+  const [selectedSources, setSelectedSources] = useState<SourceCitationRead[]>(() => cachedPage?.selectedSources ?? []);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    setSourceSessionId(selectedSessionId ?? "");
+    if (selectedSessionId) {
+      setSourceSessionId(selectedSessionId);
+    }
   }, [selectedSessionId]);
+
+  useEffect(() => {
+    setPageCache<ArtifactsPageCache>("artifacts", {
+      tasks,
+      reports,
+      faqs,
+      sourceSessionId,
+      selectedSources,
+    });
+  }, [faqs, reports, selectedSources, setPageCache, sourceSessionId, tasks]);
 
   useEffect(() => {
     if (!token) {

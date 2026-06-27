@@ -21,19 +21,25 @@
 - 本地文件存储与文档版本保留
 - 文档级 ACL：支持 `public / user / role / department`，并兼容旧版 `team_name` 数据
 - 基于 PostgreSQL FTS + pgvector 的权限感知混合检索与可配置候选重排
+- 检索性能治理：简单问题跳过不必要重路径，并在 debug / trace 中记录阶段耗时和 skip reason
 - 带 citation、confidence 和拒答策略的引用式问答
+- 答案事实级 evidence audit：展示关键事实、支撑状态和对应证据片段
 - 会话与消息历史持久化
 - 多步骤处理与轻量上下文复用
 - 结构化结果：待办提取、周报草稿、FAQ 草稿
 - 文档版本 diff：原始 diff、摘要和影响提示
-- Eval 服务、固定评测报告、权限隔离测试和前端评测控制台
+- 长任务后台化与恢复：chat、eval、文档入库和 diff 摘要支持刷新 / 切页后恢复
+- 按任务类型拆分的 ARQ 队列与 worker，避免大型评测长期挤占问答
+- Eval 服务、固定评测报告、权限隔离测试、前端评测控制台和 benchmark 分层
+- 检索诊断：对失败 case 归因到权限过滤、候选召回、候选选择、引用覆盖或答案生成
 - Trace 存储、简单 observability API 和基础 Langfuse 接入
-- 用于展示完整流程的 React 前端演示页面
+- 权限审计接口：用户可见范围、ACL 影响分析、越权检索审计和权限拒答原因
+- 覆盖主要流程的 React 前端工作台
 
 ### 暂未实现
 - 企业级 SSO / LDAP / OAuth
 - 多租户隔离与跨组织策略管理
-- 异步任务的生产级监控、重试策略和运维治理
+- 跨队列任务的更完整监控、重试策略、告警和运维治理
 - 低清扫描、旋转拍照、复杂合并单元格、复杂跨页表格和图片型复杂版面的稳定结构化
 - 复杂 Excel、多 sheet XLSX 和合并单元格表格解析
 - Slack / 飞书等外部协作集成
@@ -54,6 +60,10 @@
 - 当前版本既支持当前文档问答，也支持版本 diff 与变更摘要
 - Eval 和 trace 会保留链路结果，便于排查问题和做回归验证
 - 前端可直接展开查看处理轨迹，确认当前请求的工具选择与执行结果
+- 后台操作通过 `operation_jobs` 统一记录状态、结果和失败原因，前端可在刷新或切页后恢复任务
+- pipeline diagnosis 会把失败原因归因到明确阶段，减少只靠分数排查问题
+- 事实级证据面板把答案中的关键事实与引用片段对应起来，便于人工核对支撑关系
+- 管理员可查看用户可见范围、预估 ACL 变更影响，并查看疑似越权检索审计记录
 - OCR 能力保持在 parser 层：图片和扫描页 OCR 结果复用 `ParsedSegment -> chunk -> embedding -> FTS / pgvector -> citation` 链路和现有权限判断。
 - 图片 OCR 会先做轻量降噪：低信息量标签、页码、图号之类的短文本会尽量被过滤，避免污染检索。
 - 图片表格只覆盖规整表格的 best-effort 提取，并增加列对齐校验，尽量避免把图例、流程节点或散点标签误判成表格。
@@ -65,11 +75,13 @@
 - 后端先计算当前用户的可访问文档集合
 - lexical retrieval 和 vector retrieval 只在这个集合内运行
 - 无权限 chunk 不会进入候选集、citation 和 prompt
+- 权限探测类拒答会记录原因码和独立审计 trace，便于管理员后续排查
 
 ### 引用式问答
 - 回答基于检索证据生成
 - 返回 answer、citation、confidence
 - 证据不足时会明确拒答，避免伪造结果
+- evidence audit 会抽取答案中的关键事实，并标记完全支撑、部分支撑或待核实
 
 ### 版本对比
 - 支持两个版本之间的 raw diff
@@ -90,7 +102,8 @@
 
 ### 评测与追踪
 - Eval 支持 retrieval、citation、faithfulness、permission isolation 等指标
-- Trace 记录 query、retrieved chunks、selected citations、token、latency、error
+- Benchmark 分为 `smoke / full / hard / latency`，分别用于冒烟、主回归、难例和性能回归
+- Trace 记录 query、retrieved chunks、selected citations、token、latency、error、阶段耗时和 pipeline diagnosis
 
 ## 适用场景
 - 面向制度、内控、财务披露和表格类企业文档的问答和检索
@@ -104,4 +117,4 @@
 - 完善 Langfuse 埋点覆盖、错误归因和 OpenTelemetry 导出
 - 将本地文件存储替换为 S3 / MinIO，并补齐对象生命周期和访问审计
 - 增加 FAQ 审核流、发布状态和结果回写
-- 增强异步摄取任务的重试、失败恢复、队列监控和运维告警
+- 完善后台任务队列监控、失败重试、告警和运维治理

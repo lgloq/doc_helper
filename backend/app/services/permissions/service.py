@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from fastapi import HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.orm import Session
 
 from app.models.user import User
@@ -58,6 +60,18 @@ class _DocumentAccessEvaluation:
     department_context: _DepartmentContext
     acl_evaluations: list[_AclEvaluation]
     effective_acl_matches: list[_AclEvaluation]
+
+
+@dataclass
+class _ResolvedACLTarget:
+    user_id: UUID | None = None
+    user_email: str | None = None
+    user_full_name: str | None = None
+    role_id: UUID | None = None
+    role_name: object | None = None
+    team_name: str | None = None
+    department_id: UUID | None = None
+    department_path: str | None = None
 
 
 class PermissionFilterBuilder:
@@ -241,6 +255,176 @@ class PermissionFilterBuilder:
         evaluation = self._evaluate_document_access(session, user, document)
         return PermissionDecision(can_view=evaluation.can_view, can_manage=evaluation.can_manage)
 
+    def get_user_visible_scope(self, session: Session, user_id: UUID, *, limit: int = 50):
+        from app.models.document import Document
+        from app.repositories.user_repository import UserRepository
+        from app.schemas.document import DocumentAccessDebugUserRead
+        from app.schemas.permission import PermissionScopeDocumentRead, PermissionScopeSummaryRead, UserVisibleScopeRead
+
+        target_user = UserRepository(session).get_by_id(user_id)
+        if target_user is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在。")
+
+        documents = list(
+            session.scalars(
+                select(Document)
+                .options(
+                    selectinload(Document.acl_entries),
+                    selectinload(Document.current_version),
+                )
+                .order_by(Document.created_at.desc())
+            ).all()
+        )
+        department_context = self._serialize_department_context(target_user, self._build_department_context(session, target_user))
+        evaluated_user = DocumentAccessDebugUserRead(
+            id=target_user.id,
+            email=target_user.email,
+            full_name=target_user.full_name,
+            role_name=target_user.role.name.value if target_user.role else None,
+            department_id=target_user.department_id,
+            department_path=department_context.user_department_path,
+        )
+
+        visible_document_count = 0
+        manageable_document_count = 0
+        summary = PermissionScopeSummaryRead()
+        visible_documents: list[PermissionScopeDocumentRead] = []
+        normalized_limit = max(1, min(int(limit), 200))
+
+        for document in documents:
+            evaluation = self._evaluate_document_access(session, target_user, document)
+            if not evaluation.can_view:
+                continue
+            visible_document_count += 1
+            if evaluation.can_manage:
+                manageable_document_count += 1
+            self._accumulate_scope_summary(summary, evaluation)
+            reason, matched_rule = self._summarize_access_evaluation(evaluation)
+            if len(visible_documents) < normalized_limit:
+                visible_documents.append(
+                    PermissionScopeDocumentRead(
+                        id=document.id,
+                        title=document.title,
+                        status=document.status,
+                        owner_user_id=document.owner_user_id,
+                        current_version_id=document.current_version_id,
+                        can_manage=evaluation.can_manage,
+                        reason=reason,
+                        matched_rule=matched_rule,
+                        created_at=document.created_at,
+                        updated_at=document.updated_at,
+                    )
+                )
+
+        return UserVisibleScopeRead(
+            evaluated_user=evaluated_user,
+            department_context=department_context,
+            visible_document_count=visible_document_count,
+            manageable_document_count=manageable_document_count,
+            returned_document_count=len(visible_documents),
+            limit=normalized_limit,
+            permission_summary=summary,
+            visible_documents=visible_documents,
+        )
+
+    def analyze_acl_impact(self, session: Session, document_id: UUID, payload, *, preview_limit: int = 30):
+        from app.models.document import Document, DocumentACL
+        from app.repositories.document_repository import DocumentRepository
+        from app.repositories.user_repository import UserRepository
+        from app.schemas.permission import PermissionACLImpactRead, PermissionImpactUserRead
+
+        document = DocumentRepository(session).get_by_id(document_id)
+        if document is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文档不存在。")
+
+        resolved_target = self._resolve_acl_target(session, payload)
+        existing_acl = DocumentRepository(session).find_acl_entry(
+            document_id=document.id,
+            principal_type=payload.principal_type,
+            user_id=resolved_target.user_id,
+            role_id=resolved_target.role_id,
+            team_name=resolved_target.team_name,
+            department_id=resolved_target.department_id,
+        )
+        proposed_acl = DocumentACL(
+            document_id=document.id,
+            principal_type=payload.principal_type,
+            user_id=resolved_target.user_id,
+            role_id=resolved_target.role_id,
+            team_name=resolved_target.team_name,
+            department_id=resolved_target.department_id,
+            can_view=payload.can_view,
+            can_manage=payload.can_manage,
+        )
+
+        affected_user_count = 0
+        newly_visible_user_count = 0
+        no_longer_visible_user_count = 0
+        newly_manageable_user_count = 0
+        no_longer_manageable_user_count = 0
+        users_preview: list[PermissionImpactUserRead] = []
+        normalized_preview_limit = max(1, min(int(preview_limit), 100))
+
+        for user in UserRepository(session).list_all(is_active=True):
+            before = self._evaluate_document_access(session, user, document)
+            after = self._evaluate_document_access_with_acl_change(
+                session,
+                user,
+                document,
+                proposed_acl=proposed_acl,
+                existing_acl_id=existing_acl.id if existing_acl else None,
+            )
+            if before.can_view == after.can_view and before.can_manage == after.can_manage:
+                continue
+
+            affected_user_count += 1
+            if not before.can_view and after.can_view:
+                newly_visible_user_count += 1
+            if before.can_view and not after.can_view:
+                no_longer_visible_user_count += 1
+            if not before.can_manage and after.can_manage:
+                newly_manageable_user_count += 1
+            if before.can_manage and not after.can_manage:
+                no_longer_manageable_user_count += 1
+
+            if len(users_preview) < normalized_preview_limit:
+                reason, matched_rule = self._summarize_access_evaluation(after)
+                impact = self._classify_permission_impact(before, after)
+                department_context = self._build_department_context(session, user)
+                users_preview.append(
+                    PermissionImpactUserRead(
+                        id=user.id,
+                        email=user.email,
+                        full_name=user.full_name,
+                        role_name=user.role.name.value if user.role else None,
+                        department_id=user.department_id,
+                        department_path=department_context.user_department_path,
+                        before_can_view=before.can_view,
+                        after_can_view=after.can_view,
+                        before_can_manage=before.can_manage,
+                        after_can_manage=after.can_manage,
+                        impact=impact,
+                        reason=reason,
+                        matched_rule=matched_rule,
+                    )
+                )
+
+        operation = self._classify_acl_operation(existing_acl, payload)
+        return PermissionACLImpactRead(
+            document_id=document.id,
+            document_title=document.title,
+            existing_acl_id=existing_acl.id if existing_acl else None,
+            operation=operation,
+            proposed_acl=self._serialize_proposed_acl(payload, resolved_target),
+            affected_user_count=affected_user_count,
+            newly_visible_user_count=newly_visible_user_count,
+            no_longer_visible_user_count=no_longer_visible_user_count,
+            newly_manageable_user_count=newly_manageable_user_count,
+            no_longer_manageable_user_count=no_longer_manageable_user_count,
+            preview_user_count=len(users_preview),
+            users_preview=users_preview,
+        )
+
     def get_document_access_debug(self, session: Session, user_id: UUID, document_id: UUID):
         from app.repositories.document_repository import DocumentRepository
         from app.repositories.user_repository import UserRepository
@@ -265,13 +449,7 @@ class PermissionFilterBuilder:
         evaluation = self._evaluate_document_access(session, target_user, document)
 
         # 构建部门上下文
-        ancestor_depts_sorted = sorted(evaluation.department_context.ancestor_departments, key=lambda d: d.depth)
-        department_context = DocumentAccessDepartmentContextRead(
-            user_department_id=target_user.department_id,
-            user_department_path=evaluation.department_context.user_department_path,
-            ancestor_department_ids=[d.id for d in ancestor_depts_sorted],
-            ancestor_department_paths=[d.path for d in ancestor_depts_sorted],
-        )
+        department_context = self._serialize_department_context(target_user, evaluation.department_context)
 
         # 构建用户信息
         evaluated_user = DocumentAccessDebugUserRead(
@@ -389,3 +567,205 @@ class PermissionFilterBuilder:
         """一次性解析用户部门祖先 ID 集合和旧 team_name。"""
         context = self._build_department_context(session, user)
         return context.ancestor_ids, context.legacy_team_name
+
+    def _evaluate_document_access_with_acl_change(
+        self,
+        session: Session,
+        user: User,
+        document,
+        *,
+        proposed_acl,
+        existing_acl_id: UUID | None,
+    ) -> _DocumentAccessEvaluation:
+        from app.models.enums import RoleName
+
+        department_context = self._build_department_context(session, user)
+        if user.role and user.role.name == RoleName.ADMIN:
+            return _DocumentAccessEvaluation(
+                can_view=True,
+                can_manage=True,
+                system_match="admin",
+                department_context=department_context,
+                acl_evaluations=[],
+                effective_acl_matches=[],
+            )
+        if document.owner_user_id == user.id:
+            return _DocumentAccessEvaluation(
+                can_view=True,
+                can_manage=True,
+                system_match="owner",
+                department_context=department_context,
+                acl_evaluations=[],
+                effective_acl_matches=[],
+            )
+
+        acl_entries = [
+            acl for acl in document.acl_entries
+            if existing_acl_id is None or acl.id != existing_acl_id
+        ]
+        if proposed_acl.can_view or proposed_acl.can_manage:
+            acl_entries.append(proposed_acl)
+        acl_evaluations = [self._evaluate_acl(session, user, acl, department_context) for acl in acl_entries]
+        effective_acl_matches = [acl_eval for acl_eval in acl_evaluations if acl_eval.has_effective_permission]
+        return _DocumentAccessEvaluation(
+            can_view=bool(effective_acl_matches),
+            can_manage=any(acl_eval.effective_manage for acl_eval in effective_acl_matches),
+            system_match=None,
+            department_context=department_context,
+            acl_evaluations=acl_evaluations,
+            effective_acl_matches=effective_acl_matches,
+        )
+
+    @staticmethod
+    def _classify_permission_impact(before: _DocumentAccessEvaluation, after: _DocumentAccessEvaluation) -> str:
+        if not before.can_view and after.can_view:
+            return "newly_visible"
+        if before.can_view and not after.can_view:
+            return "no_longer_visible"
+        if not before.can_manage and after.can_manage:
+            return "newly_manageable"
+        if before.can_manage and not after.can_manage:
+            return "no_longer_manageable"
+        return "changed"
+
+    @staticmethod
+    def _classify_acl_operation(existing_acl, payload) -> str:
+        grants_permission = bool(payload.can_view or payload.can_manage)
+        if existing_acl is None and grants_permission:
+            return "create"
+        if existing_acl is None and not grants_permission:
+            return "noop"
+        if not grants_permission:
+            return "revoke"
+        if existing_acl.can_view == payload.can_view and existing_acl.can_manage == payload.can_manage:
+            return "unchanged"
+        return "update"
+
+    def _resolve_acl_target(self, session: Session, payload) -> _ResolvedACLTarget:
+        from app.models.enums import PrincipalType
+        from app.repositories.department_repository import DepartmentRepository
+        from app.repositories.role_repository import RoleRepository
+        from app.repositories.user_repository import UserRepository
+
+        if payload.principal_type == PrincipalType.USER:
+            target_user = UserRepository(session).get_by_id(payload.user_id)
+            if target_user is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="目标用户不存在。")
+            return _ResolvedACLTarget(
+                user_id=target_user.id,
+                user_email=target_user.email,
+                user_full_name=target_user.full_name,
+            )
+        if payload.principal_type == PrincipalType.ROLE:
+            target_role = RoleRepository(session).get_by_name(payload.role_name)
+            if target_role is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="目标角色不存在。")
+            return _ResolvedACLTarget(role_id=target_role.id, role_name=target_role.name)
+        if payload.principal_type == PrincipalType.TEAM:
+            department_path = None
+            if payload.department_id is not None:
+                department = DepartmentRepository(session).get_by_id(payload.department_id)
+                if department is None:
+                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="目标部门不存在。")
+                department_path = department.path
+            return _ResolvedACLTarget(
+                team_name=payload.team_name,
+                department_id=payload.department_id,
+                department_path=department_path,
+            )
+        return _ResolvedACLTarget()
+
+    @staticmethod
+    def _serialize_proposed_acl(payload, resolved_target: _ResolvedACLTarget):
+        from app.schemas.permission import ProposedACLRead
+
+        return ProposedACLRead(
+            principal_type=payload.principal_type,
+            user_id=resolved_target.user_id,
+            user_email=resolved_target.user_email,
+            user_full_name=resolved_target.user_full_name,
+            role_id=resolved_target.role_id,
+            role_name=resolved_target.role_name,
+            team_name=resolved_target.team_name,
+            department_id=resolved_target.department_id,
+            department_path=resolved_target.department_path,
+            can_view=payload.can_view,
+            can_manage=payload.can_manage,
+        )
+
+    @staticmethod
+    def _serialize_department_context(user: User, department_context: _DepartmentContext):
+        from app.schemas.document import DocumentAccessDepartmentContextRead
+
+        ancestor_depts_sorted = sorted(department_context.ancestor_departments, key=lambda d: d.depth)
+        return DocumentAccessDepartmentContextRead(
+            user_department_id=user.department_id,
+            user_department_path=department_context.user_department_path,
+            ancestor_department_ids=[d.id for d in ancestor_depts_sorted],
+            ancestor_department_paths=[d.path for d in ancestor_depts_sorted],
+        )
+
+    @staticmethod
+    def _accumulate_scope_summary(summary, evaluation: _DocumentAccessEvaluation) -> None:
+        if evaluation.system_match == "admin":
+            summary.admin_count += 1
+            return
+        if evaluation.system_match == "owner":
+            summary.owner_count += 1
+            return
+        matched_acl = evaluation.effective_acl_matches[0] if evaluation.effective_acl_matches else None
+        if matched_acl is None:
+            return
+        summary.acl_count += 1
+        source = matched_acl.acl.principal_type.value
+        if source == "public":
+            summary.public_acl_count += 1
+        elif source == "user":
+            summary.user_acl_count += 1
+        elif source == "role":
+            summary.role_acl_count += 1
+        elif source == "team":
+            summary.department_acl_count += 1
+
+    @staticmethod
+    def _summarize_access_evaluation(evaluation: _DocumentAccessEvaluation):
+        from app.schemas.document import DocumentAccessMatchedRuleRead
+
+        if evaluation.system_match == "admin":
+            return "用户是管理员，拥有全部权限。", DocumentAccessMatchedRuleRead(
+                source="admin",
+                can_view=True,
+                can_manage=True,
+            )
+        if evaluation.system_match == "owner":
+            return "用户是文档所有者，拥有全部权限。", DocumentAccessMatchedRuleRead(
+                source="owner",
+                can_view=True,
+                can_manage=True,
+            )
+
+        matched_acl = evaluation.effective_acl_matches[0] if evaluation.effective_acl_matches else None
+        matched_rule = (
+            DocumentAccessMatchedRuleRead(
+                source=matched_acl.acl.principal_type.value,
+                acl_id=matched_acl.acl.id,
+                principal_type=matched_acl.acl.principal_type,
+                department_id=matched_acl.acl.department_id,
+                department_path=matched_acl.department_path,
+                match_type=matched_acl.match_type,
+                can_view=matched_acl.effective_view,
+                can_manage=matched_acl.effective_manage,
+            )
+            if matched_acl
+            else None
+        )
+        if evaluation.can_view:
+            reason = (
+                "命中 ACL 规则，用户拥有查看和管理权限。"
+                if evaluation.can_manage
+                else "命中 ACL 规则，用户拥有查看权限。"
+            )
+            if matched_rule and matched_rule.match_type == "ancestor":
+                reason = "用户所在部门继承了父部门 ACL 的查看权限。"
+            return reason, matched_rule
+        return "未命中任何权限规则，用户无权访问此文档。", None
