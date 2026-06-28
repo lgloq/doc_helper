@@ -126,12 +126,14 @@ backend/data/benchmark_raw/format_coverage/zh_enterprise_parser_regression_manif
 
 格式覆盖状态：
 
+> 注：本节是 MarkItDown Office 适配器接入前的历史格式覆盖快照，只描述当次格式回归，不代表当前代码能力边界。当前代码已新增 `.xls / .xlsx / .pptx` 上传与解析支持，但单独格式覆盖 manifest 尚未在本证据包中刷新。
+
 | 检查项 | 值 |
 | --- | --- |
 | 上传 / import / parser 声明一致 | `true` |
 | 支持后缀数量 | `11` |
 | 支持后缀 | `.csv`, `.docx`, `.htm`, `.html`, `.jpeg`, `.jpg`, `.markdown`, `.md`, `.pdf`, `.png`, `.txt` |
-| 暂未纳入支持范围 | `.doc`, `.xls`, `.xlsx` |
+| 该历史快照未覆盖的后缀 | `.doc`, `.xls`, `.xlsx`, `.pptx` |
 | 单独 `format_coverage` manifest | `true` |
 | 文档 / cases | `11 / 11` |
 | 覆盖全部已声明后缀 | `true` |

@@ -15,8 +15,10 @@
 ## 当前完成度
 ### 已实现
 - 登录、管理员用户维护与角色管理
-- 支持 `TXT / Markdown / HTML / PDF / DOCX / CSV / PNG / JPG / JPEG` 文档上传与摄取
-- 支持 Markdown、HTML、DOCX、CSV 和文本型 PDF 表格提取
+- 支持 `TXT / Markdown / HTML / PDF / DOCX / XLSX / XLS / PPTX / CSV / PNG / JPG / JPEG` 文档上传与摄取
+- 支持 Markdown、HTML、DOCX、CSV、Excel 和文本型 PDF 表格提取
+- 当前在 MarkItDown v1 范围内仅对 `XLSX / XLS / PPTX` 启用 Office 适配器；`PDF / DOCX / HTML / Markdown / TXT / CSV / image` 仍沿用现有 native parser
+- 支持通过 MarkItDown 适配器将 Excel / PowerPoint 转为统一的可检索文本，并把 `sheet / slide / table` 信息写入 chunk citation metadata
 - 支持图片文件 OCR 入库、扫描版 PDF 页级 OCR fallback，以及规整图片表格的 best-effort 提取
 - 本地文件存储与文档版本保留
 - 文档级 ACL：支持 `public / user / role / department`，并兼容旧版 `team_name` 数据
@@ -41,7 +43,7 @@
 - 多租户隔离与跨组织策略管理
 - 跨队列任务的更完整监控、重试策略、告警和运维治理
 - 低清扫描、旋转拍照、复杂合并单元格、复杂跨页表格和图片型复杂版面的稳定结构化
-- 复杂 Excel、多 sheet XLSX 和合并单元格表格解析
+- 高复杂度 Excel、合并单元格语义还原和 Office 版面级高保真解析
 - Slack / 飞书等外部协作集成
 - 外部裁判模型评测、人工标注闭环和自动化报告看板
 

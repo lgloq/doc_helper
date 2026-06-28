@@ -32,6 +32,7 @@ except ImportError:  # pragma: no cover - optional until OCR dependencies are in
 
 
 IMAGE_FILE_SUFFIXES = {".png", ".jpg", ".jpeg"}
+MARKITDOWN_FILE_SUFFIXES = {".xlsx", ".xls", ".pptx"}
 HTML_CONTENT_SELECTORS = (
     ".UCAP-CONTENT",
     ".pages_content",
@@ -85,6 +86,7 @@ class ParsedSegment:
     section_title: str | None = None
     char_start: int | None = None
     char_end: int | None = None
+    citation_metadata: dict | None = None
 
 
 @dataclass
@@ -103,12 +105,32 @@ class PdfPlumberExtraction:
 
 
 class DocumentParser:
-    def __init__(self, ocr_service: OcrService | None = None):
+    def __init__(self, ocr_service: OcrService | None = None, markitdown_allowed_base_dir: Path | None = None):
         self.settings = get_settings()
         self.ocr_service = ocr_service or OcrService(self.settings)
+        self.markitdown_allowed_base_dir = markitdown_allowed_base_dir or self.settings.data_dir
 
     def parse(self, path: Path) -> ParsedDocument:
         suffix = path.suffix.lower()
+        if self._should_parse_with_markitdown(suffix):
+            return self._parse_with_markitdown(path, suffix)
+        if self._should_fallback_to_markitdown(suffix):
+            try:
+                parsed = self._parse_native(path, suffix)
+            except Exception as native_exc:
+                try:
+                    return self._parse_with_markitdown(path, suffix)
+                except Exception as markitdown_exc:
+                    raise ValueError(
+                        f"Native parser and MarkItDown parser both failed for file type '{suffix}'. "
+                        f"native_error={native_exc}; markitdown_error={markitdown_exc}"
+                    ) from markitdown_exc
+            if parsed.normalized_text.strip():
+                return parsed
+            return self._parse_with_markitdown(path, suffix)
+        return self._parse_native(path, suffix)
+
+    def _parse_native(self, path: Path, suffix: str) -> ParsedDocument:
         if suffix == ".txt":
             return self._parse_txt(path)
         if suffix in {".md", ".markdown"}:
@@ -124,6 +146,42 @@ class DocumentParser:
         if suffix in IMAGE_FILE_SUFFIXES:
             return self._parse_image(path)
         raise ValueError(f"Unsupported parser for file type '{suffix}'.")
+
+    def _should_parse_with_markitdown(self, suffix: str) -> bool:
+        return (
+            bool(self.settings.markitdown_enabled)
+            and suffix in MARKITDOWN_FILE_SUFFIXES
+            and self._normalized_suffix_key(suffix) in self._configured_markitdown_types(self.settings.markitdown_primary_file_types)
+        )
+
+    def _should_fallback_to_markitdown(self, suffix: str) -> bool:
+        return (
+            bool(self.settings.markitdown_enabled)
+            and suffix in MARKITDOWN_FILE_SUFFIXES
+            and self._normalized_suffix_key(suffix) in self._configured_markitdown_types(self.settings.markitdown_fallback_file_types)
+        )
+
+    def _parse_with_markitdown(self, path: Path, suffix: str) -> ParsedDocument:
+        from app.services.ingestion.markitdown_parser import MarkItDownParser
+
+        return MarkItDownParser(
+            allowed_base_dir=self.markitdown_allowed_base_dir,
+            settings=self.settings,
+        ).parse(path, suffix=suffix)
+
+    @staticmethod
+    def _configured_markitdown_types(raw_value: str | None) -> set[str]:
+        if not raw_value:
+            return set()
+        return {
+            DocumentParser._normalized_suffix_key(item)
+            for item in re.split(r"[,;\s]+", raw_value)
+            if item.strip()
+        }
+
+    @staticmethod
+    def _normalized_suffix_key(value: str) -> str:
+        return value.strip().lower().lstrip(".")
 
     def _parse_txt(self, path: Path) -> ParsedDocument:
         text = self._read_text_file(path)

@@ -51,7 +51,7 @@ class SemanticChunker:
             nonlocal buffer, buffer_chars
             if not buffer:
                 return
-            chunks.append(self._build_chunk_payload(len(chunks), buffer))
+            chunks.append(self._build_chunk_payload(len(chunks), buffer, parser_name=parsed_document.parser_name))
             overlap = buffer[-self.overlap_segments :] if preserve_overlap and self.overlap_segments > 0 else []
             buffer = list(overlap)
             buffer_chars = sum(len(item.text) for item in buffer)
@@ -72,7 +72,7 @@ class SemanticChunker:
                 flush_buffer()
 
         if buffer:
-            chunks.append(self._build_chunk_payload(len(chunks), buffer))
+            chunks.append(self._build_chunk_payload(len(chunks), buffer, parser_name=parsed_document.parser_name))
         return chunks
 
     def _split_large_segments(self, segments: list[ParsedSegment]) -> list[ParsedSegment]:
@@ -123,7 +123,7 @@ class SemanticChunker:
     def _estimate_token_count(text: str) -> int:
         return max(1, math.ceil(len(text) / 4))
 
-    def _build_chunk_payload(self, chunk_index: int, segments: list[ParsedSegment]) -> ChunkPayload:
+    def _build_chunk_payload(self, chunk_index: int, segments: list[ParsedSegment], *, parser_name: str) -> ChunkPayload:
         content = "\n\n".join(segment.text for segment in segments)
         section_title = _dominant_section_title(segments)
         page_numbers = [segment.page_number for segment in segments if segment.page_number is not None]
@@ -132,7 +132,9 @@ class SemanticChunker:
         char_ends = [segment.char_end for segment in segments if segment.char_end is not None]
 
         structure = extract_chunk_structure(content, section_title)
+        segment_citation_metadata = _merge_segment_citation_metadata(segments)
         citation_metadata = {
+            "parser_name": parser_name,
             "page_number_start": min(page_numbers) if page_numbers else None,
             "page_number_end": max(page_numbers) if page_numbers else None,
             "paragraph_start": min(paragraph_numbers) if paragraph_numbers else None,
@@ -143,6 +145,7 @@ class SemanticChunker:
             "chunk_type": structure["chunk_type"],
             "heading_path": structure["heading_path"],
         }
+        citation_metadata.update(segment_citation_metadata)
 
         return ChunkPayload(
             chunk_index=chunk_index,
@@ -221,3 +224,75 @@ def _dominant_section_title(segments: list[ParsedSegment]) -> str | None:
     if not section_weights:
         return None
     return max(section_weights.items(), key=lambda item: (item[1][0], item[1][1]))[0]
+
+
+def _merge_segment_citation_metadata(segments: list[ParsedSegment]) -> dict:
+    scalar_plural_keys = {
+        "parser_backend": "parser_backends",
+        "source_format": "source_formats",
+        "section_kind": "section_kinds",
+        "sheet_name": "sheet_names",
+        "slide_title": "slide_titles",
+        "table_caption": "table_captions",
+    }
+    numeric_range_keys = {
+        "slide_number": "slide_number",
+        "table_row_index": "table_row_index",
+    }
+    list_keys = ("segment_kind",)
+
+    merged: dict[str, object] = {}
+    for key, plural_key in scalar_plural_keys.items():
+        values: list[str] = []
+        for segment in segments:
+            value = (segment.citation_metadata or {}).get(key)
+            if value is None:
+                continue
+            normalized = str(value).strip()
+            if normalized and normalized not in values:
+                values.append(normalized)
+        if len(values) == 1:
+            merged[key] = values[0]
+        elif values:
+            merged[plural_key] = values
+
+    for key, base_key in numeric_range_keys.items():
+        values = [
+            int(value)
+            for segment in segments
+            for value in [(segment.citation_metadata or {}).get(key)]
+            if value is not None
+        ]
+        if not values:
+            continue
+        if min(values) == max(values):
+            merged[key] = values[0]
+        else:
+            merged[f"{base_key}_start"] = min(values)
+            merged[f"{base_key}_end"] = max(values)
+
+    for key in list_keys:
+        values: list[str] = []
+        for segment in segments:
+            value = (segment.citation_metadata or {}).get(key)
+            if value is None:
+                continue
+            normalized = str(value).strip()
+            if normalized and normalized not in values:
+                values.append(normalized)
+        if values:
+            merged[f"{key}s"] = values
+
+    table_headers: list[str] | None = None
+    for segment in segments:
+        value = (segment.citation_metadata or {}).get("table_headers")
+        if not isinstance(value, list) or not value:
+            continue
+        normalized_headers = [str(item).strip() for item in value if str(item).strip()]
+        if normalized_headers:
+            table_headers = normalized_headers
+            break
+    if table_headers:
+        merged["table_headers"] = table_headers
+
+    return merged

@@ -41,8 +41,10 @@
 
 ## 主要功能
 - 支持登录、管理员创建用户、维护角色、启停状态和所属部门
-- 当前已接入 `TXT / Markdown / HTML / PDF / DOCX / CSV / PNG / JPG / JPEG` 的上传与解析链路
+- 当前已接入 `TXT / Markdown / HTML / PDF / DOCX / XLSX / XLS / PPTX / CSV / PNG / JPG / JPEG` 的上传与解析链路
 - 当前对 Markdown、HTML、DOCX、CSV 和文本型 PDF 提供基础表格提取，表格行会转成可检索文本
+- 当前在 MarkItDown v1 范围内仅对 `XLSX / XLS / PPTX` 启用 Office 适配器；`PDF / DOCX / HTML / Markdown / TXT / CSV / image` 仍沿用现有 native parser
+- 当前 MarkItDown Office 适配器会把 Excel / PowerPoint 内容映射回统一的 `ParsedDocument`，表格转为 `Table row:` 检索文本，并为 chunk 补充 `sheet / slide / table` citation metadata
 - 当前可选图片 OCR 入库；扫描版 PDF 仅在页级文本不足时走 OCR fallback，规整图片表格只做 best-effort 提取
 - 保留文档版本和基础历史记录
 - 文档级 ACL 当前覆盖 `public / user / role / department`，部门 ACL 支持父子部门继承，并兼容旧版 `team_name` 数据
@@ -136,7 +138,7 @@ docker-compose.yml
 - 缓存：Redis
 - 前端：React、Vite、TypeScript、React Router
 - 模型接入：OpenAI SDK、兼容 OpenAI 协议的模型服务、deterministic fallback
-- 文档解析：pdfplumber、pypdf、python-docx、BeautifulSoup、PyMuPDF、Pillow、pytesseract / Tesseract
+- 文档解析：MarkItDown、pdfplumber、pypdf、python-docx、BeautifulSoup、PyMuPDF、Pillow、pytesseract / Tesseract
 - 测试：pytest
 - 本地运行与集成：Docker Compose
 
@@ -160,7 +162,7 @@ docker-compose.yml
 - 多租户隔离与跨组织策略管理
 - 跨队列任务的更完整监控、重试策略、告警和运维治理
 - 低清扫描、旋转拍照、复杂合并单元格、复杂跨页表格和图片型复杂版面的稳定结构化
-- 复杂 Excel、多 sheet XLSX 和合并单元格表格解析
+- 高复杂度 Excel、合并单元格语义还原和 Office 版面级高保真解析
 - Slack / 飞书 / 邮件等外部协作集成
 - 外部裁判模型评测、人工标注闭环和自动化报告看板
 - 完整的生产部署与安全加固
@@ -368,6 +370,7 @@ npm run dev
 - 宿主机访问后端地址为 `http://localhost:9500`
 - 是否依赖外部模型取决于 `backend/.env` 配置；当前仓库保留 deterministic 回退能力，外部调用失败时本地链路仍可继续运行
 - `JWT_SECRET_KEY` 建议使用至少 32 字节以上的随机字符串；仓库中的示例值仅用于本地开发与演示
+- MarkItDown 相关保护当前只作用于 `XLSX / XLS / PPTX` 的本地文件转换路径，默认带文件大小、转换超时、输出字符数和表格行数保护；可通过 `MARKITDOWN_TIMEOUT_SECONDS / MARKITDOWN_MAX_FILE_SIZE_BYTES / MARKITDOWN_MAX_OUTPUT_CHARS / MARKITDOWN_MAX_TABLE_ROWS` 调整
 
 ### 模型与 Embedding 配置
 当前后端同时支持两类模型配置：一类用于问答、路由和版本摘要，另一类用于 embedding。当前仓库推荐的联调组合为“DeepSeek 负责 chat，OpenRouter 负责 embedding”：

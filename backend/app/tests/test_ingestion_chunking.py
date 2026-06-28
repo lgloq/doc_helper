@@ -191,3 +191,72 @@ def test_chunker_starts_clean_chunk_when_parser_section_title_changes() -> None:
 
     assert archive_chunk.content.startswith("归档要求")
     assert "共同审批" not in archive_chunk.content
+
+
+def test_chunker_merges_markitdown_citation_metadata() -> None:
+    chunker = SemanticChunker()
+    chunker.target_chars = 500
+    chunker.max_chars = 900
+    chunker.overlap_segments = 0
+    document = ParsedDocument(
+        normalized_text="",
+        page_count=None,
+        parser_name="markitdown:xlsx",
+        segments=[
+            ParsedSegment(
+                text="Sheet: Budget 2026",
+                paragraph_index=1,
+                section_title="Sheet: Budget 2026",
+                citation_metadata={
+                    "parser_backend": "markitdown",
+                    "source_format": "xlsx",
+                    "section_kind": "sheet",
+                    "sheet_name": "Budget 2026",
+                    "segment_kind": "heading",
+                },
+            ),
+            ParsedSegment(
+                text="Table row: Sheet: Budget 2026 / Budget Summary. Workstream=Platform; Owner=Mei; Spend=125000.",
+                paragraph_index=2,
+                section_title="Sheet: Budget 2026 / Budget Summary",
+                citation_metadata={
+                    "parser_backend": "markitdown",
+                    "source_format": "xlsx",
+                    "section_kind": "sheet",
+                    "sheet_name": "Budget 2026",
+                    "segment_kind": "table_row",
+                    "table_caption": "Sheet: Budget 2026 / Budget Summary",
+                    "table_headers": ["Workstream", "Owner", "Spend"],
+                    "table_row_index": 1,
+                },
+            ),
+            ParsedSegment(
+                text="Table row: Sheet: Budget 2026 / Budget Summary. Workstream=Security; Owner=Jun; Spend=98000.",
+                paragraph_index=3,
+                section_title="Sheet: Budget 2026 / Budget Summary",
+                citation_metadata={
+                    "parser_backend": "markitdown",
+                    "source_format": "xlsx",
+                    "section_kind": "sheet",
+                    "sheet_name": "Budget 2026",
+                    "segment_kind": "table_row",
+                    "table_caption": "Sheet: Budget 2026 / Budget Summary",
+                    "table_headers": ["Workstream", "Owner", "Spend"],
+                    "table_row_index": 2,
+                },
+            ),
+        ],
+    )
+
+    chunks = chunker.chunk_document(document)
+
+    assert len(chunks) == 2
+    table_chunk = next(chunk for chunk in chunks if "Workstream=Platform" in chunk.content)
+    citation_metadata = table_chunk.citation_metadata
+    assert citation_metadata["parser_name"] == "markitdown:xlsx"
+    assert citation_metadata["sheet_name"] == "Budget 2026"
+    assert citation_metadata["table_caption"] == "Sheet: Budget 2026 / Budget Summary"
+    assert citation_metadata["table_headers"] == ["Workstream", "Owner", "Spend"]
+    assert citation_metadata["table_row_index_start"] == 1
+    assert citation_metadata["table_row_index_end"] == 2
+    assert citation_metadata["segment_kinds"] == ["table_row"]

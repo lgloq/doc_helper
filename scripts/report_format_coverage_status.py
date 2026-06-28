@@ -23,7 +23,7 @@ DEFAULT_FORMAT_MANIFEST = (
 DEFAULT_OUTPUT = BACKEND_DIR / "data" / "eval_outputs" / "format-coverage-status-local.json"
 DEFAULT_MARKDOWN_OUTPUT = BACKEND_DIR / "data" / "eval_outputs" / "format-coverage-status-local.md"
 
-UNSUPPORTED_OFFICE_SUFFIXES = [".doc", ".xls", ".xlsx"]
+UNSUPPORTED_OFFICE_SUFFIXES = [".doc", ".ppt"]
 
 PARSER_SUFFIX_GROUPS = {
     ".txt": {"parser": "txt", "capability": "plain text paragraphs"},
@@ -33,6 +33,9 @@ PARSER_SUFFIX_GROUPS = {
     ".htm": {"parser": "html", "capability": "main-content HTML extraction, table rows, local/base64 image OCR, boilerplate filtering"},
     ".pdf": {"parser": "pdf", "capability": "text PDF, pdfplumber tables, OCR fallback for low-text pages"},
     ".docx": {"parser": "docx", "capability": "DOCX paragraphs, body-order tables, embedded-image OCR"},
+    ".xlsx": {"parser": "markitdown:xlsx", "capability": "Excel worksheets converted to Markdown sections and searchable table-row text"},
+    ".xls": {"parser": "markitdown:xls", "capability": "legacy Excel worksheets converted to Markdown sections and searchable table-row text"},
+    ".pptx": {"parser": "markitdown:pptx", "capability": "PowerPoint titles, text, tables, and chart data converted to searchable text"},
     ".csv": {"parser": "csv", "capability": "CSV rows converted to searchable table-row text"},
     ".png": {"parser": "image", "capability": "image OCR and best-effort simple table reconstruction"},
     ".jpg": {"parser": "image", "capability": "image OCR and best-effort simple table reconstruction"},
@@ -69,6 +72,17 @@ REGRESSION_TEST_EVIDENCE = {
     ".docx": [
         ("backend/app/tests/test_ingestion_parser.py", "test_document_parser_supports_multiple_formats"),
         ("backend/app/tests/test_ingestion_parser.py", "test_document_parser_extracts_docx_tables_in_body_order"),
+    ],
+    ".xlsx": [
+        ("backend/app/tests/test_ingestion_parser.py", "test_document_parser_routes_xlsx_to_markitdown_table_segments"),
+        ("backend/app/tests/test_ingestion_parser.py", "test_document_parser_preserves_multiple_markitdown_xlsx_sheets"),
+        ("backend/app/tests/test_ingestion_api.py", "test_xlsx_upload_ingest_exposes_markitdown_table_text_in_chunks"),
+    ],
+    ".xls": [
+        ("backend/app/tests/test_ingestion_parser.py", "test_document_parser_routes_xls_to_markitdown_best_effort"),
+    ],
+    ".pptx": [
+        ("backend/app/tests/test_ingestion_parser.py", "test_document_parser_routes_pptx_to_markitdown_segments"),
     ],
     ".csv": [
         ("backend/app/tests/test_ingestion_api.py", "test_csv_upload_ingest_exposes_table_text_in_chunks"),

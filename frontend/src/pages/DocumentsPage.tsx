@@ -841,7 +841,7 @@ export function DocumentsPage() {
                 </label>
                 <label>
                   <span>文件</span>
-                  <input accept=".txt,.md,.markdown,.html,.htm,.pdf,.docx,.csv,.png,.jpg,.jpeg" name="file" type="file" required />
+                  <input accept=".txt,.md,.markdown,.html,.htm,.pdf,.docx,.xlsx,.xls,.pptx,.csv,.png,.jpg,.jpeg" name="file" type="file" required />
                 </label>
                 <p className="muted">如果内容属于当前正在查看文档的更新，使用下方“上传新版本”会更合适。</p>
                 <ErrorNotice message={uploadError} />
@@ -1006,7 +1006,7 @@ export function DocumentsPage() {
                   <h4>上传新版本</h4>
                 </div>
                 <p className="muted">会追加到《{selectedDocument.title}》并生成新版本号，文档条目和现有权限配置会保持不变。</p>
-                <input accept=".txt,.md,.markdown,.html,.htm,.pdf,.docx,.csv,.png,.jpg,.jpeg" name="file" type="file" required />
+                <input accept=".txt,.md,.markdown,.html,.htm,.pdf,.docx,.xlsx,.xls,.pptx,.csv,.png,.jpg,.jpeg" name="file" type="file" required />
                 <button className="primary-button" disabled={versionUploading} type="submit">
                   {versionUploading ? "上传中..." : "上传版本"}
                 </button>

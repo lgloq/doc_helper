@@ -9,7 +9,7 @@
 整条链路可分为 6 个阶段：
 
 1. 文档解析
-   - 支持 `TXT / Markdown / HTML / PDF / DOCX / CSV / PNG / JPG / JPEG`
+   - 支持 `TXT / Markdown / HTML / PDF / DOCX / XLSX / XLS / PPTX / CSV / PNG / JPG / JPEG`
    - 尽量保留标题、页码、段落等结构信息
    - Markdown、HTML、DOCX、CSV 和文本型 PDF 表格会转成可检索文本
    - 图片文件和扫描版 PDF 页面在开启 OCR 后会转成普通文本 segment；规整图片表格会 best-effort 转成 `Table row:` 文本
@@ -63,10 +63,11 @@
 - 扫描版 PDF：不整篇无脑 OCR；先做页级文本解析，页面文本不足或没有有效 segment 时才渲染该页并 OCR
 - 图片：开启 OCR 后提取文字；低信息量图号、页码、短噪声会尽量过滤；规整图片表格会按 OCR 坐标 best-effort 聚合为表格行
 - DOCX：保留段落、heading 风格和文本型表格；正文和表格中的内嵌图片会做 OCR
+- XLSX / XLS / PPTX：当前 v1 仅这三类走 MarkItDown 适配器；转换结果会映射回统一的 `ParsedSegment` 和表格行文本。Excel 会额外规整 `Unnamed:` 伪表头，chunk citation metadata 会保留 `sheet / slide / table` 信息
 - TXT：按自然段拆分
 - CSV：第一行作为表头，后续行转成 key-value 文本
 
-当前 OCR 是 parser 层的轻量增强，复用现有 `ParsedSegment -> chunk -> embedding -> PostgreSQL FTS + pgvector -> citation` 链路和 ACL 判断。文本 PDF 中的嵌入图片、本地相对路径或 base64 的 Markdown / HTML 图片、以及 DOCX 正文和表格中的内嵌图片，会复用同一套图片 OCR 链路。当前能力边界包括：低清扫描、旋转拍照、复杂合并单元格、复杂跨页表格和图片型复杂版面；柱状图、饼图、流程图、组织图等图片当前提取可见标签和文字；HTML 远程图片、Markdown 外链图片、DOCX 页眉页脚或水印类图片、复杂 Excel 和多 sheet XLSX 属于后续扩展范围。
+当前 OCR 是 parser 层的轻量增强，复用现有 `ParsedSegment -> chunk -> embedding -> PostgreSQL FTS + pgvector -> citation` 链路和 ACL 判断。文本 PDF 中的嵌入图片、本地相对路径或 base64 的 Markdown / HTML 图片、以及 DOCX 正文和表格中的内嵌图片，会复用同一套图片 OCR 链路。MarkItDown 当前只接受受控本地文件，并带文件大小、转换超时、输出字符数和表格行数保护。当前能力边界包括：低清扫描、旋转拍照、复杂合并单元格、复杂跨页表格和图片型复杂版面；柱状图、饼图、流程图、组织图等图片当前提取可见标签和文字；HTML 远程图片、Markdown 外链图片、DOCX 页眉页脚或水印类图片、Office 版面级高保真还原属于后续扩展范围。
 
 ### 切块策略
 - 优先保留语义边界

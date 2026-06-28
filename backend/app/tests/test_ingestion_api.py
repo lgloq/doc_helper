@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -9,6 +10,7 @@ from app.core.security import hash_password
 from app.models.enums import RoleName
 from app.models.role import Role
 from app.models.user import User
+from app.services.ingestion.markitdown_parser import MarkItDownParser
 
 
 FORBIDDEN_DETAIL = "当前角色无权执行该操作。"
@@ -136,6 +138,128 @@ def test_csv_upload_ingest_exposes_table_text_in_chunks(client: TestClient, db_s
     chunk_text = "\n".join(item["content"] for item in chunks_response.json())
     assert "Table row: approvals. Request=Data export; Approver=Admin; SLA=1 day." in chunk_text
     assert "Request=Refund; Approver=Manager; SLA=2 days." in chunk_text
+
+
+def test_xlsx_upload_ingest_exposes_markitdown_table_text_in_chunks(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        MarkItDownParser,
+        "_convert_local_to_markdown",
+        lambda self, path: "## Approvals\n\n| Request | Approver | SLA |\n| --- | --- | --- |\n| Data export | Admin | 1 day |",
+    )
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add(admin_role)
+    db_session.flush()
+
+    _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+    db_session.commit()
+
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    upload_response = client.post(
+        "/api/v1/documents/upload",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        files={
+            "file": (
+                "approvals.xlsx",
+                BytesIO(b"fake xlsx payload"),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+        data={"title": "Approval Workbook", "description": "xlsx upload", "status": "active"},
+    )
+    assert upload_response.status_code == 200
+    document_payload = upload_response.json()
+    document_id = document_payload["document"]["id"]
+    version_id = document_payload["version"]["id"]
+    assert document_payload["version"]["mime_type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    ingest_response = client.post(
+        f"/api/v1/documents/{document_id}/ingest",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"version_id": version_id},
+    )
+    assert ingest_response.status_code == 200
+    assert ingest_response.json()["chunk_count"] >= 1
+
+    chunks_response = client.get(
+        f"/api/v1/documents/{document_id}/chunks",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert chunks_response.status_code == 200
+    chunk_payloads = chunks_response.json()
+    chunk_text = "\n".join(item["content"] for item in chunk_payloads)
+    assert "Table row: Sheet: Approvals. Request=Data export; Approver=Admin; SLA=1 day." in chunk_text
+    assert any(item["citation_metadata"]["parser_name"] == "markitdown:xlsx" for item in chunk_payloads)
+    assert any(item["citation_metadata"].get("sheet_name") == "Approvals" for item in chunk_payloads)
+    assert any(item["citation_metadata"].get("table_headers") == ["Request", "Approver", "SLA"] for item in chunk_payloads)
+
+
+def test_xls_upload_ingest_exposes_real_markitdown_sheet_metadata(client: TestClient, db_session: Session) -> None:
+    xlwt = pytest.importorskip("xlwt")
+
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add(admin_role)
+    db_session.flush()
+
+    _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+    db_session.commit()
+
+    workbook = xlwt.Workbook()
+    sheet = workbook.add_sheet("Legacy Budget")
+    sheet.write_merge(0, 0, 0, 2, "Budget Summary")
+    sheet.write(1, 0, "Workstream")
+    sheet.write(1, 1, "Owner")
+    sheet.write(1, 2, "Spend")
+    sheet.write(2, 0, "Platform")
+    sheet.write(2, 1, "Mei")
+    sheet.write(2, 2, 125000)
+
+    payload = BytesIO()
+    workbook.save(payload)
+    payload.seek(0)
+
+    admin_token = _login(client, "admin@example.com", "admin-pass")
+    upload_response = client.post(
+        "/api/v1/documents/upload",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        files={
+            "file": (
+                "legacy-budget.xls",
+                payload,
+                "application/vnd.ms-excel",
+            )
+        },
+        data={"title": "Legacy Budget Workbook", "description": "xls upload", "status": "active"},
+    )
+    assert upload_response.status_code == 200
+    document_payload = upload_response.json()
+    document_id = document_payload["document"]["id"]
+    version_id = document_payload["version"]["id"]
+    assert document_payload["version"]["mime_type"] == "application/vnd.ms-excel"
+
+    ingest_response = client.post(
+        f"/api/v1/documents/{document_id}/ingest",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"version_id": version_id},
+    )
+    assert ingest_response.status_code == 200
+    assert ingest_response.json()["chunk_count"] >= 1
+
+    chunks_response = client.get(
+        f"/api/v1/documents/{document_id}/chunks",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert chunks_response.status_code == 200
+    chunk_payloads = chunks_response.json()
+    chunk_text = "\n".join(item["content"] for item in chunk_payloads)
+    assert "Table row: Sheet: Legacy Budget / Budget Summary. Workstream=Platform; Owner=Mei; Spend=125000." in chunk_text
+    assert all("Unnamed:" not in item["content"] for item in chunk_payloads)
+    assert any(item["citation_metadata"].get("parser_name") == "markitdown:xls" for item in chunk_payloads)
+    assert any(item["citation_metadata"].get("sheet_name") == "Legacy Budget" for item in chunk_payloads)
+    assert any(item["citation_metadata"].get("table_headers") == ["Workstream", "Owner", "Spend"] for item in chunk_payloads)
 
 
 def test_empty_parse_ingest_fails_instead_of_ready_with_zero_chunks(client: TestClient, db_session: Session) -> None:

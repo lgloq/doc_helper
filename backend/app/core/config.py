@@ -166,6 +166,13 @@ class Settings(BaseSettings):
     chunk_max_chars: int = 1200
     chunk_overlap_segments: int = 1
     chat_history_window: int = 6
+    markitdown_enabled: bool = True
+    markitdown_primary_file_types: str = "xlsx,xls,pptx"
+    markitdown_fallback_file_types: str = ""
+    markitdown_timeout_seconds: float = 20.0
+    markitdown_max_file_size_bytes: int = 25_000_000
+    markitdown_max_output_chars: int = 1_000_000
+    markitdown_max_table_rows: int = 5000
     enable_ocr: bool = False
     ocr_lang: str = "chi_sim+eng"
     ocr_min_text_chars: int = 40

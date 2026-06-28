@@ -180,11 +180,13 @@ anchor 审计结果：
 .txt / .md / .markdown / .html / .htm / .pdf / .docx / .csv / .png / .jpg / .jpeg
 ```
 
-暂未纳入支持范围：
+该历史格式回归未覆盖的后缀：
 
 ```text
-.doc / .xls / .xlsx
+.doc / .xls / .xlsx / .pptx
 ```
+
+注：以上是 MarkItDown Office 适配器接入前的历史格式覆盖快照，只描述当次格式回归，不代表当前代码能力边界。当前代码已新增 `.xls / .xlsx / .pptx` 上传与解析支持，但单独格式覆盖 manifest 和对应指标尚未在本摘要中刷新。
 
 格式覆盖检索回归结果：
 

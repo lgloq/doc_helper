@@ -198,7 +198,8 @@ def test_format_coverage_status_separates_parser_support_from_effect_manifest(tm
 
     assert report["support_consistent"] is True
     assert ".docx" in report["supported_suffixes"]
-    assert ".xlsx" in report["unsupported_not_counted"]
+    assert ".xlsx" in report["supported_suffixes"]
+    assert ".doc" in report["unsupported_not_counted"]
     assert report["main_effect_benchmark"]["source_format_counts"] == {"html": 1, "pdf": 1}
     assert report["format_coverage_manifest"]["exists"] is False
     assert "do not claim a separate all-format effect benchmark" in report["format_coverage_manifest"]["note"]

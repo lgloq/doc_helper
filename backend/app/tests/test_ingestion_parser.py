@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
+import pytest
 from docx import Document as DocxDocument
 
+from app.services.ingestion.markitdown_parser import MarkItDownParser
 from app.services.ingestion import parsers as parser_module
 from app.services.ingestion.parsers import DocumentParser
 
@@ -335,3 +338,282 @@ def test_document_parser_extracts_csv_tables(tmp_path: Path) -> None:
     assert result.parser_name == "csv"
     assert "Table row: approvals. Request=Data export; Approver=Admin; SLA=1 day." in result.normalized_text
     assert "Request=Refund; Approver=Manager; SLA=2 days." in result.normalized_text
+
+
+def test_document_parser_routes_xlsx_to_markitdown_table_segments(tmp_path: Path, monkeypatch) -> None:
+    def fake_convert(self, path: Path) -> str:
+        return "\n".join(
+            [
+                "## Budget",
+                "",
+                "| Item | Owner |",
+                "| --- | --- |",
+                "| Cloud | Platform |",
+            ]
+        )
+
+    monkeypatch.setattr(MarkItDownParser, "_convert_local_to_markdown", fake_convert)
+    xlsx_path = tmp_path / "budget.xlsx"
+    xlsx_path.write_bytes(b"fake xlsx payload")
+
+    result = DocumentParser(markitdown_allowed_base_dir=tmp_path).parse(xlsx_path)
+
+    assert result.parser_name == "markitdown:xlsx"
+    assert "Sheet: Budget" in result.normalized_text
+    assert "Table row: Sheet: Budget. Item=Cloud; Owner=Platform." in result.normalized_text
+    assert result.segments[0].section_title == "Sheet: Budget"
+
+
+def test_document_parser_preserves_multiple_markitdown_xlsx_sheets(tmp_path: Path, monkeypatch) -> None:
+    def fake_convert(self, path: Path) -> str:
+        return "\n".join(
+            [
+                "## HR",
+                "",
+                "| Policy | Owner |",
+                "| --- | --- |",
+                "| Onboarding | People |",
+                "",
+                "## Finance",
+                "",
+                "| Policy | Owner |",
+                "| --- | --- |",
+                "| Expense | Accounting |",
+            ]
+        )
+
+    monkeypatch.setattr(MarkItDownParser, "_convert_local_to_markdown", fake_convert)
+    xlsx_path = tmp_path / "multi.xlsx"
+    xlsx_path.write_bytes(b"fake xlsx payload")
+
+    result = DocumentParser(markitdown_allowed_base_dir=tmp_path).parse(xlsx_path)
+
+    assert "Sheet: HR" in result.normalized_text
+    assert "Sheet: Finance" in result.normalized_text
+    assert "Table row: Sheet: HR. Policy=Onboarding; Owner=People." in result.normalized_text
+    assert "Table row: Sheet: Finance. Policy=Expense; Owner=Accounting." in result.normalized_text
+
+
+def test_document_parser_normalizes_real_markitdown_xlsx_merged_title_rows(tmp_path: Path) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Budget 2026"
+    worksheet["A1"] = "Budget Summary"
+    worksheet.merge_cells("A1:C1")
+    worksheet.append(["Workstream", "Owner", "Spend"])
+    worksheet.append(["Platform", "Mei", 125000])
+    worksheet.append(["Security", "Jun", 98000])
+    risk_sheet = workbook.create_sheet("Risks")
+    risk_sheet.append(["Risk", "Severity", "Mitigation"])
+    risk_sheet.append(["Vendor delay", "High", "Dual source"])
+
+    xlsx_path = tmp_path / "complex.xlsx"
+    workbook.save(xlsx_path)
+
+    result = DocumentParser(markitdown_allowed_base_dir=tmp_path).parse(xlsx_path)
+
+    assert result.parser_name == "markitdown:xlsx"
+    assert "Unnamed:" not in result.normalized_text
+    assert (
+        "Table row: Sheet: Budget 2026 / Budget Summary. Workstream=Platform; Owner=Mei; Spend=125000."
+        in result.normalized_text
+    )
+    budget_row = next(segment for segment in result.segments if "Workstream=Platform" in segment.text)
+    assert budget_row.section_title == "Sheet: Budget 2026 / Budget Summary"
+    assert budget_row.citation_metadata["sheet_name"] == "Budget 2026"
+    assert budget_row.citation_metadata["table_row_index"] == 1
+    assert budget_row.citation_metadata["table_headers"] == ["Workstream", "Owner", "Spend"]
+
+
+def test_document_parser_routes_xls_to_markitdown_best_effort(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        MarkItDownParser,
+        "_convert_local_to_markdown",
+        lambda self, path: "## Legacy\n\n| Field | Value |\n| --- | --- |\n| SLA | 2 days |",
+    )
+    xls_path = tmp_path / "legacy.xls"
+    xls_path.write_bytes(b"fake xls payload")
+
+    result = DocumentParser(markitdown_allowed_base_dir=tmp_path).parse(xls_path)
+
+    assert result.parser_name == "markitdown:xls"
+    assert "Table row: Sheet: Legacy. Field=SLA; Value=2 days." in result.normalized_text
+
+
+def test_document_parser_extracts_real_markitdown_xls_sheet_metadata(tmp_path: Path) -> None:
+    xlwt = pytest.importorskip("xlwt")
+
+    workbook = xlwt.Workbook()
+    budget_sheet = workbook.add_sheet("Legacy Budget")
+    budget_sheet.write_merge(0, 0, 0, 2, "Budget Summary")
+    budget_sheet.write(1, 0, "Workstream")
+    budget_sheet.write(1, 1, "Owner")
+    budget_sheet.write(1, 2, "Spend")
+    budget_sheet.write(2, 0, "Platform")
+    budget_sheet.write(2, 1, "Mei")
+    budget_sheet.write(2, 2, 125000)
+    budget_sheet.write(3, 0, "Security")
+    budget_sheet.write(3, 1, "Jun")
+    budget_sheet.write(3, 2, 98000)
+    risk_sheet = workbook.add_sheet("Risks")
+    risk_sheet.write(0, 0, "Risk")
+    risk_sheet.write(0, 1, "Severity")
+    risk_sheet.write(0, 2, "Mitigation")
+    risk_sheet.write(1, 0, "Vendor delay")
+    risk_sheet.write(1, 1, "High")
+    risk_sheet.write(1, 2, "Dual source")
+
+    xls_path = tmp_path / "legacy-complex.xls"
+    workbook.save(str(xls_path))
+
+    result = DocumentParser(markitdown_allowed_base_dir=tmp_path).parse(xls_path)
+
+    assert result.parser_name == "markitdown:xls"
+    assert "Table row: Sheet: Legacy Budget / Budget Summary. Workstream=Platform; Owner=Mei; Spend=125000." in result.normalized_text
+    assert "Unnamed:" not in result.normalized_text
+    budget_row = next(segment for segment in result.segments if "Workstream=Platform" in segment.text)
+    assert budget_row.section_title == "Sheet: Legacy Budget / Budget Summary"
+    assert budget_row.citation_metadata["sheet_name"] == "Legacy Budget"
+    assert budget_row.citation_metadata["table_headers"] == ["Workstream", "Owner", "Spend"]
+
+
+def test_document_parser_routes_pptx_to_markitdown_segments(tmp_path: Path, monkeypatch) -> None:
+    def fake_convert(self, path: Path) -> str:
+        return "\n".join(
+            [
+                "<!-- Slide number: 1 -->",
+                "",
+                "# Launch Plan",
+                "",
+                "Release window is Friday.",
+                "",
+                "| Workstream | Owner |",
+                "| --- | --- |",
+                "| QA | Mei |",
+            ]
+        )
+
+    monkeypatch.setattr(MarkItDownParser, "_convert_local_to_markdown", fake_convert)
+    pptx_path = tmp_path / "deck.pptx"
+    pptx_path.write_bytes(b"fake pptx payload")
+
+    result = DocumentParser(markitdown_allowed_base_dir=tmp_path).parse(pptx_path)
+
+    assert result.parser_name == "markitdown:pptx"
+    assert "Slide 1: Launch Plan" in result.normalized_text
+    assert "Release window is Friday." in result.normalized_text
+    assert "Table row: Slide 1: Launch Plan. Workstream=QA; Owner=Mei." in result.normalized_text
+    assert "Slide number" not in result.normalized_text
+    assert result.page_count is None
+
+
+def test_document_parser_extracts_real_markitdown_pptx_slide_metadata(tmp_path: Path) -> None:
+    pptx = pytest.importorskip("pptx")
+    presentation = pptx.Presentation()
+    slide1 = presentation.slides.add_slide(presentation.slide_layouts[0])
+    slide1.shapes.title.text = "Launch Plan"
+    slide1.placeholders[1].text = "Q3 release\nRegional rollout"
+
+    slide2 = presentation.slides.add_slide(presentation.slide_layouts[5])
+    slide2.shapes.title.text = "Execution Matrix"
+    textbox = slide2.shapes.add_textbox(pptx.util.Inches(0.8), pptx.util.Inches(1.5), pptx.util.Inches(4.5), pptx.util.Inches(1.4))
+    text_frame = textbox.text_frame
+    text_frame.text = "Milestones"
+    text_frame.add_paragraph().text = "Alpha sign-off by July 10"
+    text_frame.add_paragraph().text = "Pilot by August 1"
+    table = slide2.shapes.add_table(3, 2, pptx.util.Inches(5.1), pptx.util.Inches(1.4), pptx.util.Inches(4.1), pptx.util.Inches(1.2)).table
+    table.cell(0, 0).text = "Owner"
+    table.cell(0, 1).text = "Status"
+    table.cell(1, 0).text = "QA"
+    table.cell(1, 1).text = "On track"
+    table.cell(2, 0).text = "Ops"
+    table.cell(2, 1).text = "Blocked"
+
+    pptx_path = tmp_path / "complex.pptx"
+    presentation.save(pptx_path)
+
+    result = DocumentParser(markitdown_allowed_base_dir=tmp_path).parse(pptx_path)
+
+    assert result.parser_name == "markitdown:pptx"
+    assert "Slide 2: Execution Matrix" in result.normalized_text
+    assert "Table row: Slide 2: Execution Matrix. Owner=QA; Status=On track." in result.normalized_text
+    assert "Milestones" in result.normalized_text
+    execution_row = next(segment for segment in result.segments if "Owner=QA; Status=On track." in segment.text)
+    assert execution_row.citation_metadata["slide_number"] == 2
+    assert execution_row.citation_metadata["slide_title"] == "Execution Matrix"
+    assert execution_row.citation_metadata["segment_kind"] == "table_row"
+
+
+def test_document_parser_markitdown_disabled_rejects_office_suffix(tmp_path: Path, monkeypatch) -> None:
+    parser = DocumentParser(markitdown_allowed_base_dir=tmp_path)
+    monkeypatch.setattr(parser.settings, "markitdown_enabled", False)
+    xlsx_path = tmp_path / "disabled.xlsx"
+    xlsx_path.write_bytes(b"fake xlsx payload")
+
+    with pytest.raises(ValueError, match="Unsupported parser"):
+        parser.parse(xlsx_path)
+
+
+def test_document_parser_reports_markitdown_conversion_failure(tmp_path: Path, monkeypatch) -> None:
+    def fail_convert(self, path: Path) -> str:
+        raise ValueError("conversion failed")
+
+    monkeypatch.setattr(MarkItDownParser, "_convert_local_to_markdown", fail_convert)
+    xlsx_path = tmp_path / "broken.xlsx"
+    xlsx_path.write_bytes(b"fake xlsx payload")
+
+    with pytest.raises(ValueError, match="conversion failed"):
+        DocumentParser(markitdown_allowed_base_dir=tmp_path).parse(xlsx_path)
+
+
+def test_markitdown_parser_rejects_paths_outside_allowed_base(tmp_path: Path) -> None:
+    allowed_dir = tmp_path / "allowed"
+    outside_dir = tmp_path / "outside"
+    allowed_dir.mkdir()
+    outside_dir.mkdir()
+    outside_path = outside_dir / "blocked.xlsx"
+    outside_path.write_bytes(b"fake xlsx payload")
+
+    parser = MarkItDownParser(allowed_base_dir=allowed_dir)
+
+    with pytest.raises(ValueError, match="configured document data directory"):
+        parser.parse(outside_path, suffix=".xlsx")
+
+
+def test_markitdown_parser_rejects_oversized_local_file(tmp_path: Path, monkeypatch) -> None:
+    parser = MarkItDownParser(allowed_base_dir=tmp_path)
+    monkeypatch.setattr(parser.settings, "markitdown_max_file_size_bytes", 4)
+    xlsx_path = tmp_path / "oversized.xlsx"
+    xlsx_path.write_bytes(b"12345")
+
+    with pytest.raises(ValueError, match="exceeding the configured limit"):
+        parser.parse(xlsx_path, suffix=".xlsx")
+
+
+def test_markitdown_parser_enforces_output_char_limit(tmp_path: Path, monkeypatch) -> None:
+    parser = MarkItDownParser(allowed_base_dir=tmp_path)
+    monkeypatch.setattr(parser.settings, "markitdown_max_output_chars", 16)
+    monkeypatch.setattr(parser, "_run_markitdown_conversion", lambda path: "# Budget\n\nA very long payload")
+    xlsx_path = tmp_path / "large-output.xlsx"
+    xlsx_path.write_bytes(b"fake xlsx payload")
+
+    with pytest.raises(ValueError, match="exceeding the configured limit"):
+        parser.parse(xlsx_path, suffix=".xlsx")
+
+
+def test_markitdown_parser_times_out_slow_conversion(tmp_path: Path, monkeypatch) -> None:
+    parser = MarkItDownParser(allowed_base_dir=tmp_path)
+    monkeypatch.setattr(parser.settings, "markitdown_timeout_seconds", 0.01)
+
+    def slow_conversion(path: Path) -> str:
+        time.sleep(0.05)
+        return "# Budget"
+
+    monkeypatch.setattr(parser, "_run_markitdown_conversion", slow_conversion)
+    xlsx_path = tmp_path / "slow.xlsx"
+    xlsx_path.write_bytes(b"fake xlsx payload")
+
+    with pytest.raises(ValueError, match="timed out"):
+        parser.parse(xlsx_path, suffix=".xlsx")
