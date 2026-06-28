@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
+from app.models.document import Document
 from app.models.eval import EvalCase, EvalResult, EvalRun
 from app.models.enums import RoleName
 from app.models.role import Role
@@ -303,6 +304,126 @@ def test_eval_service_uses_external_benchmark_annotations_from_notes() -> None:
     assert annotation["expected_key_facts"] == ["Net sales were 34.2 billion"]
     assert annotation["forbidden_key_facts"] == ["private margin forecast"]
     assert annotation["scoring_notes"] == "external annotation should override legacy keywords"
+
+
+def test_eval_service_resolves_corpus_scope_from_case_titles(db_session: Session) -> None:
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add(admin_role)
+    db_session.flush()
+    admin = _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+    expected_doc = Document(title="Scope Expected Doc", owner_user_id=admin.id)
+    forbidden_doc = Document(title="Scope Forbidden Doc", owner_user_id=admin.id)
+    noise_doc = Document(title="Unrelated Noise Doc", owner_user_id=admin.id)
+    db_session.add_all([expected_doc, forbidden_doc, noise_doc])
+    case = EvalCase(
+        dataset_name="scoped_eval",
+        case_name="scoped case",
+        acting_user_email="admin@example.com",
+        question="What does the scoped document require?",
+        expected_document_titles=["Scope Expected Doc"],
+        forbidden_document_titles=["Scope Forbidden Doc"],
+        expected_answer_keywords=[],
+    )
+    db_session.add(case)
+    db_session.commit()
+
+    document_ids = EvalService(db_session)._resolve_eval_corpus_document_ids([case])
+
+    assert document_ids is not None
+    assert set(document_ids) == {expected_doc.id, forbidden_doc.id}
+
+
+def test_eval_service_resolves_case_scope_from_case_titles(db_session: Session) -> None:
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add(admin_role)
+    db_session.flush()
+    admin = _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+    expected_doc = Document(title="Scoped Run Doc", owner_user_id=admin.id)
+    forbidden_doc = Document(title="Scoped Forbidden Doc", owner_user_id=admin.id)
+    noise_doc = Document(title="Noise Run Doc", owner_user_id=admin.id)
+    db_session.add_all([expected_doc, forbidden_doc, noise_doc])
+    case = EvalCase(
+        dataset_name="scoped_eval",
+        case_name="scoped run case",
+        acting_user_email="admin@example.com",
+        question="What does the scoped run document require?",
+        expected_document_titles=["Scoped Run Doc"],
+        forbidden_document_titles=["Scoped Forbidden Doc"],
+        expected_answer_keywords=[],
+    )
+    db_session.add(case)
+    db_session.commit()
+
+    document_ids = EvalService(db_session)._resolve_eval_case_document_ids(case)
+
+    assert document_ids is not None
+    assert set(document_ids) == {expected_doc.id, forbidden_doc.id}
+
+
+def test_eval_run_passes_case_scope_to_case_evaluator(db_session: Session, monkeypatch) -> None:
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add(admin_role)
+    db_session.flush()
+    admin = _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+    first_doc = Document(title="Scoped Run Doc A", owner_user_id=admin.id)
+    second_doc = Document(title="Scoped Run Doc B", owner_user_id=admin.id)
+    noise_doc = Document(title="Noise Run Doc", owner_user_id=admin.id)
+    db_session.add_all([first_doc, second_doc, noise_doc])
+    first_case = EvalCase(
+        dataset_name="scoped_eval",
+        case_name="scoped run case a",
+        acting_user_email="admin@example.com",
+        question="What does the scoped run document A require?",
+        expected_document_titles=["Scoped Run Doc A"],
+        forbidden_document_titles=[],
+        expected_answer_keywords=[],
+    )
+    second_case = EvalCase(
+        dataset_name="scoped_eval",
+        case_name="scoped run case b",
+        acting_user_email="admin@example.com",
+        question="What does the scoped run document B require?",
+        expected_document_titles=["Scoped Run Doc B"],
+        forbidden_document_titles=[],
+        expected_answer_keywords=[],
+    )
+    run = EvalRun(dataset_name="scoped_eval", status="running", total_cases=2, summary_json={})
+    db_session.add_all([first_case, second_case, run])
+    db_session.commit()
+
+    captured_scopes: list[list[str]] = []
+
+    def _fake_evaluate_case_with_retry(self, run, case, top_k, *, max_attempts=2, scoped_document_ids=None):
+        captured_scopes.append([str(item) for item in scoped_document_ids or []])
+        return EvalResult(
+            run_id=run.id,
+            case_id=case.id,
+            acting_user_email=case.acting_user_email,
+            retrieval_hit_rate=1.0,
+            citation_accuracy=1.0,
+            answer_faithfulness=1.0,
+            permission_isolation_correct=True,
+            overall_pass=True,
+            details_json={
+                "case_name": case.case_name,
+                "case_annotations": {"expected_outcome": "answer"},
+                "metric_breakdown": {
+                    "retrieval": {"score": 1.0},
+                    "citation": {"score": 1.0},
+                    "faithfulness": {"score": 1.0},
+                    "permission_isolation": {"score": 1.0, "passed": True},
+                    "overall": {"score": 1.0},
+                },
+            },
+        )
+
+    monkeypatch.setattr(EvalService, "_evaluate_case_with_retry", _fake_evaluate_case_with_retry)
+
+    detail = EvalService(db_session)._execute_run_cases(run, [first_case, second_case], top_k=5, request_metadata={})
+
+    assert detail.status == "completed"
+    assert captured_scopes == [[str(first_doc.id)], [str(second_doc.id)]]
+    assert detail.summary_json["corpus_scope_document_count"] == 2
 
 
 def test_permission_isolation_metric_treats_forbidden_fact_leak_as_failure() -> None:

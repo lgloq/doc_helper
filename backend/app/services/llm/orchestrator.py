@@ -21,6 +21,7 @@ from app.schemas.llm import (
     WorkflowGenerationResult,
 )
 from app.services.chat.memory import ConversationMemory, build_conversation_memory, has_usable_workflow_context
+from app.services.chat.evidence_audit import build_evidence_audit
 from app.schemas.search import SearchDebugInfo, SearchResponse, SearchResultChunk
 from app.services.chat.generation import AnswerGenerationResult, AnswerGeneratorFactory, DeterministicAnswerGenerator
 from app.services.chat.prompts import validate_used_chunk_ids
@@ -71,9 +72,10 @@ class CopilotOrchestrator:
         session_id: UUID,
         top_k: int,
         existing_messages,
+        scoped_document_ids: list[UUID] | None = None,
     ) -> CopilotRunResult:
         memory = build_conversation_memory(existing_messages)
-        accessible_documents = self.tools.list_accessible_documents(actor)
+        accessible_documents = self.tools.list_accessible_documents(actor, scoped_document_ids=scoped_document_ids)
         router_result = self.router.route(
             question=question,
             accessible_documents=accessible_documents,
@@ -95,9 +97,25 @@ class CopilotOrchestrator:
             )
 
         if decision.intent == "document_qa":
-            return self._run_document_qa(actor, question, existing_messages, memory, top_k, router_result)
+            return self._run_document_qa(
+                actor,
+                question,
+                existing_messages,
+                memory,
+                top_k,
+                router_result,
+                scoped_document_ids=scoped_document_ids,
+            )
         if decision.intent == "topic_qa":
-            return self._run_topic_qa(actor, question, existing_messages, memory, top_k, router_result)
+            return self._run_topic_qa(
+                actor,
+                question,
+                existing_messages,
+                memory,
+                top_k,
+                router_result,
+                scoped_document_ids=scoped_document_ids,
+            )
         if decision.intent == "version_compare":
             return self._run_version_compare(actor, question, memory, router_result)
         if decision.intent == "workflow_generation":
@@ -134,10 +152,17 @@ class CopilotOrchestrator:
         conversation_memory: ConversationMemory,
         top_k: int,
         router_result: RouterDecisionResult,
+        scoped_document_ids: list[UUID] | None = None,
     ) -> CopilotRunResult:
         decision = router_result.decision
         requested_document = decision.target_document_title or decision.target_document_id or decision.requested_document_name
-        tool_result = self.tools.get_document_context(actor, requested_document, question, top_k)
+        tool_result = self.tools.get_document_context(
+            actor,
+            requested_document,
+            question,
+            top_k,
+            scoped_document_ids=scoped_document_ids,
+        )
         tool_metadata = CopilotExecutionMetadata(
             tool_name=TOOL_SEARCH_DOCS,
             tool_input={
@@ -201,8 +226,14 @@ class CopilotOrchestrator:
         conversation_memory: ConversationMemory,
         top_k: int,
         router_result: RouterDecisionResult,
+        scoped_document_ids: list[UUID] | None = None,
     ) -> CopilotRunResult:
-        retrieval_response = self.tools.search_accessible_documents(actor, question, top_k)
+        retrieval_response = self.tools.search_accessible_documents(
+            actor,
+            question,
+            top_k,
+            scoped_document_ids=scoped_document_ids,
+        )
         tool_metadata = CopilotExecutionMetadata(
             tool_name=TOOL_SEARCH_DOCS,
             tool_input={"query": question, "top_k": top_k},
@@ -682,6 +713,34 @@ class CopilotOrchestrator:
                 allow_low_score=allow_low_score,
             )
         generation = self._merge_answer_metrics(router_result, generation)
+        validated_ids = validate_used_chunk_ids(generation.used_chunk_ids, {str(item.chunk_id) for item in candidate_chunks})
+        selected_chunks = self._select_citation_chunks(generation_chunks, validated_ids)
+        if not selected_chunks:
+            selected_chunks = self._select_citation_chunks(candidate_chunks, validated_ids)
+        if generation.insufficient_evidence and not selected_chunks:
+            recovered_generation = self._recover_from_empty_citation_selection(
+                question=question,
+                router_result=router_result,
+                generation=generation,
+                generation_chunks=generation_chunks,
+                candidate_chunks=candidate_chunks,
+                history_lines=conversation_memory.history_lines,
+                conversation_context=conversation_memory.to_answer_context(),
+            )
+            if recovered_generation is not None:
+                generation = recovered_generation
+                validated_ids = validate_used_chunk_ids(generation.used_chunk_ids, {str(item.chunk_id) for item in candidate_chunks})
+                selected_chunks = self._select_citation_chunks(generation_chunks, validated_ids)
+                if not selected_chunks:
+                    selected_chunks = self._select_citation_chunks(candidate_chunks, validated_ids)
+        generation = self._enforce_grounded_answer_support(
+            question=question,
+            router_result=router_result,
+            generation=generation,
+            selected_chunks=selected_chunks,
+            history_lines=conversation_memory.history_lines,
+            conversation_context=conversation_memory.to_answer_context(),
+        )
         validated_ids = validate_used_chunk_ids(generation.used_chunk_ids, {str(item.chunk_id) for item in candidate_chunks})
         selected_chunks = self._select_citation_chunks(generation_chunks, validated_ids)
         if not selected_chunks:
@@ -1447,6 +1506,144 @@ class CopilotOrchestrator:
         )
 
     @staticmethod
+    def _enforce_grounded_answer_support(
+        *,
+        question: str,
+        router_result: RouterDecisionResult,
+        generation: AnswerGenerationResult,
+        selected_chunks: list[SearchResultChunk],
+        history_lines: list[str],
+        conversation_context: str | None,
+    ) -> AnswerGenerationResult:
+        if generation.insufficient_evidence or not selected_chunks:
+            return generation
+
+        original_audit = build_evidence_audit(generation.answer, selected_chunks)
+        if not CopilotOrchestrator._evidence_audit_requires_regrounding(original_audit):
+            return generation
+
+        fallback = DeterministicAnswerGenerator().generate(
+            question=question,
+            retrieved_chunks=selected_chunks,
+            history_lines=history_lines,
+            conversation_context=conversation_context,
+            allow_low_score=True,
+        )
+        fallback = CopilotOrchestrator._merge_answer_metrics(router_result, fallback)
+        fallback_audit = build_evidence_audit(fallback.answer, selected_chunks)
+        if fallback.insufficient_evidence or not CopilotOrchestrator._evidence_audit_requires_regrounding(fallback_audit):
+            return CopilotOrchestrator._with_grounding_enforcement_payload(
+                fallback,
+                reason="unsupported_answer_claims",
+                original_audit=original_audit,
+                fallback_audit=fallback_audit,
+                original_answer=generation.answer,
+                original_answer_basis=generation.answer_basis,
+            )
+
+        refusal = CopilotOrchestrator._refusal_generation_result(
+            answer="当前引用证据不足以稳定支撑正式答案，请直接查看引用片段或缩小问题范围。",
+            refusal_reason="low_evidence_support",
+            router_result=router_result,
+        )
+        return CopilotOrchestrator._with_grounding_enforcement_payload(
+            refusal,
+            reason="unsupported_answer_claims",
+            original_audit=original_audit,
+            fallback_audit=fallback_audit,
+            original_answer=generation.answer,
+            original_answer_basis=generation.answer_basis,
+            fallback_answer=fallback.answer,
+            fallback_answer_basis=fallback.answer_basis,
+        )
+
+    @staticmethod
+    def _recover_from_empty_citation_selection(
+        *,
+        question: str,
+        router_result: RouterDecisionResult,
+        generation: AnswerGenerationResult,
+        generation_chunks: list[SearchResultChunk],
+        candidate_chunks: list[SearchResultChunk],
+        history_lines: list[str],
+        conversation_context: str | None,
+    ) -> AnswerGenerationResult | None:
+        if not generation.insufficient_evidence:
+            return None
+        source_chunks = generation_chunks or candidate_chunks
+        if not source_chunks:
+            return None
+        document_ids = {str(item.document_id) for item in source_chunks if item.document_id is not None}
+        if len(document_ids) != 1:
+            return None
+
+        fallback = DeterministicAnswerGenerator().generate(
+            question=question,
+            retrieved_chunks=source_chunks,
+            history_lines=history_lines,
+            conversation_context=conversation_context,
+            allow_low_score=True,
+        )
+        if fallback.insufficient_evidence:
+            return None
+
+        recovered = CopilotOrchestrator._merge_answer_metrics(router_result, fallback)
+        valid_ids = validate_used_chunk_ids(recovered.used_chunk_ids, {str(item.chunk_id) for item in candidate_chunks})
+        if not valid_ids:
+            return None
+        return CopilotOrchestrator._with_grounding_enforcement_payload(
+            recovered,
+            reason="empty_citation_recovery",
+            original_audit={},
+            original_answer=generation.answer,
+            original_answer_basis=generation.answer_basis,
+        )
+
+    @staticmethod
+    def _evidence_audit_requires_regrounding(audit: dict[str, Any] | None) -> bool:
+        if not isinstance(audit, dict):
+            return False
+        claim_count = int(audit.get("claim_count") or 0)
+        unsupported_count = int(audit.get("unsupported_count") or 0)
+        return claim_count > 0 and unsupported_count > 0
+
+    @staticmethod
+    def _with_grounding_enforcement_payload(
+        answer_result: AnswerGenerationResult,
+        *,
+        reason: str,
+        original_audit: dict[str, Any],
+        fallback_audit: dict[str, Any] | None = None,
+        original_answer: str | None = None,
+        original_answer_basis: str | None = None,
+        fallback_answer: str | None = None,
+        fallback_answer_basis: str | None = None,
+    ) -> AnswerGenerationResult:
+        raw_payload = dict(answer_result.raw_payload or {})
+        raw_payload["grounding_enforcement"] = {
+            "reason": reason,
+            "original_answer_basis": original_answer_basis,
+            "fallback_answer_basis": fallback_answer_basis,
+            "original_answer": original_answer,
+            "fallback_answer": fallback_answer,
+            "original_evidence_audit": original_audit,
+            "fallback_evidence_audit": fallback_audit,
+        }
+        return AnswerGenerationResult(
+            answer=answer_result.answer,
+            insufficient_evidence=answer_result.insufficient_evidence,
+            evidence_conflict=answer_result.evidence_conflict,
+            used_chunk_ids=answer_result.used_chunk_ids,
+            answer_basis=answer_result.answer_basis,
+            provider_name=answer_result.provider_name,
+            model_name=answer_result.model_name,
+            prompt_tokens=answer_result.prompt_tokens,
+            completion_tokens=answer_result.completion_tokens,
+            latency_ms=answer_result.latency_ms,
+            raw_payload=raw_payload,
+        )
+
+    @staticmethod
     def _select_citation_chunks(matched_chunks: list[SearchResultChunk], validated_chunk_ids: list[UUID]) -> list[SearchResultChunk]:
         if not validated_chunk_ids:
             return []
@@ -1590,35 +1787,62 @@ def _looks_like_followup_question(question: str) -> bool:
 
 
 def _looks_like_structured_table_lookup(question: str) -> bool:
-    lowered = question.casefold()
-    markers = (
+    normalized = _normalize_for_focus(question)
+    source_markers = ("条例", "办法", "规定", "制度", "规则", "条款")
+    if any(marker in normalized for marker in source_markers) or re.search(r"第[一二三四五六七八九十百千万零〇\d]+条", normalized):
+        return False
+
+    matched = sum(1 for marker in _generic_structured_field_markers() if marker in normalized)
+    if matched >= 2:
+        return True
+    if matched >= 1 and any(marker in normalized for marker in ("矩阵", "表格", "按级别", "由谁审批", "哪一项", "字段")):
+        return True
+    return False
+
+
+def _looks_like_clause_centric_question(question: str) -> bool:
+    normalized = _normalize_for_focus(question)
+    if not normalized or _looks_like_structured_table_lookup(question):
+        return False
+
+    source_markers = ("条例", "办法", "规定", "制度", "规则", "条款")
+    if any(marker in normalized for marker in source_markers):
+        return True
+    if re.search(r"第[一二三四五六七八九十百千万零〇\d]+条", normalized):
+        return True
+
+    timing_markers = ("时间", "多久", "期限", "时限", "最迟", "几日", "几个月", "多少天", "24小时")
+    rule_markers = ("要求", "应当", "不得", "可以", "分别", "哪些", "什么情况下", "是否")
+    field_hits = sum(1 for marker in _generic_structured_field_markers() if marker in normalized)
+    return any(marker in normalized for marker in timing_markers) and any(marker in normalized for marker in rule_markers) and field_hits <= 2
+
+
+def _generic_structured_field_markers() -> tuple[str, ...]:
+    return (
+        "负责人",
+        "责任人",
         "审批",
         "审批链路",
         "处理时限",
-        "首次响应",
-        "响应时间",
-        "响应要求",
-        "多久响应",
         "时限",
-        "脱敏",
-        "检查项",
-        "是否必须",
-        "负责人",
-        "责任人",
-        "完成时限",
-        "复核周期",
-        "退出要求",
+        "期限",
+        "周期",
+        "方式",
+        "材料",
         "有效期",
-        "验收材料",
-        "验收人",
-        "保留",
-        "l4",
-        "高风险",
-        "生产环境",
-        "由谁",
-        "哪些",
+        "条件",
+        "等级",
+        "级别",
+        "字段",
+        "检查项",
+        "禁止",
+        "允许",
+        "响应时间",
+        "首次响应",
+        "验收",
+        "回收",
+        "保留期限",
     )
-    return any(marker in lowered for marker in markers)
 
 
 def _generation_focus_score(question: str, chunk: SearchResultChunk) -> float:
@@ -1631,6 +1855,9 @@ def _generation_focus_score(question: str, chunk: SearchResultChunk) -> float:
     normalized_evidence = _normalize_for_focus(evidence_text)
     score = chunk.score.rerank if chunk.score.rerank is not None else chunk.score.fused
     score += chunk.score.lexical_normalized * 0.06
+    clause_centric_question = _looks_like_clause_centric_question(question)
+    chunk_has_clause_signal = _has_clause_signal(evidence_text)
+    chunk_has_table_rows = "Table row:" in chunk.content
 
     for term in _focus_query_terms(normalized_question):
         if term in normalized_evidence:
@@ -1641,6 +1868,13 @@ def _generation_focus_score(question: str, chunk: SearchResultChunk) -> float:
         for marker in ("条", "规定", "债务", "合同", "承包", "个体工商户", "商标")
     ):
         score += 0.12
+    if clause_centric_question:
+        if chunk_has_clause_signal:
+            score += 0.18
+        if chunk_has_table_rows and not chunk_has_clause_signal:
+            score -= 0.2
+    elif _looks_like_structured_table_lookup(question) and chunk_has_table_rows:
+        score += 0.14
 
     domain_pairs = (
         ("债务", "债务"),
@@ -1701,6 +1935,12 @@ def _generation_focus_score(question: str, chunk: SearchResultChunk) -> float:
             score += 0.16
 
     return score
+
+
+def _has_clause_signal(content: str) -> bool:
+    if "条款全称" in content:
+        return True
+    return bool(re.search(r"第[一二三四五六七八九十百千万零〇\d]+条", content))
 
 
 def _focus_table_rows_for_question(question: str, chunk: SearchResultChunk) -> SearchResultChunk:

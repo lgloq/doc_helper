@@ -1205,6 +1205,85 @@ def test_search_document_evidence_sweep_expands_source_pool_from_seed_document(d
     assert enabled_response.debug.pre_rerank_count > disabled_response.debug.pre_rerank_count
 
 
+def test_search_small_scope_auto_enables_document_evidence_sweep_for_simple_query(db_session: Session) -> None:
+    admin_role = Role(name=RoleName.ADMIN, description="Admin")
+    db_session.add(admin_role)
+    db_session.flush()
+    admin = _create_user(db_session, admin_role, "admin@example.com", None, "admin-pass")
+
+    document_id = _create_ready_chunked_document(
+        db_session,
+        admin,
+        title="供应商准入风险评估管理办法",
+        chunks=[
+            (
+                "流程总则",
+                "供应商准入风险评估流程适用于所有新供应商，申请材料和复核结论在流程中统一维护。",
+            ),
+            (
+                "申请信息",
+                "申请部门需要登记业务联系人、预算编号、服务范围和预计上线时间。",
+            ),
+            (
+                "评审安排",
+                "采购、法务和信息安全团队按照风险等级安排会签，并记录会议纪要。",
+            ),
+            (
+                "结果归档",
+                "复核结论=通过后纳入合格供应商名录；未通过时退回申请部门补充材料。",
+            ),
+        ],
+    )
+
+    disabled_service = RetrievalService(db_session)
+    disabled_service.settings = Settings(
+        retrieval_vector_enabled=False,
+        retrieval_structural_enabled=False,
+        retrieval_candidate_multiplier=1,
+        retrieval_candidate_min=1,
+        retrieval_candidate_max=1,
+        retrieval_in_document_expansion_enabled=False,
+        retrieval_document_evidence_sweep_enabled=False,
+        retrieval_document_evidence_sweep_small_scope_auto_enabled=False,
+        retrieval_document_evidence_sweep_seed_documents=1,
+        retrieval_document_evidence_sweep_per_document=4,
+        retrieval_document_evidence_sweep_max_candidates=4,
+        retrieval_document_diversity_enabled=False,
+    )
+    disabled_response = disabled_service.search(
+        admin,
+        SearchRequest(query="供应商准入风险评估结论是什么？", top_k=1),
+        scoped_document_ids=[document_id],
+    )
+
+    service = RetrievalService(db_session)
+    service.settings = Settings(
+        retrieval_vector_enabled=False,
+        retrieval_structural_enabled=False,
+        retrieval_candidate_multiplier=1,
+        retrieval_candidate_min=1,
+        retrieval_candidate_max=1,
+        retrieval_in_document_expansion_enabled=False,
+        retrieval_document_evidence_sweep_enabled=False,
+        retrieval_document_evidence_sweep_small_scope_auto_enabled=True,
+        retrieval_document_evidence_sweep_small_scope_max_documents=1,
+        retrieval_document_evidence_sweep_seed_documents=1,
+        retrieval_document_evidence_sweep_per_document=4,
+        retrieval_document_evidence_sweep_max_candidates=4,
+        retrieval_document_diversity_enabled=False,
+    )
+    response = service.search(
+        admin,
+        SearchRequest(query="供应商准入风险评估结论是什么？", top_k=1),
+        scoped_document_ids=[document_id],
+    )
+
+    assert disabled_response.debug.document_evidence_sweep_candidate_count == 0
+    assert response.debug.document_evidence_sweep_candidate_count > 0
+    assert response.debug.document_evidence_sweep_skipped is False
+    assert response.debug.pre_rerank_count > disabled_response.debug.pre_rerank_count
+
+
 def test_search_uses_structural_clause_candidates(db_session: Session) -> None:
     admin_role = Role(name=RoleName.ADMIN, description="Admin")
     db_session.add(admin_role)

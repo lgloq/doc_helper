@@ -198,6 +198,10 @@ class RetrievalService:
             accessible_document_ids = [item for item in accessible_document_ids if item in scoped_set]
         permission_filter_latency_ms = int((perf_counter() - permission_started) * 1000)
         query_plan = self.query_optimizer.build(payload.query, target_document_title=target_document_title)
+        document_sweep_small_scope_auto = self._document_evidence_sweep_small_scope_auto_applies(
+            query_plan,
+            accessible_document_ids,
+        )
         probe_applied = False
         probe_latency_ms = 0
         probe_skip_reason = self._query_plan_probe_skip_reason(
@@ -447,11 +451,16 @@ class RetrievalService:
             query_plan,
             fused_candidates_for_sweep,
             search_started=search_started,
+            small_scope_auto=document_sweep_small_scope_auto,
         )
         document_sweep_hits = (
             []
             if document_sweep_skip_reason is not None
-            else self._collect_document_evidence_sweep(query_plan.retrieval_query, fused_candidates_for_sweep)
+            else self._collect_document_evidence_sweep(
+                query_plan.retrieval_query,
+                fused_candidates_for_sweep,
+                allow_small_scope_auto=document_sweep_small_scope_auto,
+            )
         )
         document_evidence_sweep_latency_ms = int((perf_counter() - sweep_started) * 1000)
         if document_sweep_hits:
@@ -722,13 +731,14 @@ class RetrievalService:
         candidates: Iterable[RerankCandidate],
         *,
         search_started: float,
+        small_scope_auto: bool = False,
     ) -> str | None:
-        if not bool(getattr(self.settings, "retrieval_document_evidence_sweep_enabled", False)):
+        if not bool(getattr(self.settings, "retrieval_document_evidence_sweep_enabled", False)) and not small_scope_auto:
             return "disabled"
         candidate_list = list(candidates)
         if not candidate_list:
             return "no_seed_candidates"
-        if self._is_simple_retrieval_query(query_plan):
+        if self._is_simple_retrieval_query(query_plan) and not small_scope_auto:
             return "simple_query"
         min_remaining = max(
             0,
@@ -737,6 +747,23 @@ class RetrievalService:
         if min_remaining > 0 and self._remaining_latency_budget_ms(search_started, query_plan) < min_remaining:
             return "latency_budget_exhausted"
         return None
+
+    def _document_evidence_sweep_small_scope_auto_applies(
+        self,
+        query_plan: QueryOptimizationPlan,
+        accessible_document_ids: list[UUID],
+    ) -> bool:
+        if bool(getattr(self.settings, "retrieval_document_evidence_sweep_enabled", False)):
+            return False
+        if not bool(getattr(self.settings, "retrieval_document_evidence_sweep_small_scope_auto_enabled", True)):
+            return False
+        if not self._is_simple_retrieval_query(query_plan):
+            return False
+        max_documents = max(
+            0,
+            int(getattr(self.settings, "retrieval_document_evidence_sweep_small_scope_max_documents", 0) or 0),
+        )
+        return 0 < len(accessible_document_ids) <= max_documents
 
     def _remaining_latency_budget_ms(self, search_started: float, query_plan: QueryOptimizationPlan) -> int:
         budget_ms = self._latency_budget_ms(query_plan)
@@ -1501,8 +1528,10 @@ class RetrievalService:
         self,
         query: str,
         candidates: Iterable[RerankCandidate],
+        *,
+        allow_small_scope_auto: bool = False,
     ) -> list[RetrievalCandidate]:
-        if not self.settings.retrieval_document_evidence_sweep_enabled:
+        if not self.settings.retrieval_document_evidence_sweep_enabled and not allow_small_scope_auto:
             return []
 
         seed_document_limit = max(0, int(self.settings.retrieval_document_evidence_sweep_seed_documents or 0))

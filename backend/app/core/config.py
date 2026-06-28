@@ -116,6 +116,8 @@ class Settings(BaseSettings):
     retrieval_document_evidence_sweep_max_candidates: int = 48
     retrieval_document_evidence_sweep_score_weight: float = 0.36
     retrieval_document_evidence_sweep_min_remaining_budget_ms: int = 700
+    retrieval_document_evidence_sweep_small_scope_auto_enabled: bool = True
+    retrieval_document_evidence_sweep_small_scope_max_documents: int = 3
     retrieval_latency_budget_simple_ms: int = 4500
     retrieval_latency_budget_complex_ms: int = 12000
     retrieval_document_first_evidence_enabled: bool = False

@@ -88,8 +88,21 @@ class ChatService:
         self.chat_repository.delete_session(chat_session)
         self.session.commit()
 
-    def preview_answer(self, actor: User, question: str, top_k: int = 5) -> PreparedChatAnswer:
-        return self._prepare_answer(actor, question, top_k, existing_messages=[], session_id=None)
+    def preview_answer(
+        self,
+        actor: User,
+        question: str,
+        top_k: int = 5,
+        scoped_document_ids: list[UUID] | None = None,
+    ) -> PreparedChatAnswer:
+        return self._prepare_answer(
+            actor,
+            question,
+            top_k,
+            existing_messages=[],
+            session_id=None,
+            scoped_document_ids=scoped_document_ids,
+        )
 
     def create_message(self, actor: User, session_id: UUID, payload: ChatMessageCreate, allow_inflight_client_request: bool = False) -> ChatMessageCreateResponse:
         chat_session = self._get_session_or_404(actor, session_id, include_messages=True)
@@ -157,7 +170,13 @@ class ChatService:
 
         prepare_started = perf_counter()
         try:
-            prepared = self._prepare_answer(actor, payload.content, payload.top_k, existing_messages, session_id=chat_session.id)
+            prepared = self._prepare_answer(
+                actor,
+                payload.content,
+                payload.top_k,
+                existing_messages,
+                session_id=chat_session.id,
+            )
             request_latency_ms = int((perf_counter() - prepare_started) * 1000)
         except Exception as exc:
             if client_request_id:
@@ -406,6 +425,7 @@ class ChatService:
         top_k: int,
         existing_messages: list[ChatMessage],
         session_id: UUID | None,
+        scoped_document_ids: list[UUID] | None = None,
     ) -> PreparedChatAnswer:
         effective_session_id = session_id or UUID(int=0)
         orchestrated: CopilotRunResult = self.copilot_orchestrator.run(
@@ -414,6 +434,7 @@ class ChatService:
             session_id=effective_session_id,
             top_k=top_k,
             existing_messages=existing_messages,
+            scoped_document_ids=scoped_document_ids,
         )
         return PreparedChatAnswer(
             router_result=orchestrated.router_result,

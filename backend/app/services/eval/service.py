@@ -11,8 +11,10 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 from openai import APIConnectionError, APITimeoutError
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.document import Document
 from app.models.eval import EvalResult, EvalRun
 from app.models.enums import RoleName
 from app.models.user import User
@@ -197,13 +199,29 @@ class EvalService:
         actor: User | None = None,
     ) -> EvalRunDetailRead:
         results: list[EvalResult] = []
+        corpus_document_ids = self._resolve_eval_corpus_document_ids(cases)
+        if corpus_document_ids and isinstance(run.summary_json, dict):
+            run.summary_json = {
+                **run.summary_json,
+                "corpus_scope_document_count": len(corpus_document_ids),
+            }
+            self.session.commit()
         try:
             for case in cases:
-                result = self._evaluate_case_with_retry(run, case, top_k)
+                case_document_ids = self._resolve_eval_case_document_ids(case)
+                result = self._evaluate_case_with_retry(
+                    run,
+                    case,
+                    top_k,
+                    scoped_document_ids=case_document_ids,
+                )
                 results.append(result)
                 self.eval_repository.add_results([result])
                 run.summary_json = self._with_client_request_metadata(
-                    self._build_running_progress_summary(len(results), len(cases)),
+                    self._with_corpus_scope_summary(
+                        self._build_running_progress_summary(len(results), len(cases)),
+                        corpus_document_ids,
+                    ),
                     request_metadata,
                     status="running",
                 )
@@ -212,7 +230,7 @@ class EvalService:
             run.status = "completed"
             run.finished_at = datetime.now(UTC)
             run.summary_json = self._with_client_request_metadata(
-                self._build_summary(results),
+                self._with_corpus_scope_summary(self._build_summary(results), corpus_document_ids),
                 request_metadata,
                 status="completed",
             )
@@ -223,7 +241,7 @@ class EvalService:
             run.status = "failed"
             run.finished_at = datetime.now(UTC)
             run.summary_json = self._with_client_request_metadata(
-                self._build_summary(results),
+                self._with_corpus_scope_summary(self._build_summary(results), corpus_document_ids),
                 request_metadata,
                 status="failed",
             )
@@ -376,11 +394,21 @@ class EvalService:
             latest_completed_run=EvalRunRead.model_validate(latest_completed_run) if latest_completed_run else None,
         )
 
-    def _evaluate_case_with_retry(self, run: EvalRun, case, top_k: int, *, max_attempts: int = 2) -> EvalResult:
+    def _evaluate_case_with_retry(
+        self,
+        run: EvalRun,
+        case,
+        top_k: int,
+        *,
+        max_attempts: int = 2,
+        scoped_document_ids: list[UUID] | None = None,
+    ) -> EvalResult:
         last_error: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
-                return self._evaluate_case(run, case, top_k)
+                if scoped_document_ids is None:
+                    return self._evaluate_case(run, case, top_k)
+                return self._evaluate_case(run, case, top_k, scoped_document_ids=scoped_document_ids)
             except (APIConnectionError, APITimeoutError) as error:
                 last_error = error
                 if attempt >= max_attempts:
@@ -395,7 +423,54 @@ class EvalService:
             return self.eval_repository.get_cases_by_ids(payload.case_ids)
         return self.eval_repository.list_cases(payload.dataset_name)
 
-    def _evaluate_case(self, run: EvalRun, case, top_k: int) -> EvalResult:
+    def _resolve_eval_corpus_document_ids(self, cases) -> list[UUID] | None:
+        titles: set[str] = set()
+        for case in cases:
+            annotations = self._resolve_case_annotations(case)
+            titles.update(self._case_corpus_titles(case, annotations))
+        return self._resolve_document_ids_by_title(titles)
+
+    def _resolve_eval_case_document_ids(self, case) -> list[UUID] | None:
+        annotations = self._resolve_case_annotations(case)
+        titles = self._case_corpus_titles(case, annotations)
+        return self._resolve_document_ids_by_title(titles)
+
+    def _resolve_document_ids_by_title(self, titles: set[str]) -> list[UUID] | None:
+        if not titles:
+            return None
+
+        statement = select(Document.id).where(Document.title.in_(sorted(titles)))
+        document_ids = list(self.session.scalars(statement).all())
+        return document_ids or None
+
+    @staticmethod
+    def _case_corpus_titles(case, annotations: dict) -> set[str]:
+        titles: set[str] = set()
+        for key in ("expected_retrieval_titles", "expected_evidence_titles"):
+            values = annotations.get(key)
+            if isinstance(values, list):
+                titles.update(str(item).strip() for item in values if str(item).strip())
+        titles.update(str(item).strip() for item in (getattr(case, "expected_document_titles", []) or []) if str(item).strip())
+        titles.update(str(item).strip() for item in (getattr(case, "forbidden_document_titles", []) or []) if str(item).strip())
+        return titles
+
+    @staticmethod
+    def _with_corpus_scope_summary(summary: dict, corpus_document_ids: list[UUID] | None) -> dict:
+        if not corpus_document_ids:
+            return summary
+        return {
+            **summary,
+            "corpus_scope_document_count": len(corpus_document_ids),
+        }
+
+    def _evaluate_case(
+        self,
+        run: EvalRun,
+        case,
+        top_k: int,
+        *,
+        scoped_document_ids: list[UUID] | None = None,
+    ) -> EvalResult:
         actor = self.user_repository.get_by_email(case.acting_user_email)
         if actor is None:
             details = {
@@ -421,7 +496,12 @@ class EvalService:
                 details_json=details,
             )
 
-        prepared = self.chat_service.preview_answer(actor, case.question, top_k=top_k)
+        prepared = self.chat_service.preview_answer(
+            actor,
+            case.question,
+            top_k=top_k,
+            scoped_document_ids=scoped_document_ids,
+        )
         metrics = self._compute_metrics(case, prepared)
         pipeline_diagnosis = build_eval_pipeline_diagnosis(
             session=self.session,
@@ -462,6 +542,7 @@ class EvalService:
                     "eval_case_id": str(case.id),
                     "case_name": case.case_name,
                     "dataset_name": case.dataset_name,
+                    "eval_scope_document_count": len(scoped_document_ids or []),
                     "permission_isolation_correct": metrics["permission_isolation_correct"],
                     "router_decision": prepared.router_result.decision.model_dump(mode="json"),
                     "tool_execution": prepared.tool_metadata.model_dump(mode="json"),
@@ -486,6 +567,7 @@ class EvalService:
             "expected_document_titles": case.expected_document_titles,
             "forbidden_document_titles": case.forbidden_document_titles,
             "expected_answer_keywords": case.expected_answer_keywords,
+            "eval_scope_document_count": len(scoped_document_ids or []),
             "retrieved_document_titles": metrics["retrieved_document_titles"],
             "citation_document_titles": metrics["citation_document_titles"],
             "matched_expected_titles": metrics["matched_expected_titles"],

@@ -419,6 +419,17 @@ def _grounded_chunk_relevance_score(question: str, chunk: SearchResultChunk, que
     normalized_text = re.sub(r"\s+", "", evidence_text.casefold())
     score = _candidate_signal_score(chunk) + (chunk.score.lexical_normalized * 0.08) + (chunk.score.lexical_raw * 0.02)
     score += min(_best_clause_block_match_score(chunk.content, question, query_terms) * 0.16, 0.36)
+    clause_centric_question = _looks_like_clause_centric_question(question)
+    chunk_has_clause_signal = _chunk_has_clause_signal(chunk)
+    chunk_has_table_rows = "Table row:" in chunk.content
+
+    if clause_centric_question:
+        if chunk_has_clause_signal:
+            score += 0.18
+        if chunk_has_table_rows and not chunk_has_clause_signal:
+            score -= 0.2
+    elif _looks_like_structured_table_lookup_question(question) and chunk_has_table_rows:
+        score += 0.14
 
     for term in query_terms:
         normalized_term = re.sub(r"\s+", "", term.casefold())
@@ -469,6 +480,15 @@ def _grounded_chunk_relevance_score(question: str, chunk: SearchResultChunk, que
 
 
 def _build_chunk_summary(chunk: SearchResultChunk, question: str) -> str:
+    if _looks_like_clause_centric_question(question) and _chunk_has_clause_signal(chunk):
+        evidence_summary = _build_evidence_hint_summary(chunk.content, question)
+        if evidence_summary:
+            return evidence_summary
+
+        clause_summary = _build_clause_summary(chunk.content, question)
+        if clause_summary:
+            return clause_summary
+
     table_summary = _build_table_row_summary(chunk.content, question)
     if table_summary:
         return table_summary
@@ -532,6 +552,25 @@ def _build_clause_summary(content: str, question: str) -> str:
         score += _clause_domain_match_bonus(question, block)
         scored_blocks.append((score, -index, block))
     scored_blocks.sort(reverse=True)
+
+    if _question_expects_multi_part_answer(question):
+        selected: list[str] = []
+        total_length = 0
+        for score, _, block in scored_blocks:
+            if score <= 0 and selected:
+                continue
+            cleaned = _clean_clause_summary(block)
+            if not cleaned or cleaned in selected:
+                continue
+            next_length = total_length + len(cleaned)
+            if selected and next_length > 520:
+                continue
+            selected.append(cleaned)
+            total_length = next_length
+            if len(selected) >= 2:
+                break
+        if selected:
+            return " ".join(selected)
 
     for score, _, block in scored_blocks:
         if score <= 0 and len(scored_blocks) > 1:
@@ -646,7 +685,23 @@ def _extract_clause_blocks(content: str) -> list[str]:
 
     if current:
         flush_current()
-    return [" ".join(block) for block in blocks if any("条款全称：" in line for line in block)]
+    extracted = [" ".join(block) for block in blocks if any("条款全称：" in line for line in block)]
+    if extracted:
+        return extracted
+
+    compact = "\n".join(line for line in lines if line and not line.startswith("Table row:"))
+    if not compact:
+        return []
+
+    matches = list(re.finditer(r"第[一二三四五六七八九十百千万零〇\d]+条", compact))
+    inline_blocks: list[str] = []
+    for index, match in enumerate(matches):
+        start = match.start()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(compact)
+        block = compact[start:end].strip()
+        if len(block) >= 12:
+            inline_blocks.append(block)
+    return inline_blocks
 
 
 def _looks_like_clause_heading(line: str) -> bool:
@@ -818,6 +873,86 @@ def _table_field_match_bonus(question: str, row: str) -> int:
         if query_hint in normalized_question and row_hint in normalized_row:
             bonus += 3
     return bonus
+
+
+def _chunk_has_clause_signal(chunk: SearchResultChunk) -> bool:
+    content = " ".join(part for part in [chunk.section_title or "", chunk.preview, chunk.content] if part)
+    return _text_has_clause_signal(content)
+
+
+def _text_has_clause_signal(content: str) -> bool:
+    if "条款全称" in content:
+        return True
+    return bool(re.search(r"第[一二三四五六七八九十百千万零〇\d]+条", content))
+
+
+def _looks_like_clause_centric_question(question: str) -> bool:
+    normalized = re.sub(r"\s+", "", question.casefold())
+    if not normalized:
+        return False
+    if _looks_like_structured_table_lookup_question(question):
+        return False
+
+    source_markers = ("条例", "办法", "规定", "制度", "规则", "条款")
+    if any(marker in normalized for marker in source_markers):
+        return True
+    if re.search(r"第[一二三四五六七八九十百千万零〇\d]+条", normalized):
+        return True
+
+    timing_markers = ("时间", "多久", "期限", "时限", "最迟", "几日", "几个月", "多少天", "24小时")
+    rule_markers = ("要求", "应当", "不得", "可以", "分别", "哪些", "什么情况下", "是否")
+    field_markers = _generic_structured_field_markers()
+    field_hits = sum(1 for marker in field_markers if marker in normalized)
+    return any(marker in normalized for marker in timing_markers) and any(marker in normalized for marker in rule_markers) and field_hits <= 2
+
+
+def _looks_like_structured_table_lookup_question(question: str) -> bool:
+    normalized = re.sub(r"\s+", "", question.casefold())
+    if not normalized:
+        return False
+    source_markers = ("条例", "办法", "规定", "制度", "规则", "条款")
+    if any(marker in normalized for marker in source_markers) or re.search(r"第[一二三四五六七八九十百千万零〇\d]+条", normalized):
+        return False
+
+    matched = sum(1 for marker in _generic_structured_field_markers() if marker in normalized)
+    if matched >= 2:
+        return True
+    if matched >= 1 and any(marker in normalized for marker in ("矩阵", "表格", "按级别", "由谁审批", "哪一项", "字段")):
+        return True
+    return False
+
+
+def _question_expects_multi_part_answer(question: str) -> bool:
+    normalized = re.sub(r"\s+", "", question.casefold())
+    return any(marker in normalized for marker in ("分别", "同时", "以及", "各自", "、", "和", "及", "与"))
+
+
+def _generic_structured_field_markers() -> tuple[str, ...]:
+    return (
+        "负责人",
+        "责任人",
+        "审批",
+        "审批链路",
+        "处理时限",
+        "时限",
+        "期限",
+        "周期",
+        "方式",
+        "材料",
+        "有效期",
+        "条件",
+        "等级",
+        "级别",
+        "字段",
+        "检查项",
+        "禁止",
+        "允许",
+        "响应时间",
+        "首次响应",
+        "验收",
+        "回收",
+        "保留期限",
+    )
 
 
 

@@ -56,15 +56,35 @@ class CopilotToolService:
         self.report_service = WeeklyReportService(session)
         self.faq_service = FAQService(session)
 
-    def list_accessible_documents(self, actor: User) -> list[RouterAccessibleDocument]:
+    def list_accessible_documents(self, actor: User, scoped_document_ids: list[UUID] | None = None) -> list[RouterAccessibleDocument]:
         documents = self.document_service.list_visible_documents(actor)
+        if scoped_document_ids is not None:
+            scoped_set = set(scoped_document_ids)
+            documents = [document for document in documents if document.id in scoped_set]
         return [RouterAccessibleDocument(document_id=document.id, title=document.title) for document in documents]
 
-    def search_accessible_documents(self, actor: User, query: str, top_k: int) -> SearchResponse:
-        return self.retrieval_service.search(actor, SearchRequest(query=query, top_k=top_k))
+    def search_accessible_documents(
+        self,
+        actor: User,
+        query: str,
+        top_k: int,
+        scoped_document_ids: list[UUID] | None = None,
+    ) -> SearchResponse:
+        return self.retrieval_service.search(
+            actor,
+            SearchRequest(query=query, top_k=top_k),
+            scoped_document_ids=scoped_document_ids,
+        )
 
-    def get_document_context(self, actor: User, document_title_or_id: str | UUID | None, query: str, top_k: int) -> DocumentContextToolResult:
-        resolved = self._resolve_accessible_document(actor, document_title_or_id)
+    def get_document_context(
+        self,
+        actor: User,
+        document_title_or_id: str | UUID | None,
+        query: str,
+        top_k: int,
+        scoped_document_ids: list[UUID] | None = None,
+    ) -> DocumentContextToolResult:
+        resolved = self._resolve_accessible_document(actor, document_title_or_id, scoped_document_ids=scoped_document_ids)
         if resolved is None:
             return DocumentContextToolResult(
                 document_id=None,
@@ -227,10 +247,16 @@ class CopilotToolService:
             citations=[SourceCitationRead.model_validate(item) for item in citations],
         )
 
-    def _resolve_accessible_document(self, actor: User, document_title_or_id: str | UUID | None) -> RouterAccessibleDocument | None:
+    def _resolve_accessible_document(
+        self,
+        actor: User,
+        document_title_or_id: str | UUID | None,
+        *,
+        scoped_document_ids: list[UUID] | None = None,
+    ) -> RouterAccessibleDocument | None:
         if document_title_or_id is None:
             return None
-        accessible_documents = self.list_accessible_documents(actor)
+        accessible_documents = self.list_accessible_documents(actor, scoped_document_ids=scoped_document_ids)
         value = str(document_title_or_id).strip()
         if not value:
             return None

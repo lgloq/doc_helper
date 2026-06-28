@@ -192,6 +192,49 @@ def test_generation_focuses_relevant_pdf_table_row_before_answering() -> None:
     assert "准入等级=L1" not in focused[0].content
 
 
+def test_focus_generation_prefers_clause_chunk_for_policy_deadline_question() -> None:
+    document_id = uuid4()
+    table_chunk = _with_score(
+        _chunk(
+            content=(
+                "Table row: PDF page 74 table 1. 一、基本信息=国家层面绿色工厂所属批次; "
+                "Column 2=2017 年第一批、2018 年第三批、2023 年第八批."
+            ),
+            preview="国家层面绿色工厂所属批次选项。",
+            document_id=document_id,
+            document_title="绿色工厂梯度培育及管理暂行办法",
+            section_title="附件 4 动态管理表",
+        ),
+        fused=0.82,
+        rerank=0.82,
+    )
+    clause_chunk = _with_score(
+        _chunk(
+            content=(
+                "第十二条 省级工业和信息化主管部门应在每年 7 月 31 日前将具有代表性和引领性的省层面绿色工厂"
+                "通过管理平台推荐至工业和信息化部，工业和信息化部评审后公示 15 日，无异议的纳入国家层面绿色工厂名单。\n"
+                "第十六条 国家、省、市层面绿色制造名单应在每年 4 月 15 日前通过管理平台填报动态管理表，"
+                "上报年度绿色制造关键指标情况。"
+            ),
+            preview="第十二条推荐与公示时限；第十六条动态管理表填报时限。",
+            document_id=document_id,
+            document_title="绿色工厂梯度培育及管理暂行办法",
+            section_title="第三章 创建程序",
+        ),
+        fused=0.34,
+        rerank=0.34,
+    )
+
+    focused = CopilotOrchestrator._focus_generation_chunks(
+        "国家层面绿色工厂推荐、公示和动态管理表填报分别有哪些时间要求？",
+        [table_chunk, clause_chunk],
+    )
+
+    assert focused
+    assert focused[0].chunk_id == clause_chunk.chunk_id
+    assert clause_chunk.chunk_id in {chunk.chunk_id for chunk in focused}
+
+
 def test_generation_focus_keeps_supporting_narrative_for_supplier_emergency_question() -> None:
     content = (
         "临时采购可以先行建立最小可用服务，但必须限定边界、保留记录，并在事后补齐正式审批。\n"
@@ -217,6 +260,37 @@ def test_generation_focus_keeps_supporting_narrative_for_supplier_emergency_ques
     assert len(focused) == 1
     assert "最小可用服务" in focused[0].content
     assert "禁止方式=个人网盘" in focused[0].content
+
+
+def test_deterministic_answer_prefers_clause_summary_over_table_summary_for_policy_deadline_question() -> None:
+    generator = DeterministicAnswerGenerator()
+    content = (
+        "第十二条 省级工业和信息化主管部门应在每年 7 月 31 日前将具有代表性和引领性的省层面绿色工厂"
+        "通过管理平台推荐至工业和信息化部，工业和信息化部评审后公示 15 日，无异议的纳入国家层面绿色工厂名单。\n"
+        "第十六条 国家、省、市层面绿色制造名单应在每年 4 月 15 日前通过管理平台填报动态管理表，"
+        "上报年度绿色制造关键指标情况。\n"
+        "Table row: PDF page 74 table 1. 一、基本信息=国家层面绿色工厂所属批次; "
+        "Column 2=2017 年第一批、2018 年第三批、2023 年第八批."
+    )
+
+    result = generator.generate(
+        question="国家层面绿色工厂推荐、公示和动态管理表填报分别有哪些时间要求？",
+        retrieved_chunks=[
+            _chunk(
+                content=content,
+                preview="国家层面绿色工厂推荐、公示和动态管理表填报要求。",
+                document_title="绿色工厂梯度培育及管理暂行办法",
+                section_title="第三章 创建程序",
+            )
+        ],
+        history_lines=[],
+    )
+
+    assert result.insufficient_evidence is False
+    assert "7 月 31 日前" in result.answer
+    assert "公示 15 日" in result.answer
+    assert "4 月 15 日前" in result.answer
+    assert "所属批次" not in result.answer
 
 
 def test_deterministic_answer_prefers_l4_pdf_table_row() -> None:
@@ -246,6 +320,52 @@ def test_deterministic_answer_prefers_l4_pdf_table_row() -> None:
     assert "法务负责人" in result.answer
     assert "每月复核一次" in result.answer
     assert "账号回收证明" in result.answer
+
+
+def test_deterministic_answer_prioritizes_specific_ai_governance_clause() -> None:
+    generator = DeterministicAnswerGenerator()
+    document_id = uuid4()
+    generic_chunk = _with_score(
+        _chunk(
+            content=(
+                "（四）尊重他人合法权益，不得危害他人身心健康，不得侵害他人隐私权和个人信息权益；"
+                "（五）提升生成内容的准确性和可靠性。"
+            ),
+            preview="不得侵害隐私权和个人信息权益。",
+            document_id=document_id,
+            document_title="生成式人工智能服务管理暂行办法",
+            section_title="服务规范",
+        ),
+        fused=0.78,
+        rerank=0.78,
+    )
+    specific_chunk = _with_score(
+        _chunk(
+            content=(
+                "第十一条 提供者对使用者的输入信息和使用记录应当依法履行保护义务，"
+                "不得收集非必要个人信息，不得非法留存能够识别使用者身份的输入信息和使用记录，"
+                "也不得非法向他人提供。"
+            ),
+            preview="第十一条 输入信息和使用记录保护义务。",
+            document_id=document_id,
+            document_title="生成式人工智能服务管理暂行办法",
+            section_title="第十一条",
+        ),
+        fused=0.32,
+        rerank=0.32,
+    )
+
+    result = generator.generate(
+        question="AI 助手上线后，平台保存用户提示词和操作痕迹时有哪些收集、留存、对外提供方面的红线？",
+        retrieved_chunks=[generic_chunk, specific_chunk],
+        history_lines=[],
+    )
+
+    assert result.insufficient_evidence is False
+    assert str(specific_chunk.chunk_id) in result.used_chunk_ids
+    assert "不得收集非必要个人信息" in result.answer
+    assert "不得非法留存" in result.answer
+    assert "不得非法向他人提供" in result.answer
 
 
 def test_deterministic_answer_can_use_relevant_chunks_from_multiple_documents() -> None:
@@ -696,6 +816,121 @@ def test_orchestrator_marks_table_fastpath_confidence_high() -> None:
     )
 
     assert CopilotOrchestrator._compute_confidence([chunk], result) == "high"
+
+
+def test_orchestrator_regrounds_unsupported_answer_to_selected_evidence() -> None:
+    chunk = _chunk(
+        content=(
+            "按照依法制定的劳动规章制度和依法签订的集体合同实施跨境人力资源管理，"
+            "确需向境外提供员工个人信息的，免予申报数据出境安全评估、"
+            "订立个人信息出境标准合同、通过个人信息保护认证。"
+        ),
+        preview=(
+            "按照依法制定的劳动规章制度和依法签订的集体合同实施跨境人力资源管理，"
+            "确需向境外提供员工个人信息的，免予申报数据出境安全评估、"
+            "订立个人信息出境标准合同、通过个人信息保护认证。"
+        ),
+        document_title="促进和规范数据跨境流动规定",
+        section_title="第五条",
+    )
+    router_result = RouterDecisionResult(
+        decision=RouterDecision(intent="topic_qa", needs_citations=True, topic="跨境人力资源管理适用哪些数据出境规则？"),
+        provider_name="test-router",
+        model_name="test-router-model",
+        prompt_tokens=8,
+        completion_tokens=2,
+        latency_ms=1,
+        raw_payload={},
+    )
+    generation = CopilotOrchestrator._merge_answer_metrics(
+        router_result,
+        AnswerGenerationResult(
+            answer="企业位于自由贸易试验区内即可免予安全评估、标准合同或个人信息保护认证。",
+            insufficient_evidence=False,
+            evidence_conflict=False,
+            used_chunk_ids=[str(chunk.chunk_id)],
+            answer_basis="llm",
+            provider_name="openai-compatible",
+            model_name="test-answer-model",
+            prompt_tokens=12,
+            completion_tokens=12,
+            latency_ms=2,
+            raw_payload={"used_chunk_ids": [str(chunk.chunk_id)]},
+        ),
+    )
+
+    enforced = CopilotOrchestrator._enforce_grounded_answer_support(
+        question="跨境人力资源管理适用哪些数据出境规则？",
+        router_result=router_result,
+        generation=generation,
+        selected_chunks=[chunk],
+        history_lines=[],
+        conversation_context=None,
+    )
+
+    assert enforced.insufficient_evidence is False
+    assert enforced.answer != generation.answer
+    assert "自由贸易试验区" not in enforced.answer
+    assert "跨境人力资源管理" in enforced.answer
+    assert "员工个人信息" in enforced.answer
+    assert (enforced.raw_payload or {})["grounding_enforcement"]["reason"] == "unsupported_answer_claims"
+
+
+def test_orchestrator_recovers_single_document_refusal_with_deterministic_grounding() -> None:
+    chunk = _chunk(
+        content=(
+            "绿色工厂申报可采用自评价或委托具备评价能力的第三方机构开展评价。"
+            "第三方评价机构应当对所出具评价结果的真实性和准确性负责。"
+        ),
+        preview=(
+            "绿色工厂申报可采用自评价或委托具备评价能力的第三方机构开展评价。"
+            "第三方评价机构应当对所出具评价结果的真实性和准确性负责。"
+        ),
+        document_title="绿色工厂梯度培育及管理暂行办法",
+        section_title="申报与评价",
+    )
+    router_result = RouterDecisionResult(
+        decision=RouterDecision(intent="topic_qa", needs_citations=True, topic="绿色工厂申报评价方式和第三方机构责任是什么？"),
+        provider_name="test-router",
+        model_name="test-router-model",
+        prompt_tokens=8,
+        completion_tokens=2,
+        latency_ms=1,
+        raw_payload={},
+    )
+    generation = CopilotOrchestrator._merge_answer_metrics(
+        router_result,
+        AnswerGenerationResult(
+            answer="根据提供的证据，没有找到关于绿色工厂申报评价方式或第三方评价机构责任的相关信息。",
+            insufficient_evidence=True,
+            evidence_conflict=False,
+            used_chunk_ids=[],
+            answer_basis="llm_refusal",
+            provider_name="openai-compatible",
+            model_name="test-answer-model",
+            prompt_tokens=12,
+            completion_tokens=12,
+            latency_ms=2,
+            raw_payload={"reason": "insufficient_relevant_evidence"},
+        ),
+    )
+
+    recovered = CopilotOrchestrator._recover_from_empty_citation_selection(
+        question="绿色工厂申报评价方式和第三方机构责任是什么？",
+        router_result=router_result,
+        generation=generation,
+        generation_chunks=[chunk],
+        candidate_chunks=[chunk],
+        history_lines=[],
+        conversation_context=None,
+    )
+
+    assert recovered is not None
+    assert recovered.insufficient_evidence is False
+    assert "自评价" in recovered.answer
+    assert "第三方机构" in recovered.answer
+    assert (recovered.raw_payload or {})["grounding_enforcement"]["reason"] == "empty_citation_recovery"
+
 
 def test_orchestrator_prefers_structured_table_fastpath_for_complex_supplier_question() -> None:
     supplier_doc_id = uuid4()
