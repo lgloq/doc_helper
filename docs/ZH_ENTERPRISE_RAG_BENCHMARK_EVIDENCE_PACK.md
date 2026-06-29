@@ -4,10 +4,10 @@
 
 本文档记录当前中文企业文档 RAG 评测集、质量校验、指标结果和复现命令。该评测集用于验证本仓库的权限感知 RAG 链路，覆盖文档检索、证据召回、引用选择、答案支撑和权限隔离等关键环节。
 
-正式的 `smoke / full / hard / latency` 分层定义、case 规模和可信度规则见：
+更详细的 `smoke / full / hard / latency` 分层定义、case 规模和可信度规则见：
 
 ```text
-docs/P4_BENCHMARK_LAYERS_AND_TRUST.md
+docs/BENCHMARK_LAYERS_AND_TRUST.md
 backend/data/benchmark_raw/zh_enterprise/v1_benchmark_layers.json
 ```
 
